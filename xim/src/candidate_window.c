@@ -4,52 +4,71 @@
 #include <string.h>
 #include <xcb/xproto.h>
 
-/* CSS 提供者:文件样式 + 动态 font-size 覆盖(设置即时生效) */
+/* 检测 GTK 当前有效主题是否为深色。GTK 深色主题的前景色是亮色,因此用
+ * 前景色亮度兜底;gtk-application-prefer-dark-theme 只是建议值,部分 XFCE
+ * 主题/设置不导出或不变更,不能只依赖它。 */
+static gboolean theme_is_dark(void)
+{
+    GtkSettings *settings = gtk_settings_get_default();
+    gboolean preferred = FALSE;
+    if (settings)
+        g_object_get(settings,
+                     "gtk-application-prefer-dark-theme", &preferred,
+                     NULL);
+
+    GtkWidget *probe = gtk_window_new(GTK_WINDOW_POPUP);
+    GtkStyleContext *ctx = gtk_widget_get_style_context(probe);
+    GdkRGBA color;
+    gtk_style_context_get_color(ctx, GTK_STATE_FLAG_NORMAL, &color);
+    gtk_widget_destroy(probe);
+    double luminance = 0.2126 * color.red + 0.7152 * color.green +
+                       0.0722 * color.blue;
+    return preferred || luminance > 0.55;
+}
+
+/* CSS 提供者:自适应系统明暗主题;文件样式仍可覆盖主题细节 */
 static void apply_css(CandidateWindow *cw)
 {
     GtkCssProvider *provider = gtk_css_provider_new();
-    gchar *builtin =
-        (gchar *)".lyy-outer { background: rgba(0,0,0,0); }\n"
-                 ".lyy-frame { background: rgba(250,250,250,0.98);"
-                 " border: 1px solid #b0b0b0; border-radius: 8px;"
-                 " padding: 6px 10px;"
-                 " box-shadow: 0 4px 16px rgba(0,0,0,0.35); }\n"
-                 ".lyy-header { margin-bottom: 2px; }\n"
-                 ".lyy-preedit { color: #242424; font-weight: bold; }\n"
-                 ".lyy-page { color: #6e6e6e; margin-left: 10px; }\n"
-                 ".lyy-row { padding: 1px 4px; border-radius: 4px; }\n"
-                 ".lyy-first { background: #3584e4; }\n"
-                 ".lyy-num { color: #8a8a8a; margin-right: 6px; }\n"
-                 ".lyy-first .lyy-num { color: #dce8f7; }\n"
-                 ".lyy-word { color: #242424; }\n"
-                 ".lyy-first .lyy-word { color: #ffffff; font-weight: bold; }\n"
-                 ".lyy-comment { color: #707070; margin-left: 10px; }\n"
-                 ".lyy-first .lyy-comment { color: #dce8f7; }\n";
+    const char *theme = theme_is_dark()
+        ? ".lyy-frame { background: rgba(32,32,32,0.98);"
+          " border-color: #4d4d4d; }\n"
+          ".lyy-preedit,.lyy-word { color: #f2f2f2; }\n"
+          ".lyy-page,.lyy-num,.lyy-comment { color: #a8a8a8; }\n"
+        : ".lyy-frame { background: rgba(250,250,250,0.98);"
+          " border-color: #b0b0b0; }\n"
+          ".lyy-preedit,.lyy-word { color: #242424; }\n"
+          ".lyy-page,.lyy-num,.lyy-comment { color: #707070; }\n";
 
-    gchar *css;
+    gchar *builtin =
+        g_strdup_printf(".lyy-outer { background: rgba(0,0,0,0); }\n"
+                        ".lyy-frame { border: 1px solid; border-radius: 8px;"
+                        " padding: 6px 10px;"
+                        " box-shadow: 0 4px 16px rgba(0,0,0,0.35); }\n"
+                        ".lyy-header { margin-bottom: 2px; }\n"
+                        ".lyy-row { padding: 1px 4px; border-radius: 4px; }\n"
+                        ".lyy-first { background: #3584e4; }\n"
+                        ".lyy-first .lyy-num,.lyy-first .lyy-word,"
+                        ".lyy-first .lyy-comment { color: #ffffff;"
+                        " font-weight: bold; }\n"
+                        "%s", theme);
+
+    gchar *css = NULL;
     gchar *file_css = NULL;
     if (cw->css_dir[0]) {
         char path[1200];
         snprintf(path, sizeof(path), "%s/candidate.css", cw->css_dir);
-        /* 读样式文件;失败回退内置样式 */
         gsize len = 0;
-        if (g_file_get_contents(path, &file_css, &len, NULL) && file_css) {
-            /* 贴边阴影/高亮主题以文件为准(运维可改),兜底类追加在后 */
-            css = g_strdup_printf("%s\n", file_css);
-        } else {
-            css = g_strdup(builtin);
-        }
-    } else {
-        css = g_strdup(builtin);
+        if (g_file_get_contents(path, &file_css, &len, NULL) && file_css)
+            css = g_strdup(file_css);
     }
-    gchar *with_font = g_strdup_printf("%s.lyy-preedit { font-size: %dpx; }"
-                                       ".lyy-word { font-size: %dpx; }"
-                                       ".lyy-num { font-size: %dpx; }"
-                                       ".lyy-comment { font-size: %dpx; }"
-                                       ".lyy-page { font-size: %dpx; }\n",
-                                       css, cw->font_size, cw->font_size,
-                                       cw->font_size - 2,
-                                       cw->font_size - 2, cw->font_size - 2);
+    if (!css)
+        css = g_steal_pointer(&builtin);
+
+    gchar *with_font = g_strdup_printf(
+        "%s\n.lyy-preedit,.lyy-word { font-size: %dpx; }\n"
+        ".lyy-num,.lyy-comment,.lyy-page { font-size: %dpx; }\n",
+        css, cw->font_size, cw->font_size - 2);
     gtk_css_provider_load_from_data(provider, with_font, -1, NULL);
     gtk_style_context_add_provider_for_screen(
         gdk_screen_get_default(), GTK_STYLE_PROVIDER(provider),
@@ -57,7 +76,15 @@ static void apply_css(CandidateWindow *cw)
     g_free(with_font);
     g_free(css);
     g_free(file_css);
+    g_free(builtin);
     g_object_unref(provider);
+}
+
+/* 主题切换在 X11/GTK3 没有统一信号;低频复查让候选窗在运行中跟随系统切换 */
+static gboolean on_theme_timer(gpointer user_data)
+{
+    apply_css((CandidateWindow *)user_data);
+    return G_SOURCE_CONTINUE;
 }
 
 /* 光标跟随:80ms 轮询 xcb_query_pointer(root-window style 下无 spot 通知) */
@@ -174,6 +201,7 @@ void lyy_candwin_init(CandidateWindow *cw, xcb_connection_t *conn,
     cw->row_count = 0;
 
     apply_css(cw);
+    cw->theme_timer = g_timeout_add_seconds(5, on_theme_timer, cw);
 }
 
 void lyy_candwin_set_font_size(CandidateWindow *cw, int font_size)
@@ -239,6 +267,8 @@ void lyy_candwin_commit_layout(CandidateWindow *cw)
         gtk_widget_show_all(cw->win);
         on_pos_timer(cw); /* 先定位一次再等轮询 */
         cw->pos_timer = g_timeout_add(80, on_pos_timer, cw);
+        if (!cw->theme_timer)
+            cw->theme_timer = g_timeout_add_seconds(5, on_theme_timer, cw);
     }
 }
 
@@ -247,6 +277,10 @@ void lyy_candwin_hide(CandidateWindow *cw)
     if (cw->pos_timer) {
         g_source_remove(cw->pos_timer);
         cw->pos_timer = 0;
+    }
+    if (cw->theme_timer) {
+        g_source_remove(cw->theme_timer);
+        cw->theme_timer = 0;
     }
     if (gtk_widget_get_visible(cw->win))
         gtk_widget_hide(cw->win);

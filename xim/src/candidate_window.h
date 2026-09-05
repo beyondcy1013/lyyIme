@@ -29,6 +29,7 @@ typedef struct CandidateWindow {
     GtkWidget *comment[LYY_MAX_ROWS]; /* 注释 */
     int row_count;
     guint pos_timer;
+    guint theme_timer;  /* 低频复查 GTK 明暗主题变化 */
     xcb_connection_t *conn;
     xcb_window_t root;
     int font_size;

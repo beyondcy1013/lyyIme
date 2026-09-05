@@ -1,25 +1,22 @@
 /*
- * lyyime 候选窗样式(对齐主流输入法:高亮首选、圆角、贴边阴影)
- * 主题细节以本文件为准(可运维调整);字体大小由程序按设置动态追加覆盖。
- * GTK3 CSS:box-shadow 支持于非窗口部件;窗口本体透明需 RGBA visual
- * (无合成器时自动回退,见 candidate_window.c)。
+ * lyyime 候选窗样式(自适应 GTK 明暗主题;主题细节可在此覆盖)
+ * 动态颜色和字体大小由 candidate_window.c 注入;本文件保留圆角、间距、
+ * 高亮等布局基准,避免旧安装的固定浅色文件影响新版本自适应行为。
+ * GTK3 CSS:窗口透明需 RGBA visual(无合成器时自动回退)。
  */
 .lyy-outer { background: rgba(0,0,0,0); }
 .lyy-frame {
-    background: rgba(250,250,250,0.98);
-    border: 1px solid #b0b0b0;
+    border: 1px solid;
     border-radius: 8px;
     padding: 6px 10px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.35);
 }
 .lyy-header { margin-bottom: 2px; }
-.lyy-preedit { color: #242424; font-weight: bold; }
-.lyy-page { color: #6e6e6e; margin-left: 10px; }
 .lyy-row { padding: 1px 4px; border-radius: 4px; }
 .lyy-first { background: #3584e4; }
-.lyy-num { color: #8a8a8a; margin-right: 6px; }
-.lyy-first .lyy-num { color: #dce8f7; }
-.lyy-word { color: #242424; }
-.lyy-first .lyy-word { color: #ffffff; font-weight: bold; }
-.lyy-comment { color: #707070; margin-left: 10px; }
-.lyy-first .lyy-comment { color: #dce8f7; }
+.lyy-first .lyy-num,
+.lyy-first .lyy-word,
+.lyy-first .lyy-comment {
+    color: #ffffff;
+    font-weight: bold;
+}

@@ -1,0 +1,15 @@
+[package]
+name = "lyyime-core"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+# 依赖刻意保持最小:效果流 JSON 手工拼装(保证键序与合同一字不差),
+# serde 仅用于 config.toml 反序列化,serde_json 仅用于 meta.json 校验。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

@@ -1,0 +1,21 @@
+# 构建产物
+/target/
+# xim(C)构建目录与机制探针二进制
+/xim/build/
+/tests/e2e/x11grab_probe
+/tests/e2e/x11grab_probe_echo
+*.o
+*.a
+# dicttool 产物(构建时生成)
+/data/runtime/*
+!/data/runtime/.gitkeep
+# 下载的原始词典缓存(大文件)
+/dicts/raw/
+/dicts/cache/
+# 运行时
+*.log
+__pycache__/
+*.pyc
+# vendor 内的生成文件(Makefile 有生成兜底)
+/xim/vendor/xcb-imdkit/libxcb-imdkit.a
+/xim/vendor/xcb-imdkit/src/xcbimdkit_export.h

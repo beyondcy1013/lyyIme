@@ -1,0 +1,18 @@
+[package]
+name = "lyyime-doctor"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "lyyime_doctor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lyyime-doctor"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }

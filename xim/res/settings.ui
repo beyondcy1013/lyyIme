@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  lyyime-xim 设置对话框(GtkBuilder 格式,GTK3)
+  项目:候选数 / 混合英文 / 自动直通 / 中文标点 / 学习开关 / 字体大小 / 开机自启
+  控件 id 与 src/settings.c 一一对应;按钮行为:确定=保存并即时生效,取消=还原。
+-->
+<interface domain="lyyime">
+  <requires lib="gtk+" version="3.10"/>
+  <object class="GtkAdjustment" id="adj_page_size">
+    <property name="lower">1</property>
+    <property name="upper">9</property>
+    <property name="step_increment">1</property>
+    <property name="page_increment">1</property>
+  </object>
+  <object class="GtkAdjustment" id="adj_font_size">
+    <property name="lower">10</property>
+    <property name="upper">28</property>
+    <property name="step_increment">1</property>
+    <property name="page_increment">2</property>
+  </object>
+  <object class="GtkWindow" id="settings_window">
+    <property name="title">lyyIme 输入法设置</property>
+    <property name="resizable">False</property>
+    <property name="border-width">14</property>
+    <child>
+      <object class="GtkBox" id="root_box">
+        <property name="visible">True</property>
+        <property name="orientation">vertical</property>
+        <property name="spacing">10</property>
+        <child>
+          <object class="GtkGrid" id="grid">
+            <property name="visible">True</property>
+            <property name="row-spacing">8</property>
+            <property name="column-spacing">12</property>
+            <child>
+              <object class="GtkLabel" id="lbl_page">
+                <property name="visible">True</property>
+                <property name="halign">start</property>
+                <property name="label">候选词数</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">0</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkSpinButton" id="spin_page_size">
+                <property name="visible">True</property>
+                <property name="adjustment">adj_page_size</property>
+                <property name="numeric">True</property>
+                <property name="width-chars">4</property>
+              </object>
+              <packing>
+                <property name="left-attach">1</property>
+                <property name="top-attach">0</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkLabel" id="lbl_font">
+                <property name="visible">True</property>
+                <property name="halign">start</property>
+                <property name="label">候选窗字体大小</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">1</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkSpinButton" id="spin_font_size">
+                <property name="visible">True</property>
+                <property name="adjustment">adj_font_size</property>
+                <property name="numeric">True</property>
+                <property name="width-chars">4</property>
+              </object>
+              <packing>
+                <property name="left-attach">1</property>
+                <property name="top-attach">1</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_mixed_english">
+                <property name="visible">True</property>
+                <property name="label">中英混合(无中文候选时给出英文词)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">2</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_auto_commit_english">
+                <property name="visible">True</property>
+                <property name="label">英文词自动直通(高置信词遇标点/空格直接上屏)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">3</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_chinese_punct">
+                <property name="visible">True</property>
+                <property name="label">中文标点(中文态输出 ,。?! 等)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">4</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_learning">
+                <property name="visible">True</property>
+                <property name="label">词频学习(记录上屏习惯并调整排序)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">5</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_autostart">
+                <property name="visible">True</property>
+                <property name="label">开机自启动(写入 ~/.config/autostart)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">6</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButtonBox" id="btnbox">
+            <property name="visible">True</property>
+            <property name="layout-style">end</property>
+            <property name="spacing">8</property>
+            <child>
+              <object class="GtkButton" id="btn_cancel">
+                <property name="visible">True</property>
+                <property name="label">取消</property>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">False</property>
+                <property name="position">0</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkButton" id="btn_ok">
+                <property name="visible">True</property>
+                <property name="label">确定</property>
+                <property name="can-default">True</property>
+              </object>
+              <packing>
+                <property name="expand">False</property>
+                <property name="fill">False</property>
+                <property name="position">1</property>
+              </packing>
+            </child>
+          </object>
+          <packing>
+            <property name="expand">False</property>
+            <property name="fill">False</property>
+            <property name="position">1</property>
+          </packing>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>

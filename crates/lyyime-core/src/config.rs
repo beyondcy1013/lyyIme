@@ -1,0 +1,263 @@
+//! 全局配置(`~/.config/lyyime/config.toml`),doctor / app / ibus 引擎共用(ARCHITECTURE.md §4)。
+//!
+//! 设计要点:
+//! - 所有字段都有默认值,配置文件只写需要改的项(缺项回退默认);
+//! - 文件缺失 → 返回默认配置(正常首次使用,不是错误);
+//! - 文件损坏/取值非法 → 返回 `Err`(消息为人话),调用方可据此提示并回退默认值;
+//! - [`Config::example_toml`] 输出带全部中文注释的模板,供安装器/设置界面生成初始配置。
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
+use crate::types::Mode;
+
+/// 引擎配置(字段语义见各注释;与 config.toml 一一对应)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    /// 启动时的默认模式(cn/en);`Engine::set_config` 会把当前模式重置为该值。
+    pub mode: Mode,
+    /// 候选窗每页条数,1–9(数字键选词)。
+    pub page_size: usize,
+    /// 中英混合:缓冲无任何中文命中时,给出英文词候选。
+    pub mixed_en: bool,
+    /// 混合直通:缓冲本身是高频英文词(前 [`Config::en_freq_top_n`] 名)时,
+    /// 遇空格/标点自动上屏原词,而不是顶屏更长的英文候选。
+    pub mixed_auto_commit: bool,
+    /// 中文态输出中文标点(关闭则标点一律直通)。
+    pub cn_punct: bool,
+    /// 用户词学习:累计到 user.tsv 并参与加成排序。
+    pub learning: bool,
+    /// 用户词典路径覆盖;None = 默认 `~/.local/share/lyyime/user.tsv`。
+    pub user_dict: Option<PathBuf>,
+    /// 词库目录覆盖;None = 由宿主决定(即 `Engine::new` 的入参)。
+    pub data_dir: Option<PathBuf>,
+    /// 英文自动上屏的高频词名次上限(词频表前 N 名)。
+    pub en_freq_top_n: usize,
+    /// 有中文命中时仍以英文候选/直通的名次上限(修订 §5.C:前 N 名完整英文词)。
+    pub mixed_auto_commit_top_n: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Chinese,
+            page_size: 5,
+            mixed_en: true,
+            mixed_auto_commit: true,
+            cn_punct: true,
+            learning: true,
+            user_dict: None,
+            data_dir: None,
+            en_freq_top_n: 2000,
+            mixed_auto_commit_top_n: 500,
+        }
+    }
+}
+
+/// TOML 中间层:字段全可选,缺项落到默认值。
+/// 注意:`#[serde(default)]` 以本类型 `Default` 为底,而这里手动实现为
+/// `Config::default()` 的镜像——保证只写一项的配置文件,其余项仍是官方默认(而非零值)。
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(default)]
+struct ConfigToml {
+    mode: String,
+    page_size: usize,
+    mixed_en: bool,
+    mixed_auto_commit: bool,
+    cn_punct: bool,
+    learning: bool,
+    user_dict: Option<String>,
+    data_dir: Option<String>,
+    en_freq_top_n: usize,
+    mixed_auto_commit_top_n: usize,
+}
+
+impl Default for ConfigToml {
+    fn default() -> Self {
+        ConfigToml::from(&Config::default())
+    }
+}
+
+impl From<&Config> for ConfigToml {
+    fn from(c: &Config) -> Self {
+        Self {
+            mode: match c.mode {
+                Mode::Chinese => "cn".to_string(),
+                Mode::English => "en".to_string(),
+            },
+            page_size: c.page_size,
+            mixed_en: c.mixed_en,
+            mixed_auto_commit: c.mixed_auto_commit,
+            cn_punct: c.cn_punct,
+            learning: c.learning,
+            user_dict: c.user_dict.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            data_dir: c.data_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            en_freq_top_n: c.en_freq_top_n,
+            mixed_auto_commit_top_n: c.mixed_auto_commit_top_n,
+        }
+    }
+}
+
+impl Config {
+    /// 读取 TOML 配置文件。
+    ///
+    /// - 文件不存在:`Ok(Config::default())`(首次使用,属正常);
+    /// - 文件损坏/字段非法:`Err`(人话消息,提示可回退默认);
+    /// - 部分字段缺失:缺失项取默认值。
+    pub fn load(path: &Path) -> Result<Config, Error> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => {
+                return Err(Error::new(format!(
+                    "无法读取配置文件 {}: {e}(请检查文件权限)",
+                    path.display()
+                )))
+            }
+        };
+        let raw: ConfigToml = toml::from_str(&text).map_err(|e| {
+            Error::new(format!(
+                "配置文件 {} 已损坏: {e};可修正该文件或删除后重启,程序将回退默认配置",
+                path.display()
+            ))
+        })?;
+        raw.into_config(path)
+    }
+
+    /// 生成带全部中文注释的默认配置模板(供安装器/设置界面初始化 config.toml)。
+    pub fn example_toml() -> String {
+        let d = Config::default();
+        let mut s = String::new();
+        s.push_str("# lyyIme 配置文件(~/.config/lyyime/config.toml)\n");
+        s.push_str("# 全部字段可省略,省略即使用下方默认值;修改保存后对宿主即时生效。\n\n");
+        let _ = writeln!(s, "# 启动默认模式:cn = 中文,en = 英文(Shift 单击可随时切换)");
+        let _ = writeln!(s, "mode = \"{}\"", if d.mode == Mode::Chinese { "cn" } else { "en" });
+        let _ = writeln!(s, "\n# 候选窗每页条数(1–9,数字键选词)");
+        let _ = writeln!(s, "page_size = {}", d.page_size);
+        let _ = writeln!(s, "\n# 中英混合:输入无中文命中时给出英文词候选");
+        let _ = writeln!(s, "mixed_en = {}", d.mixed_en);
+        let _ = writeln!(
+            s,
+            "\n# 混合直通:高频英文词(见 en_freq_top_n)遇空格/标点自动上屏原词"
+        );
+        let _ = writeln!(s, "mixed_auto_commit = {}", d.mixed_auto_commit);
+        let _ = writeln!(s, "\n# 中文态输出中文标点(如 , 。 ?;关闭则标点原样直通)");
+        let _ = writeln!(s, "cn_punct = {}", d.cn_punct);
+        let _ = writeln!(s, "\n# 用户词学习:上屏候选累计词频,越用越顺手");
+        let _ = writeln!(s, "learning = {}", d.learning);
+        let _ = writeln!(
+            s,
+            "\n# 用户词典路径覆盖(默认 ~/.local/share/lyyime/user.tsv;留空使用默认)"
+        );
+        let _ = writeln!(
+            s,
+            "user_dict = {}",
+            d.user_dict.as_ref().map(|p| format!("\"{}\"", p.display())).unwrap_or_else(|| "\"\"".into())
+        );
+        let _ = writeln!(s, "\n# 词库目录覆盖(留空使用宿主默认,如 data/runtime/)");
+        let _ = writeln!(
+            s,
+            "data_dir = {}",
+            d.data_dir.as_ref().map(|p| format!("\"{}\"", p.display())).unwrap_or_else(|| "\"\"".into())
+        );
+        let _ = writeln!(
+            s,
+            "\n# 英文自动上屏的高频词名次上限(词频表前 N 名才自动直通)"
+        );
+        let _ = writeln!(s, "en_freq_top_n = {}", d.en_freq_top_n);
+        let _ = writeln!(
+            s,
+            "\n# 中英混合:有中文命中时,词频前 N 名的完整英文词仍给出候选并可直接直通"
+        );
+        let _ = writeln!(s, "mixed_auto_commit_top_n = {}", d.mixed_auto_commit_top_n);
+        s
+    }
+
+    /// 取默认用户词典路径:`~/.local/share/lyyime/user.tsv`(无 HOME 时退回当前目录下的相对路径)。
+    pub fn default_user_dict_path() -> PathBuf {
+        match std::env::var_os("HOME") {
+            Some(h) if !h.is_empty() => {
+                PathBuf::from(h).join(".local/share/lyyime/user.tsv")
+            }
+            _ => PathBuf::from(".local/share/lyyime/user.tsv"),
+        }
+    }
+
+    /// 取默认配置文件路径:`~/.config/lyyime/config.toml`(无 HOME 时返回 None)。
+    pub fn default_config_path() -> Option<PathBuf> {
+        match std::env::var_os("HOME") {
+            Some(h) if !h.is_empty() => Some(PathBuf::from(h).join(".config/lyyime/config.toml")),
+            _ => None,
+        }
+    }
+}
+
+impl ConfigToml {
+    /// 校验并转换为 `Config`;非法取值给出人话错误。
+    fn into_config(self, path: &Path) -> Result<Config, Error> {
+        let mode = match self.mode.trim().to_lowercase().as_str() {
+            "" | "cn" | "chinese" | "zh" => Mode::Chinese,
+            "en" | "english" => Mode::English,
+            other => {
+                return Err(Error::new(format!(
+                    "配置文件 {} 中 mode = \"{other}\" 不合法,可选值:cn / en",
+                    path.display()
+                )))
+            }
+        };
+        if self.page_size == 0 || self.page_size > 9 {
+            return Err(Error::new(format!(
+                "配置文件 {} 中 page_size = {} 不合法,需在 1–9 之间(数字键选词)",
+                path.display(),
+                self.page_size
+            )));
+        }
+        if self.en_freq_top_n == 0 {
+            return Err(Error::new(format!(
+                "配置文件 {} 中 en_freq_top_n = 0 不合法,至少为 1",
+                path.display()
+            )));
+        }
+        if self.mixed_auto_commit_top_n == 0 {
+            return Err(Error::new(format!(
+                "配置文件 {} 中 mixed_auto_commit_top_n = 0 不合法,至少为 1",
+                path.display()
+            )));
+        }
+        Ok(Config {
+            mode,
+            page_size: self.page_size,
+            mixed_en: self.mixed_en,
+            mixed_auto_commit: self.mixed_auto_commit,
+            cn_punct: self.cn_punct,
+            learning: self.learning,
+            user_dict: self
+                .user_dict
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from),
+            data_dir: self
+                .data_dir
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from),
+            en_freq_top_n: self.en_freq_top_n,
+            mixed_auto_commit_top_n: self.mixed_auto_commit_top_n,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_toml_可被完整解析回默认值() {
+        let text = Config::example_toml();
+        assert!(text.contains("page_size = 5"));
+        let raw: ConfigToml = toml::from_str(&text).unwrap();
+        let cfg = raw.into_config(Path::new("x")).unwrap();
+        assert_eq!(cfg, Config::default());
+    }
+}

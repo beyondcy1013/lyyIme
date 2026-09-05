@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- lyyIme ibus 组件注册文件(静态 engine 模式)。
+
+     字段结构参考本机 /usr/share/ibus/component/libpinyin.xml
+     (出处:docs/RESEARCH.md §1.1)。安装时由 install.sh 把下文三个
+     AT 包围的占位符(ENGINE_DIR、ICON_DIR、SETUP)替换为真实绝对路径,
+     写入合同位置(用户级 ~/.local/share/ibus/component/ 或系统级
+     /usr/local/share/ibus/component/),并桥接一份到 ibus 1.5.29 的
+     实际扫描目录 /usr/share/ibus/component(该版源码 src/ibusregistry.c
+     只扫 IBUS_DATA_DIR,用户目录支持被上游 "#if 0" 禁用)。
+     注册/变更后需执行 `ibus write-cache` 并 `ibus restart` 生效。
+-->
+<component>
+	<name>org.freedesktop.IBus.Lyyime</name>
+	<description>lyyIme Component</description>
+	<exec>@ENGINE_DIR@/lyyime.py --ibus</exec>
+	<version>0.1.0</version>
+	<author>lyyIme contributors</author>
+	<license>GPLv3</license>
+	<textdomain>lyyime</textdomain>
+
+	<engines>
+		<engine>
+			<name>lyyime</name>
+			<language>zh_CN</language>
+			<license>GPLv3</license>
+			<author>lyyIme contributors</author>
+			<icon>@ICON_DIR@/lyyime.svg</icon>
+			<layout>default</layout>
+			<longname>lyyIme 五笔拼音</longname>
+			<description>lyyIme 五笔/拼音/英文混合输入(万能五笔式单字母空间,Shift 单击切中英)</description>
+			<rank>70</rank>
+			<symbol>伍</symbol>
+			<icon_prop_key>InputMode</icon_prop_key>
+			<setup>@SETUP@</setup>
+			<textdomain>lyyime</textdomain>
+		</engine>
+	</engines>
+</component>

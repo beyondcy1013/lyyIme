@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# -*- coding: utf-8 -*-
+# lyyime-setup —— lyyIme 设置入口(component XML 的 <setup> 与托盘"设置"菜单指向此脚本)。
+#
+# 职责:拉起 lyyime-app 的设置窗;lyyime-app 未安装时给出人话提示,
+# 不静默失败(对话框优先,无对话框环境退回终端输出)。
+#
+# 借鉴出处:ibus-table 的 ibus-setup-table 入口模式(RESEARCH.md §1.1)。
+
+set -euo pipefail
+
+MSG="lyyIme 设置界面由 lyyime-app(Mode B 应用组件)提供,当前未安装。\n请先安装:scripts/install-all.sh,或参阅 ibus-engine/README.md。"
+
+if command -v lyyime-app >/dev/null 2>&1; then
+    exec lyyime-app --settings "$@"
+fi
+
+# lyyime-app 不在 PATH:依次尝试图形提示 → 终端输出
+if command -v zenity >/dev/null 2>&1; then
+    zenity --info --title="lyyIme 未安装设置组件" --no-wrap --text="$(printf '%b' "$MSG")" || true
+elif command -v kdialog >/dev/null 2>&1; then
+    kdialog --title "lyyIme 未安装设置组件" --msgbox "$(printf '%b' "$MSG")" || true
+else
+    printf '%b\n' "$MSG" >&2
+    exit 1
+fi

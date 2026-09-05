@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lyyime-core",
+    "crates/lyyime-dicttool",
+    "crates/lyyime-doctor",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["lyy"]
+description = "Linux 五笔/拼音混合输入法(ibus 引擎 + X11 独立外挂双模式)"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }

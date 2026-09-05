@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- lyyIme 英文态状态图标(托盘 InputMode 属性):灰底"EN"。
+     viewBox 16x16,16/24/48 缩放兼容。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect x="0.5" y="0.5" width="15" height="15" rx="3.2"
+        fill="#9a9996" stroke="#77767b" stroke-width="1"/>
+  <text x="8" y="11.6" font-family="DejaVu Sans, sans-serif"
+        font-size="8.5" font-weight="bold" fill="#ffffff"
+        text-anchor="middle">EN</text>
+</svg>

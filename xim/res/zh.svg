@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  lyyIme 托盘图标(中文态)"中"
-  风格:扁平圆角方形,GNOME Adwaita 蓝色系;StatusIcon 经 gdk-pixbuf(librsvg)渲染
--->
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <rect x="1" y="1" width="22" height="22" rx="5" fill="#3584e4"/>
-  <text x="12" y="17" font-family="sans-serif" font-size="15" font-weight="bold"
-        fill="#ffffff" text-anchor="middle">中</text>
+<!-- lyyIme 图标:字形已转矢量路径(勿改回 <text>,大尺寸会糊) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <rect x="0" y="0" width="24" height="24" rx="5" fill="#3584e4"/>
+  <path d="M13.054079999999999 12.656640000000001V8.941440000000002H16.95936V12.656640000000001ZM6.9887999999999995 12.656640000000001V8.941440000000002H10.8768V12.656640000000001ZM13.054079999999999 6.919680000000001V3.9302400000000013H10.8768V6.919680000000001H4.9152V15.628800000000002H6.9887999999999995V14.678400000000002H10.8768V20.069760000000002H13.054079999999999V14.678400000000002H16.95936V15.5424H19.11936V6.919680000000001Z" fill="#ffffff"/>
 </svg>

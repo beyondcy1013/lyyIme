@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- lyyIme 英文态状态图标(托盘 InputMode 属性):灰底"EN"。
-     viewBox 16x16,16/24/48 缩放兼容。 -->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <rect x="0.5" y="0.5" width="15" height="15" rx="3.2"
-        fill="#9a9996" stroke="#77767b" stroke-width="1"/>
-  <text x="8" y="11.6" font-family="DejaVu Sans, sans-serif"
-        font-size="8.5" font-weight="bold" fill="#ffffff"
-        text-anchor="middle">EN</text>
+<!-- lyyIme 图标:字形已转矢量路径(勿改回 <text>,大尺寸会糊) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="0" y="0" width="64" height="64" rx="12" fill="#3584e4"/>
+  <path d="M4.766720000000001 49.5104H26.19392V43.796479999999995H11.58656V34.67264H23.56736V28.95872H11.58656V21.07904H25.68704V15.411200000000001H4.766720000000001Z" fill="#ffffff"/><path d="M33.10592 49.5104H39.55712V35.82464C39.55712 31.90784 39.05024 27.6224 38.72768 23.936H38.958079999999995L42.41408 31.262719999999998L52.2752 49.5104H59.1872V15.411200000000001H52.736V29.0048C52.736 32.875519999999995 53.24288 37.39136 53.61152 40.93952H53.381119999999996L49.971199999999996 33.56672L40.064 15.411200000000001H33.10592Z" fill="#ffffff"/>
 </svg>

@@ -19,21 +19,39 @@ echo "== 安装到 $PREFIX =="
 install -D -m 0755 "$XIM_DIR/build/bin/lyyime-xim" "$PREFIX/bin/lyyime-xim"
 install -D -m 0644 "$XIM_DIR/res/zh.svg" "$PREFIX/share/lyyime/icons/zh.svg"
 install -D -m 0644 "$XIM_DIR/res/en.svg" "$PREFIX/share/lyyime/icons/en.svg"
+# 主题图标(hicolor):应用菜单/桌面图标按名字查找
+install -D -m 0644 "$XIM_DIR/res/zh.svg" \
+    "$PREFIX/share/icons/hicolor/scalable/apps/lyyime-xim.svg"
 install -D -m 0644 "$XIM_DIR/res/settings.ui" "$PREFIX/share/lyyime/res/settings.ui"
 install -D -m 0644 "$XIM_DIR/res/candidate.css" "$PREFIX/share/lyyime/res/candidate.css"
 
-install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim-settings.desktop" <<EOF
+# 主启动器(应用菜单/桌面;重复点击=唤起已运行实例的设置窗)
+install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=lyyIme 独立外挂输入法
+Name[en]=lyyIme Standalone IME
+Comment=不依赖 ibus/fcitx 的 XIM 独立输入法(Mode B)
+Exec=$PREFIX/bin/lyyime-xim
+Icon=lyyime-xim
+Terminal=false
+Categories=Utility;System;
+Keywords=input;method;ime;chinese;输入法;五笔;拼音;
+StartupNotify=false
+DESKTOP
+
+install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim-settings.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=lyyIme 输入法设置
 Name[en]=lyyIme IM Settings
 Comment=设置 lyyIme 独立输入法外挂(XIM)
 Exec=$PREFIX/bin/lyyime-xim --settings
-Icon=$PREFIX/share/lyyime/icons/zh.svg
+Icon=lyyime-xim
 Terminal=false
 Categories=Settings;DesktopSettings;
 Keywords=input;method;ime;chinese;输入法;
-EOF
+DESKTOP
 
 # 刷新桌面数据库(存在才执行,幂等)
 if command -v update-desktop-database >/dev/null 2>&1; then

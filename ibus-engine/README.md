@@ -66,6 +66,7 @@ sudo ./install.sh --system --enable
 | `-` / `=`、PageUp/PageDown | 翻页(边界钳制,不循环) |
 | 标点 | 中文态出中文标点;有缓冲先顶首选;英文态放行 |
 | **Shift 单击** | 切换中/英(按下后无其它键即释放才算单击;带 Ctrl/Alt/Super 不算) |
+| **Shift(有缓冲)** | 先上屏当前缓冲的英文原串,不切换模式;随后 Shift release 不再判定单击 |
 | 英文态 | 全部直通;密码框(InputPurpose PASSWORD/PIN)永远全放行 |
 
 托盘图标右键菜单:**中英切换**(图标随中/EN 变化)、**设置**(拉起 `lyyime-app`,

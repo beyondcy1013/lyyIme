@@ -24,7 +24,7 @@ pub struct Config {
     /// 中英混合:缓冲无任何中文命中时,给出英文词候选。
     pub mixed_en: bool,
     /// 混合直通:缓冲本身是高频英文词(前 [`Config::en_freq_top_n`] 名)时,
-    /// 遇空格/标点自动上屏原词,而不是顶屏更长的英文候选。
+    /// 遇标点自动上屏原词;空格始终是确认键,顶屏当前首选。
     pub mixed_auto_commit: bool,
     /// 中文态输出中文标点(关闭则标点一律直通)。
     pub cn_punct: bool,
@@ -38,6 +38,8 @@ pub struct Config {
     pub en_freq_top_n: usize,
     /// 有中文命中时仍以英文候选/直通的名次上限(修订 §5.C:前 N 名完整英文词)。
     pub mixed_auto_commit_top_n: usize,
+    /// 满足四码后,再输入字母先上屏当前选中,剩余字母开启新组合。
+    pub commit_on_extra_after_four: bool,
 }
 
 impl Default for Config {
@@ -53,6 +55,7 @@ impl Default for Config {
             data_dir: None,
             en_freq_top_n: 2000,
             mixed_auto_commit_top_n: 500,
+            commit_on_extra_after_four: false,
         }
     }
 }
@@ -73,6 +76,7 @@ struct ConfigToml {
     data_dir: Option<String>,
     en_freq_top_n: usize,
     mixed_auto_commit_top_n: usize,
+    commit_on_extra_after_four: bool,
 }
 
 impl Default for ConfigToml {
@@ -93,10 +97,17 @@ impl From<&Config> for ConfigToml {
             mixed_auto_commit: c.mixed_auto_commit,
             cn_punct: c.cn_punct,
             learning: c.learning,
-            user_dict: c.user_dict.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            data_dir: c.data_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            user_dict: c
+                .user_dict
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            data_dir: c
+                .data_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
             en_freq_top_n: c.en_freq_top_n,
             mixed_auto_commit_top_n: c.mixed_auto_commit_top_n,
+            commit_on_extra_after_four: c.commit_on_extra_after_four,
         }
     }
 }
@@ -133,15 +144,22 @@ impl Config {
         let mut s = String::new();
         s.push_str("# lyyIme 配置文件(~/.config/lyyime/config.toml)\n");
         s.push_str("# 全部字段可省略,省略即使用下方默认值;修改保存后对宿主即时生效。\n\n");
-        let _ = writeln!(s, "# 启动默认模式:cn = 中文,en = 英文(Shift 单击可随时切换)");
-        let _ = writeln!(s, "mode = \"{}\"", if d.mode == Mode::Chinese { "cn" } else { "en" });
+        let _ = writeln!(
+            s,
+            "# 启动默认模式:cn = 中文,en = 英文(Shift 单击可随时切换)"
+        );
+        let _ = writeln!(
+            s,
+            "mode = \"{}\"",
+            if d.mode == Mode::Chinese { "cn" } else { "en" }
+        );
         let _ = writeln!(s, "\n# 候选窗每页条数(1–9,数字键选词)");
         let _ = writeln!(s, "page_size = {}", d.page_size);
         let _ = writeln!(s, "\n# 中英混合:输入无中文命中时给出英文词候选");
         let _ = writeln!(s, "mixed_en = {}", d.mixed_en);
         let _ = writeln!(
             s,
-            "\n# 混合直通:高频英文词(见 en_freq_top_n)遇空格/标点自动上屏原词"
+            "\n# 混合直通:高频英文词(见 en_freq_top_n)遇标点自动上屏原词"
         );
         let _ = writeln!(s, "mixed_auto_commit = {}", d.mixed_auto_commit);
         let _ = writeln!(s, "\n# 中文态输出中文标点(如 , 。 ?;关闭则标点原样直通)");
@@ -155,13 +173,19 @@ impl Config {
         let _ = writeln!(
             s,
             "user_dict = {}",
-            d.user_dict.as_ref().map(|p| format!("\"{}\"", p.display())).unwrap_or_else(|| "\"\"".into())
+            d.user_dict
+                .as_ref()
+                .map(|p| format!("\"{}\"", p.display()))
+                .unwrap_or_else(|| "\"\"".into())
         );
         let _ = writeln!(s, "\n# 词库目录覆盖(留空使用宿主默认,如 data/runtime/)");
         let _ = writeln!(
             s,
             "data_dir = {}",
-            d.data_dir.as_ref().map(|p| format!("\"{}\"", p.display())).unwrap_or_else(|| "\"\"".into())
+            d.data_dir
+                .as_ref()
+                .map(|p| format!("\"{}\"", p.display()))
+                .unwrap_or_else(|| "\"\"".into())
         );
         let _ = writeln!(
             s,
@@ -173,15 +197,22 @@ impl Config {
             "\n# 中英混合:有中文命中时,词频前 N 名的完整英文词仍给出候选并可直接直通"
         );
         let _ = writeln!(s, "mixed_auto_commit_top_n = {}", d.mixed_auto_commit_top_n);
+        let _ = writeln!(
+            s,
+            "\n# 满足四码后,再输入字母先上屏当前选中,后续字母开始新组合"
+        );
+        let _ = writeln!(
+            s,
+            "commit_on_extra_after_four = {}",
+            d.commit_on_extra_after_four
+        );
         s
     }
 
     /// 取默认用户词典路径:`~/.local/share/lyyime/user.tsv`(无 HOME 时退回当前目录下的相对路径)。
     pub fn default_user_dict_path() -> PathBuf {
         match std::env::var_os("HOME") {
-            Some(h) if !h.is_empty() => {
-                PathBuf::from(h).join(".local/share/lyyime/user.tsv")
-            }
+            Some(h) if !h.is_empty() => PathBuf::from(h).join(".local/share/lyyime/user.tsv"),
             _ => PathBuf::from(".local/share/lyyime/user.tsv"),
         }
     }
@@ -244,6 +275,7 @@ impl ConfigToml {
                 .map(PathBuf::from),
             en_freq_top_n: self.en_freq_top_n,
             mixed_auto_commit_top_n: self.mixed_auto_commit_top_n,
+            commit_on_extra_after_four: self.commit_on_extra_after_four,
         })
     }
 }

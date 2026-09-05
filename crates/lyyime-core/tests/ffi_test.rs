@@ -7,8 +7,8 @@ mod common;
 use common::{fixtures, TempDir};
 use lyyime_core::ffi::{
     lyyime_cand, lyyime_cand_comment, lyyime_free, lyyime_mode, lyyime_new, lyyime_process_key,
-    lyyime_reset, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR, LKEY_DIGIT, LKEY_ENTER,
-    LKEY_ESC, LKEY_OTHER, LKEY_PAGEDOWN, LKEY_PAGEUP, LKEY_PUNCT, LKEY_SHIFTPRESS, LKEY_SPACE,
+    lyyime_reset, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR, LKEY_DIGIT, LKEY_ENTER, LKEY_ESC,
+    LKEY_OTHER, LKEY_PAGEDOWN, LKEY_PAGEUP, LKEY_PUNCT, LKEY_SHIFTPRESS, LKEY_SPACE,
 };
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
@@ -52,7 +52,13 @@ impl FfiEngine {
     fn key(&mut self, key_id: c_int, chr: u32) -> String {
         let mut buf = vec![0u8; 8192];
         let n = unsafe {
-            lyyime_process_key(self.0, key_id, chr, buf.as_mut_ptr() as *mut c_char, buf.len() as i64)
+            lyyime_process_key(
+                self.0,
+                key_id,
+                chr,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i64,
+            )
         };
         assert!(n > 0, "process_key 返回 {n}");
         String::from_utf8_lossy(&buf[..(n - 1) as usize]).into_owned()
@@ -120,9 +126,8 @@ fn ffi_空格顶屏_commit与清除的json序列() {
 fn ffi_buffer不足_返回负的所需字节数() {
     let eng = FfiEngine::new(&fixtures());
     // NULL 缓冲探测:返回 -(所需字节数),同时该键已生效。
-    let probe = unsafe {
-        lyyime_process_key(eng.0, LKEY_CHAR, 'n' as u32, std::ptr::null_mut(), 0)
-    };
+    let probe =
+        unsafe { lyyime_process_key(eng.0, LKEY_CHAR, 'n' as u32, std::ptr::null_mut(), 0) };
     assert!(probe < 0);
     let need = (-probe) as usize;
     // reset 清状态后重放同一键:容量差 1 字节 → 不写入,仍返回 -needed。
@@ -154,7 +159,8 @@ fn ffi_buffer不足_返回负的所需字节数() {
     assert_eq!(n3, need as i64);
     assert_eq!(
         &big[..need - 1],
-        "[{\"t\":\"preedit\",\"s\":\"n\"},{\"t\":\"cands\",\"n\":2,\"page\":0,\"pages\":1}]".as_bytes()
+        "[{\"t\":\"preedit\",\"s\":\"n\"},{\"t\":\"cands\",\"n\":2,\"page\":0,\"pages\":1}]"
+            .as_bytes()
     );
     assert_eq!(big[need - 1], 0, "末尾应有 \\0");
 }
@@ -194,7 +200,10 @@ fn ffi_key_id映射_数字选词与标点翻页() {
     // Digit 约定(§3 v1.1):chr 传 '1'..'9' 的 ASCII 码点,core 按 chr-'0' 解码;
     // 下例 chr='2'(0x32)应选中当前页第 2 个候选。
     let json = eng.key(LKEY_DIGIT, '2' as u32);
-    assert!(json.contains("{\"t\":\"commit\",\"s\":\"尼\"}"), "数字 2 应选中尼:{json}");
+    assert!(
+        json.contains("{\"t\":\"commit\",\"s\":\"尼\"}"),
+        "数字 2 应选中尼:{json}"
+    );
     // 标点:空缓冲出中文标点。
     let json = eng.key(LKEY_PUNCT, ',' as u32);
     assert_eq!(json, "[{\"t\":\"commit\",\"s\":\",\"}]");
@@ -209,7 +218,13 @@ fn ffi_key_id映射_其余控制键() {
     assert!(json.contains("{\"t\":\"consumed\"}"), "{json}");
     assert!(json.contains("{\"t\":\"preedit\"}"), "{json}");
     // 空缓冲:Enter/Backspace/PageUp/PageDown/Other 均 pass。
-    for kid in [LKEY_ENTER, LKEY_BACKSPACE, LKEY_PAGEUP, LKEY_PAGEDOWN, LKEY_OTHER] {
+    for kid in [
+        LKEY_ENTER,
+        LKEY_BACKSPACE,
+        LKEY_PAGEUP,
+        LKEY_PAGEDOWN,
+        LKEY_OTHER,
+    ] {
         assert_eq!(eng.key(kid, 0), "[{\"t\":\"pass\"}]");
     }
     // ShiftPress 恒 consumed(单击判定在宿主)。
@@ -225,7 +240,13 @@ fn ffi_重试纪律_小缓冲needed不落状态_扩容重试与一次成功一�
     let json_of = |eng: &mut FfiEngine, key_id: c_int, chr: u32| {
         let mut buf = vec![0u8; 8192];
         let n = unsafe {
-            lyyime_process_key(eng.0, key_id, chr, buf.as_mut_ptr() as *mut c_char, buf.len() as i64)
+            lyyime_process_key(
+                eng.0,
+                key_id,
+                chr,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i64,
+            )
         };
         assert!(n > 0);
         String::from_utf8_lossy(&buf[..(n - 1) as usize]).into_owned()
@@ -241,7 +262,12 @@ fn ffi_重试纪律_小缓冲needed不落状态_扩容重试与一次成功一�
 
     // e1 用小缓冲喂空格 → -needed,内部状态必须保持按键前。
     let mut tiny = [0u8; 4];
-    let n = e1.key_raw(LKEY_SPACE, 0, tiny.as_mut_ptr() as *mut c_char, tiny.len() as i64);
+    let n = e1.key_raw(
+        LKEY_SPACE,
+        0,
+        tiny.as_mut_ptr() as *mut c_char,
+        tiny.len() as i64,
+    );
     assert!(n < 0, "小缓冲应返回 -needed,得到 {n}");
     assert!(tiny.iter().all(|&b| b == 0), "-needed 时不得写入");
     // 非破坏性检查:候选页保持按键前状态(lyyime_cand 只读)。

@@ -37,10 +37,10 @@ xim/
    —— trigger on 时 client 转发 KeyPress;KeyRelease 是否转发依赖
    `SET_EVENT_MASK.forward_event_mask`,server 必须在 `xcb_im_create` 显式传
    `KEY_PRESS|KEY_RELEASE`(默认仅 PRESS)。
-3. **Shift 单击判定**:优先用 Shift release 确认(到达即判定);若客户端不转发
-   release,退化为 280ms 时间窗(窗内无其它键即单击)。Shift+字母组合在中文态
-   原样直通大写字母(主流输入法行为);off→on 切换后 400ms 内到达的 Shift 掩码
-   键判定为组合并回退英文(键事件自带 ShiftMask,应用侧无感)。
+3. **Shift 行为**:按下即喂 core——有缓冲立即上屏英文原串;空缓冲吞键并挂起
+   单击判定,优先用 Shift release 确认(到达即判定);若客户端不转发 release,
+   退化为 280ms 时间窗(窗内无其它键即单击)。off→on 切换后 400ms 内到达的
+   Shift 掩码键判定为组合并回退英文(键事件自带 ShiftMask,应用侧无感)。
 4. **Pass 零风险**:停用/降级/解析失败时一切按键 `xcb_im_forward_event` 协议级
    原样回放,绝不吞键(崩溃安全语义,E2E 步骤 B 断言)。
 5. **vendor 直编清单**:=`src/*.c` + `xlibi18n/lcCT.c lcUTF8.c lcCharSet.c`

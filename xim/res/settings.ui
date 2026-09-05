@@ -127,6 +127,18 @@
               </packing>
             </child>
             <child>
+              <object class="GtkCheckButton" id="chk_commit_after_four">
+                <property name="visible">True</property>
+                <property name="label">四码顶屏(满四码后继续输入字母先上屏当前词)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">6</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
               <object class="GtkCheckButton" id="chk_autostart">
                 <property name="visible">True</property>
                 <property name="label">开机自启动(写入 ~/.config/autostart)</property>
@@ -134,7 +146,7 @@
               </object>
               <packing>
                 <property name="left-attach">0</property>
-                <property name="top-attach">6</property>
+                <property name="top-attach">7</property>
                 <property name="width">2</property>
               </packing>
             </child>

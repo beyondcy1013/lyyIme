@@ -7,11 +7,11 @@
 //! - a–z:进缓冲,更新 preedit/候选(≤12 字母;英文态直通);
 //! - 1–9:选当前页第 N 个候选;无候选放行数字;越界吞掉;
 //! - Space:有候选顶屏首选;有缓冲无候选直通原字母;空缓冲放行;
-//!   缓冲本身是高频英文词且开启 mixed_auto_commit 时自动上屏原词;
 //! - Enter:有缓冲上屏原始字母;空缓冲放行;
 //! - Backspace:删尾;Esc:清缓冲;`-`/`=`(PageUp/PageDown):翻页;
 //! - 标点:中文态空缓冲出中文标点;有缓冲先上屏首选再补中文标点;英文态放行;
-//! - ShiftPress:core 只吞键;"单击判定"由宿主完成后调 [`Engine::toggle_mode`];
+//! - ShiftPress:有缓冲上屏英文原串;空缓冲吞键,宿主判定单击后调
+//!   [`Engine::toggle_mode`];
 //! - 其它键:Pass(有缓冲先清缓冲)。
 //!
 //! ## 两段式按键处理(合同 §3 v1.1 重试纪律)
@@ -84,7 +84,16 @@ fn insert_cand(
     }
     pool.insert(
         text.clone(),
-        RawCand { text, comment, tier, spec, norm, score: 0.0, kind, sug },
+        RawCand {
+            text,
+            comment,
+            tier,
+            spec,
+            norm,
+            score: 0.0,
+            kind,
+            sug,
+        },
     );
 }
 
@@ -138,7 +147,10 @@ impl Engine {
     pub fn new(data_dir: &Path) -> Result<Self, crate::Error> {
         let dict = DictIndex::load(data_dir);
         let cfg = Config::default();
-        let path = cfg.user_dict.clone().unwrap_or_else(Config::default_user_dict_path);
+        let path = cfg
+            .user_dict
+            .clone()
+            .unwrap_or_else(Config::default_user_dict_path);
         let mut learner = Learner::new(cfg.learning, path);
         if cfg.learning {
             learner.load();
@@ -161,7 +173,10 @@ impl Engine {
     /// 注意:若 `cfg.mode` 与当前模式不同,视同一次模式切换——清空组合缓冲
     /// (config 的语义是"启动默认模式");切换用户词典路径会清空旧数据并重新装载。
     pub fn set_config(&mut self, cfg: Config) {
-        let path = cfg.user_dict.clone().unwrap_or_else(Config::default_user_dict_path);
+        let path = cfg
+            .user_dict
+            .clone()
+            .unwrap_or_else(Config::default_user_dict_path);
         self.learner.set_path(path);
         self.learner.set_enabled(cfg.learning);
         if cfg.mode != self.mode {
@@ -312,8 +327,14 @@ impl Engine {
             LKey::PageUp | LKey::PageDown => self.plan_page(&mut p, key == LKey::PageDown),
             LKey::Punct(c) => self.plan_punct(&mut p, c),
             LKey::ShiftPress => {
-                // 单击/组合判定在宿主;core 恒吞 Shift 本身。
-                vec![Effect::Consumed]
+                // Shift 按下时的用户规则:有缓冲立即上屏英文原串;
+                // 空缓冲由宿主判定 Shift 单击后切换中英模式。
+                if p.buf.is_empty() {
+                    vec![Effect::Consumed]
+                } else {
+                    let raw = p.buf.clone();
+                    plan_commit(self, &mut p, &raw, false)
+                }
             }
             LKey::Other => {
                 if p.buf.is_empty() {
@@ -348,6 +369,20 @@ impl Engine {
             // 缓冲已满:吞掉,维持现有组合(合同 §5.1 ≤12)。
             return vec![Effect::Consumed];
         }
+        // 可选顶屏:恰好四码且已有候选时,再来的字母先确认当前选中,
+        // 该字母开启新组合。关闭后保持前缀渐进组词。
+        if self.cfg.commit_on_extra_after_four && p.buf.chars().count() == 4 {
+            if let Some(top) = plan_page_slice(self, p).first() {
+                let text = top.text.clone();
+                let mut effects = plan_commit(self, p, &text, true);
+                plan_clear(p);
+                p.buf.push(c);
+                p.page = 0;
+                self.recompute_into(p);
+                effects.extend(composition_effects(self, p));
+                return effects;
+            }
+        }
         p.buf.push(c);
         p.page = 0;
         self.recompute_into(p);
@@ -376,10 +411,8 @@ impl Engine {
         if p.buf.is_empty() {
             return vec![Effect::Pass];
         }
-        if let Some(word) = self.auto_commit_word(p) {
-            // 高频英文词直通(修订 §5.C):上屏原词而非顶屏更长的候选。
-            return plan_commit(self, p, &word, true);
-        }
+        // Space 是确认键:只要有候选,一律上屏当前选中(首选),不做英文抢占。
+        // 英文输入走 Shift 单击切换后的英文直通态;无候选时仍保留原字母兜底。
         if let Some(top) = plan_page_slice(self, p).first() {
             let text = top.text.clone();
             plan_commit(self, p, &text, true)
@@ -400,7 +433,10 @@ impl Engine {
         } else {
             p.page = p.page.saturating_sub(1);
         }
-        vec![Effect::Candidates(Arc::new(plan_page_slice(self, p).to_vec())), Effect::Consumed]
+        vec![
+            Effect::Candidates(Arc::new(plan_page_slice(self, p).to_vec())),
+            Effect::Consumed,
+        ]
     }
 
     fn plan_punct(&self, p: &mut Plan, c: char) -> Vec<Effect> {
@@ -433,7 +469,7 @@ impl Engine {
     // 提交与状态维护(作用于 Plan)
     // ------------------------------------------------------------------
 
-    /// 先提交当前组合(首选/自动直通词/原字母),再追加 `tail` 效果。
+    /// 先提交当前组合(首选/原字母),再追加 `tail` 效果。
     /// 提交的是候选/直通词才计学习;直通原始字母不污染用户词典。
     fn plan_commit_then(&self, p: &mut Plan, tail: Effect) -> Vec<Effect> {
         if p.buf.is_empty() {
@@ -446,37 +482,17 @@ impl Engine {
         effects
     }
 
-    /// 本次组合结束是否值得学习(来自候选顶屏或英文自动直通)。
+    /// 本次组合结束是否值得学习(来自候选顶屏)。
     fn learn_worthy(&self, p: &Plan) -> bool {
-        !plan_page_slice(self, p).is_empty() || self.auto_commit_word(p).is_some()
+        !plan_page_slice(self, p).is_empty()
     }
 
-    /// 组合结束时应上屏的文本:自动直通词 > 页内首选 > 原始字母。
+    /// 组合结束时应上屏的文本:页内首选 > 原始字母。
     fn finish_text(&self, p: &Plan) -> String {
-        if let Some(word) = self.auto_commit_word(p) {
-            return word;
-        }
         if let Some(top) = plan_page_slice(self, p).first() {
             return top.text.clone();
         }
         p.buf.clone()
-    }
-
-    /// 高频英文词自动直通判定(修订 §5.C):开启 mixed_en + mixed_auto_commit,且
-    /// - 无中文命中且词频名次 ≤ en_freq_top_n;**或**
-    /// - 属于 mixed_auto_commit_top_n 名内的高频英文词(即使有中文命中也直通)。
-    fn auto_commit_word(&self, p: &Plan) -> Option<String> {
-        if !self.cfg.mixed_en || !self.cfg.mixed_auto_commit || p.buf.is_empty() {
-            return None;
-        }
-        let en_rank = self.dict.en_rank.get(p.buf.as_str()).copied()? as usize;
-        let is_top_auto = en_rank <= self.cfg.mixed_auto_commit_top_n
-            || (!p.cn_hit && en_rank <= self.cfg.en_freq_top_n);
-        if is_top_auto {
-            Some(p.buf.clone())
-        } else {
-            None
-        }
     }
 
     pub(crate) fn page_size(&self) -> usize {
@@ -558,7 +574,12 @@ impl Engine {
         list.truncate(MAX_CANDS);
         p.cands = list
             .into_iter()
-            .map(|rc| Candidate { text: rc.text, comment: rc.comment, score: rc.score, kind: rc.kind })
+            .map(|rc| Candidate {
+                text: rc.text,
+                comment: rc.comment,
+                score: rc.score,
+                kind: rc.kind,
+            })
             .collect();
         p.page = 0;
     }
@@ -668,7 +689,9 @@ impl Engine {
             let frag_len = frag.chars().count() as f32;
             for seg in pinyin::segmentations(&buf[..k], &dict.syllables, SEGS_CAP / 4) {
                 let joined = pinyin::seg_joined(&buf[..k], &seg);
-                let Some(idxs) = dict.py_boundary.get(&joined) else { continue };
+                let Some(idxs) = dict.py_boundary.get(&joined) else {
+                    continue;
+                };
                 for &i in idxs {
                     let p = &dict.phrases[i as usize];
                     // 词组必须还有下一个音节来消化这个不完整片段。
@@ -785,10 +808,11 @@ impl Engine {
 
     /// 英文通道(修订 §5.C):无中文命中时的前缀候选。
     ///
-    /// 候选不限名次(否则长尾词在真实 20k 词表下永不出现,如 hello 列第 ~2400 名);
-    /// 是否自动直通由 [`Engine::auto_commit_word`] 按 en_freq_top_n / top-500 门控。
+    /// 候选不限名次(否则长尾词在真实 20k 词表下永不出现,如 hello 列第 ~2400 名)。
     fn english_candidates(&self, buf: &str, pool: &mut HashMap<String, RawCand>) -> usize {
-        let Some(idxs) = self.dict.en_prefix.get(buf) else { return 0 };
+        let Some(idxs) = self.dict.en_prefix.get(buf) else {
+            return 0;
+        };
         let dict = &self.dict;
         let mut hits = 0;
         for &i in idxs {
@@ -812,11 +836,15 @@ impl Engine {
     /// 有中文命中时的英文候选(修订 §5.C):缓冲本身是 mixed_auto_commit_top_n 内
     /// 的完整英文词,以 english_with_cn 层加入单个候选(层位低于五笔前缀与拼音)。
     fn english_with_cn_candidate(&self, buf: &str, pool: &mut HashMap<String, RawCand>) {
-        let Some(&en_rank) = self.dict.en_rank.get(buf) else { return };
+        let Some(&en_rank) = self.dict.en_rank.get(buf) else {
+            return;
+        };
         if en_rank as usize > self.cfg.mixed_auto_commit_top_n {
             return;
         }
-        let Some(idxs) = self.dict.en_prefix.get(buf) else { return };
+        let Some(idxs) = self.dict.en_prefix.get(buf) else {
+            return;
+        };
         for &i in idxs {
             let (word, freq) = &self.dict.english[i as usize];
             if word == buf {
@@ -864,7 +892,11 @@ fn plan_commit(_eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Ef
         p.learned = Some(text.to_string());
     }
     plan_clear(p);
-    vec![Effect::Commit(text.to_string()), Effect::Preedit(None), empty_cands()]
+    vec![
+        Effect::Commit(text.to_string()),
+        Effect::Preedit(None),
+        empty_cands(),
+    ]
 }
 
 /// 组合中的效果流:[Preedit, Candidates]。

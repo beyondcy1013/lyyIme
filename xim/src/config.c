@@ -10,10 +10,11 @@
 #include <unistd.h>
 
 /* 受管理的键:顺序即写回顺序;g_suffix 保存行尾注释以便原位保留 */
-#define LYY_CFG_KEYS 7
+#define LYY_CFG_KEYS 8
 static const char *g_keys[LYY_CFG_KEYS] = {
     "page_size", "mixed_english", "auto_commit_english",
-    "chinese_punct", "learning", "font_size", "autostart",
+    "chinese_punct", "learning", "commit_after_four", "font_size",
+    "autostart",
 };
 static const char *g_key_comments[LYY_CFG_KEYS] = {
     "候选数 1..9",
@@ -21,12 +22,13 @@ static const char *g_key_comments[LYY_CFG_KEYS] = {
     "高置信英文词遇标点/空格自动直通",
     "中文态空缓冲输出中文标点",
     "用户词学习开关",
+    "满足四码后继续输入字母先上屏当前选中",
     "候选窗字体大小 10..28",
     "开机自启(lyyime-xim)",
 };
 /* 行尾注释(# 之后)与布尔值写法缓存:load 时记下,save 时复用 */
 static char g_suffix[LYY_CFG_KEYS][256];
-static const char *g_bool_text[LYY_CFG_KEYS]; /* "true"/"false"(保留用户写法) */
+static int g_bool_numeric[LYY_CFG_KEYS]; /* 用户书写风格:1=数字(1/0),0=单词(true/false) */
 
 void lyy_config_defaults(LyyConfig *c)
 {
@@ -36,6 +38,7 @@ void lyy_config_defaults(LyyConfig *c)
     c->auto_commit_english = 1;
     c->chinese_punct = 1;
     c->learning = 1;
+    c->commit_after_four = 0;
     c->font_size = 14;
     c->autostart = 0;
 }
@@ -96,7 +99,7 @@ static int parse_bool(const char *v, int def)
 
 static int bool_key_index(int idx)
 {
-    return (idx == 1 || idx == 2 || idx == 3 || idx == 4 || idx == 6);
+    return (idx >= 1 && idx <= 4) || idx == 5 || idx == 7;
 }
 
 static void apply_value(LyyConfig *c, int idx, const char *v)
@@ -107,8 +110,9 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
     case 2: c->auto_commit_english = parse_bool(v, c->auto_commit_english); break;
     case 3: c->chinese_punct = parse_bool(v, c->chinese_punct); break;
     case 4: c->learning = parse_bool(v, c->learning); break;
-    case 5: c->font_size = atoi(v); break;
-    case 6: c->autostart = parse_bool(v, c->autostart); break;
+    case 5: c->commit_after_four = parse_bool(v, c->commit_after_four); break;
+    case 6: c->font_size = atoi(v); break;
+    case 7: c->autostart = parse_bool(v, c->autostart); break;
     default: break;
     }
 }
@@ -118,7 +122,7 @@ int lyy_config_load(const char *path, LyyConfig *out)
     lyy_config_defaults(out);
     memset(g_suffix, 0, sizeof(g_suffix));
     for (int i = 0; i < LYY_CFG_KEYS; i++)
-        g_bool_text[i] = NULL;
+        g_bool_numeric[i] = 0;
 
     FILE *fp = fopen(path, "r");
     if (!fp)
@@ -138,9 +142,9 @@ int lyy_config_load(const char *path, LyyConfig *out)
         char vbuf[256];
         snprintf(vbuf, sizeof(vbuf), "%s", value);
         char *v = trim(vbuf);
-        /* 记录布尔写法(true/false),写回时保持用户习惯 */
+        /* 记录布尔书写风格(1/0 或 true/false),写回时保持用户习惯 */
         if (bool_key_index(idx))
-            g_bool_text[idx] = (!strcmp(v, "0") || !strcmp(v, "false")) ? "false" : "true";
+            g_bool_numeric[idx] = (!strcmp(v, "0") || !strcmp(v, "1"));
         /* 记录行尾注释 */
         if (!g_suffix[idx][0])
             extract_suffix(value, g_suffix[idx], sizeof(g_suffix[0]));
@@ -167,19 +171,21 @@ static void write_value(FILE *fp, int idx, const LyyConfig *c)
     case 2:
     case 3:
     case 4:
-    case 6: {
+    case 5:
+    case 7: {
         int val = (idx == 1) ? c->mixed_english
                 : (idx == 2) ? c->auto_commit_english
                 : (idx == 3) ? c->chinese_punct
                 : (idx == 4) ? c->learning
+                : (idx == 5) ? c->commit_after_four
                              : c->autostart;
         fprintf(fp, "%s = %s %s\n", g_keys[idx],
-                g_bool_text[idx] ? g_bool_text[idx]
-                                 : (val ? "true" : "false"),
+                g_bool_numeric[idx] ? (val ? "1" : "0")
+                                    : (val ? "true" : "false"),
                 suffix);
         break;
     }
-    case 5:
+    case 6:
         fprintf(fp, "font_size = %d %s\n", c->font_size, suffix);
         break;
     default:

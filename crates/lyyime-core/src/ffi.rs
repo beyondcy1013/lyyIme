@@ -109,9 +109,9 @@ pub fn effects_json(effects: &[Effect], page: usize, pages: usize) -> String {
 /// key_id + 码点 → 抽象键;非法组合按 `Other` 处理。
 fn key_from(key_id: c_int, chr: u32) -> LKey {
     match key_id {
-        LKEY_CHAR => {
-            char::from_u32(chr).filter(|c| c.is_ascii_lowercase()).map_or(LKey::Other, LKey::Char)
-        }
+        LKEY_CHAR => char::from_u32(chr)
+            .filter(|c| c.is_ascii_lowercase())
+            .map_or(LKey::Other, LKey::Char),
         LKEY_DIGIT => {
             if (u32::from(b'1')..=u32::from(b'9')).contains(&chr) {
                 LKey::Digit((chr - u32::from(b'0')) as u8)
@@ -233,7 +233,11 @@ pub unsafe extern "C" fn lyyime_process_key(
     let Some(e) = eng.as_mut() else { return 0 };
     // ① 纯读取规划:产出效果流与下一状态,内部状态保持按键前。
     let (effects, plan) = e.plan_key(key_from(key_id, chr));
-    let json = effects_json(&effects, plan.page, Engine::pages_for(plan.cands.len(), e.page_size()));
+    let json = effects_json(
+        &effects,
+        plan.page,
+        Engine::pages_for(plan.cands.len(), e.page_size()),
+    );
     // ② 确认能写入宿主缓冲,才提交内部状态。
     let n = put_cstr(buf, buf_cap, &json);
     if n >= 0 {
@@ -248,9 +252,18 @@ pub unsafe extern "C" fn lyyime_process_key(
 /// # Safety
 /// `eng` 必须是有效的引擎指针;`buf` 可写 `cap` 字节。
 #[no_mangle]
-pub unsafe extern "C" fn lyyime_cand(eng: *mut Engine, i: c_int, buf: *mut c_char, cap: c_int) -> c_int {
+pub unsafe extern "C" fn lyyime_cand(
+    eng: *mut Engine,
+    i: c_int,
+    buf: *mut c_char,
+    cap: c_int,
+) -> c_int {
     let Some(e) = eng.as_ref() else { return 0 };
-    let text = e.flush_page().get(i.max(0) as usize).map(|c| c.text.as_str()).unwrap_or("");
+    let text = e
+        .flush_page()
+        .get(i.max(0) as usize)
+        .map(|c| c.text.as_str())
+        .unwrap_or("");
     put_cstr(buf, cap as i64, text) as c_int
 }
 
@@ -266,6 +279,10 @@ pub unsafe extern "C" fn lyyime_cand_comment(
     cap: c_int,
 ) -> c_int {
     let Some(e) = eng.as_ref() else { return 0 };
-    let text = e.flush_page().get(i.max(0) as usize).map(|c| c.comment.as_str()).unwrap_or("");
+    let text = e
+        .flush_page()
+        .get(i.max(0) as usize)
+        .map(|c| c.comment.as_str())
+        .unwrap_or("");
     put_cstr(buf, cap as i64, text) as c_int
 }

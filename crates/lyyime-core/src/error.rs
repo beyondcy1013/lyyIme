@@ -15,7 +15,9 @@ pub struct Error {
 impl Error {
     /// 由一段中文消息构造错误。
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self {
+            message: message.into(),
+        }
     }
 
     /// 取人话错误消息(可直接展示)。

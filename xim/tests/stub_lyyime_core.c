@@ -297,8 +297,15 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
         break;
     }
     case 9: { /* SHIFTPRESS */
-        e->mode = !e->mode;
-        jb_printf(&t, "{\"t\":\"mode\",\"m\":%d}", e->mode);
+        if (e->len > 0) {
+            jb_printf(&t, "{\"t\":\"commit\",\"s\":\"%s\"},", e->buf);
+            jb_append(&t, "{\"t\":\"preedit\"}");
+            e->len = 0;
+            e->buf[0] = '\0';
+            e->page = 0;
+        } else {
+            jb_append(&t, "{\"t\":\"consumed\"}");
+        }
         break;
     }
     case 10: /* OTHER */

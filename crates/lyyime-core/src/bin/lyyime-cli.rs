@@ -167,8 +167,14 @@ fn run() -> ExitCode {
     for step in &steps {
         let (effects, token) = match step {
             Step::ShiftClick => {
-                let m = eng.toggle_mode();
-                (vec![Effect::ModeChanged(m)], "<shift>".to_string())
+                // 与真机宿主一致:ShiftPress 交引擎裁决——有缓冲上屏英文原串;
+                // 空缓冲被吞(Consumed)后由宿主(此处为 cli)判定单击并切换模式。
+                let mut fx = eng.process_key(LKey::ShiftPress);
+                if fx.iter().any(|e| matches!(e, Effect::Consumed)) {
+                    let m = eng.toggle_mode();
+                    fx.push(Effect::ModeChanged(m));
+                }
+                (fx, "<shift>".to_string())
             }
             Step::Key(k) => {
                 let token = match k {
@@ -190,7 +196,14 @@ fn run() -> ExitCode {
         let mut line = String::from("{\"key\":");
         line.push_str(&format!("\"{}\"", json_escape(&token)));
         line.push_str(",\"mode\":");
-        line.push_str(&(if eng.mode() == Mode::Chinese { "0" } else { "1" }).to_string());
+        line.push_str(
+            &(if eng.mode() == Mode::Chinese {
+                "0"
+            } else {
+                "1"
+            })
+            .to_string(),
+        );
         line.push_str(",\"effects\":");
         line.push_str(&effects_json(&effects, eng.page(), eng.page_count()));
         if show_cands && !eng.flush_page().is_empty() {

@@ -33,7 +33,12 @@ fn 数据目录不存在_空引擎仍可用() {
 #[test]
 fn 单文件缺失_只降级英文通道() {
     let td = TempDir::new();
-    for f in ["wubi.tsv", "pinyin_char.tsv", "pinyin_phrase.tsv", "suggestion.tsv"] {
+    for f in [
+        "wubi.tsv",
+        "pinyin_char.tsv",
+        "pinyin_phrase.tsv",
+        "suggestion.tsv",
+    ] {
         std::fs::copy(fixtures().join(f), td.join(f)).unwrap();
     }
     let mut eng = Engine::new(&td.path).unwrap();
@@ -72,8 +77,39 @@ fn 五笔精确_优先于前缀() {
     let mut eng = engine();
     type_str(&mut eng, "aa");
     let page = page_texts(&eng);
-    assert_eq!(page.first().map(String::as_str), Some("式"), "精确码 aa 应排第一");
-    assert!(page.contains(&"恭恭敬敬".to_string()), "aaaa 是 aa 的前缀扩展,应出现");
+    assert_eq!(
+        page.first().map(String::as_str),
+        Some("式"),
+        "精确码 aa 应排第一"
+    );
+    assert!(
+        page.contains(&"恭恭敬敬".to_string()),
+        "aaaa 是 aa 的前缀扩展,应出现"
+    );
+}
+
+#[test]
+fn 四码后续字母_开启后先上屏当前选中() {
+    let mut eng = engine_with(Config {
+        commit_on_extra_after_four: true,
+        ..Config::default()
+    });
+    type_str(&mut eng, "aaaa");
+    let top = page_texts(&eng).first().cloned().unwrap();
+    let fx = eng.process_key(LKey::Char('g'));
+    let commits_fx = commits(&fx);
+    assert_eq!(commits_fx.first().map(String::as_str), Some(top.as_str()));
+    assert_eq!(eng.buffer(), "g");
+    assert_eq!(page_texts(&eng), vec!["一".to_string()]);
+}
+
+#[test]
+fn 四码后续字母_默认继续前缀组词() {
+    let mut eng = engine();
+    type_str(&mut eng, "wgli");
+    let fx = eng.process_key(LKey::Char('g'));
+    assert!(commits(&fx).is_empty());
+    assert_eq!(eng.buffer(), "wglig");
 }
 
 #[test]
@@ -83,8 +119,14 @@ fn 五笔精确层_简码满分归一() {
     let top = &eng.flush_page()[0];
     assert_eq!(top.text, "工");
     // 层级词典序:工 处于五笔精确层(60),通道内最高频 → 归一满值 10。
-    assert!((top.score - 70.0).abs() < 1e-4, "精确层得分实为 {}", top.score);
-    assert!(fx.iter().any(|e| matches!(e, Effect::Preedit(Some(s)) if s == "a")));
+    assert!(
+        (top.score - 70.0).abs() < 1e-4,
+        "精确层得分实为 {}",
+        top.score
+    );
+    assert!(fx
+        .iter()
+        .any(|e| matches!(e, Effect::Preedit(Some(s)) if s == "a")));
 }
 
 #[test]
@@ -92,8 +134,14 @@ fn 五笔前缀渐进_词组出现() {
     let mut eng = engine();
     type_str(&mut eng, "aaa");
     let page = page_texts(&eng);
-    assert!(page.contains(&"恭恭敬敬".to_string()), "打 aaa 应渐进看到 aaaa 的词");
-    assert!(!page.contains(&"式".to_string()), "式 的码 aa 不是 aaa 的前缀");
+    assert!(
+        page.contains(&"恭恭敬敬".to_string()),
+        "打 aaa 应渐进看到 aaaa 的词"
+    );
+    assert!(
+        !page.contains(&"式".to_string()),
+        "式 的码 aa 不是 aaa 的前缀"
+    );
 }
 
 #[test]
@@ -149,7 +197,11 @@ fn 拼音切分歧义_xian_同时命中两种切分() {
     let page = page_texts(&eng);
     // 切分 [xian] → 单字"先";切分 [xi,an] → 词组"西安/先安"。
     assert!(page.contains(&"先".to_string()), "整体音节切分应命中先");
-    assert_eq!(page.first().map(String::as_str), Some("西安"), "词组全拼应胜过单字");
+    assert_eq!(
+        page.first().map(String::as_str),
+        Some("西安"),
+        "词组全拼应胜过单字"
+    );
 }
 
 #[test]
@@ -160,11 +212,17 @@ fn 拼音末音节不完整_niha_词组命中且被完整切分压制() {
     // "niha" 可完整切分为 ni+ha("哈",pinyin_full 层),按修订 §5 层位高于
     // 不完整尾音节词组"你好"(pinyin_partial 层);但不完整查询必须仍然命中。
     assert_eq!(page.first().map(String::as_str), Some("哈"));
-    assert!(page.contains(&"你好".to_string()), "缺尾词组你好应命中:{page:?}");
+    assert!(
+        page.contains(&"你好".to_string()),
+        "缺尾词组你好应命中:{page:?}"
+    );
     let nh = page.iter().position(|t| t == "你好").unwrap();
     let h = page.iter().position(|t| *t == "好").unwrap();
     assert!(nh < h, "缺尾词组你好(音节多)应排在单字好之前");
-    assert!(page.contains(&"海".to_string()), "不完整片段 h 的单字(hai 海)也应出现");
+    assert!(
+        page.contains(&"海".to_string()),
+        "不完整片段 h 的单字(hai 海)也应出现"
+    );
 }
 
 #[test]
@@ -173,7 +231,10 @@ fn 拼音简拼_nh_命中词组且低权重无单字() {
     type_str(&mut eng, "nh");
     let page = page_texts(&eng);
     assert_eq!(page.first().map(String::as_str), Some("你好"));
-    assert!(page.contains(&"你好吗".to_string()), "渐进简拼应给出更长词组");
+    assert!(
+        page.contains(&"你好吗".to_string()),
+        "渐进简拼应给出更长词组"
+    );
 }
 
 #[test]
@@ -213,28 +274,36 @@ fn 有中文命中_不出英文候选() {
     let mut eng = engine();
     type_str(&mut eng, "ni");
     let page = page_texts(&eng);
-    assert!(!page.contains(&"nice".to_string()), "中文命中时英文通道应关闭");
+    assert!(
+        !page.contains(&"nice".to_string()),
+        "中文命中时英文通道应关闭"
+    );
 }
 
 #[test]
-fn 英文自动直通_空格上屏原词() {
-    // 修订 §5.C:有中文命中时,top-500 完整英文词仍直通原词。
-    // "he" 有拼音命中(和/喝),也是 top-500 英文词 → 空格直通 he。
+fn 一级简码_空格上屏当前首选() {
+    // Space 是确认键:即使 a 同时是一级简码和英文词,也必须顶屏"工"。
+    // 需要输出英文 a 时,应先 Shift 单击切到英文态。
+    let mut eng = engine();
+    type_str(&mut eng, "a");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("工"));
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["工".to_string()]);
+    assert!(eng.buffer().is_empty());
+}
+
+#[test]
+fn 有中文命中_空格也顶屏当前首选() {
+    // 用户规则:不管缓冲多短,Space 只确认当前首选;英文用 Shift 态输入。
     let mut eng = engine();
     type_str(&mut eng, "he");
-    let texts = page_texts(&eng);
-    assert!(texts.contains(&"和".to_string()), "中文命中在列:{texts:?}");
-    assert!(texts.contains(&"he".to_string()), "英文 with_cn 层在列:{texts:?}");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("和"));
     let fx = eng.process_key(LKey::Space);
-    assert_eq!(commits(&fx), vec!["he".to_string()]);
-}
-
-#[test]
-fn 英文自动直通_关闭时空格顶屏首选() {
-    let mut eng = engine_with(Config { mixed_auto_commit: false, ..Config::default() });
-    type_str(&mut eng, "he");
-    let fx = eng.process_key(LKey::Space);
-    assert_eq!(commits(&fx), vec!["和".to_string()], "关闭直通后顶屏中文首选");
+    assert_eq!(
+        commits(&fx),
+        vec!["和".to_string()],
+        "关闭直通后顶屏中文首选"
+    );
 }
 
 #[test]
@@ -333,8 +402,14 @@ fn 中文态引号按开合交替() {
     assert_eq!(first, vec!["\u{2018}".to_string()], "第一次应为开引号");
     assert_eq!(second, vec!["\u{2019}".to_string()], "第二次应为闭引号");
     let mut eng2 = engine();
-    assert_eq!(commits(&eng2.process_key(LKey::Punct('"'))), vec!["\u{201C}".to_string()]);
-    assert_eq!(commits(&eng2.process_key(LKey::Punct('"'))), vec!["\u{201D}".to_string()]);
+    assert_eq!(
+        commits(&eng2.process_key(LKey::Punct('"'))),
+        vec!["\u{201C}".to_string()]
+    );
+    assert_eq!(
+        commits(&eng2.process_key(LKey::Punct('"'))),
+        vec!["\u{201D}".to_string()]
+    );
 }
 
 #[test]
@@ -346,7 +421,10 @@ fn 未映射标点_直通放行() {
 
 #[test]
 fn 关闭中文标点_直通放行() {
-    let mut eng = engine_with(Config { cn_punct: false, ..Config::default() });
+    let mut eng = engine_with(Config {
+        cn_punct: false,
+        ..Config::default()
+    });
     assert!(is_pass(&eng.process_key(LKey::Punct(','))));
 }
 
@@ -401,7 +479,11 @@ fn 翻页_等号下一页减号上一页() {
     let fx = eng.process_key(LKey::PageDown);
     assert!(fx.iter().any(|e| matches!(e, Effect::Consumed)));
     let page2 = page_texts(&eng);
-    assert_eq!(page2.first().map(String::as_str), Some("汉"), "第二页应以汉开头");
+    assert_eq!(
+        page2.first().map(String::as_str),
+        Some("汉"),
+        "第二页应以汉开头"
+    );
     eng.process_key(LKey::PageUp);
     assert_eq!(page_texts(&eng).first().map(String::as_str), Some("和"));
 }
@@ -505,6 +587,19 @@ fn shiftpress_吞键_切模式由宿主调_toggle_mode() {
 }
 
 #[test]
+fn shift_有缓冲先上屏英文原串() {
+    let mut eng = engine();
+    type_str(&mut eng, "nihao");
+    let fx = eng.process_key(LKey::ShiftPress);
+    assert_eq!(commits(&fx), vec!["nihao".to_string()]);
+    assert!(eng.buffer().is_empty());
+    assert!(page_texts(&eng).is_empty());
+    // 空缓冲的 Shift 仍由宿主判定单击后切模式;core 只吞键。
+    assert!(is_consumed(&eng.process_key(LKey::ShiftPress)));
+    assert_eq!(eng.mode(), Mode::Chinese);
+}
+
+#[test]
 fn reset_清空组合() {
     let mut eng = engine();
     type_str(&mut eng, "ni");
@@ -540,7 +635,10 @@ fn 学习写盘_依赖显式_flush() {
     let mut eng = engine_with_user_dict(&td);
     type_str(&mut eng, "ni");
     eng.process_key(LKey::Space); // 上屏"你"
-    assert!(!td.join("user.tsv").exists(), "不足 64 次且未 flush,不应落盘");
+    assert!(
+        !td.join("user.tsv").exists(),
+        "不足 64 次且未 flush,不应落盘"
+    );
     eng.flush_user_dict().unwrap();
     let text = std::fs::read_to_string(td.join("user.tsv")).unwrap();
     let line = text.lines().next().unwrap();
@@ -560,7 +658,10 @@ fn 学习累计_多次上屏词频递增() {
     }
     eng.flush_user_dict().unwrap();
     let text = std::fs::read_to_string(td.join("user.tsv")).unwrap();
-    assert!(text.lines().any(|l| l.starts_with("你\t2\t")), "实为:{text}");
+    assert!(
+        text.lines().any(|l| l.starts_with("你\t2\t")),
+        "实为:{text}"
+    );
 }
 
 #[test]
@@ -572,7 +673,10 @@ fn write_behind_满64次自动落盘() {
         eng.process_key(LKey::Space); // 顶屏"工"
     }
     let text = std::fs::read_to_string(td.join("user.tsv")).unwrap();
-    assert!(text.lines().any(|l| l.starts_with("工\t64\t")), "64 次应触发 write-behind");
+    assert!(
+        text.lines().any(|l| l.starts_with("工\t64\t")),
+        "64 次应触发 write-behind"
+    );
 }
 
 #[test]
@@ -588,7 +692,11 @@ fn 关闭学习_不写盘不加载() {
     eng.flush_user_dict().unwrap();
     assert!(!td.join("user.tsv").exists(), "learning=false 不应写盘");
     type_str(&mut eng, "dh");
-    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("到"), "无加成,频次高者在前");
+    assert_eq!(
+        page_texts(&eng).first().map(String::as_str),
+        Some("到"),
+        "无加成,频次高者在前"
+    );
 }
 
 #[test]
@@ -602,7 +710,11 @@ fn 用户词典_重启后加载生效() {
     } // drop(顺带落盘,但不依赖)
     let mut eng2 = engine_with_user_dict(&td);
     type_str(&mut eng2, "dh");
-    assert_eq!(page_texts(&eng2).first().map(String::as_str), Some("稻"), "重启后应从 user.tsv 恢复加成");
+    assert_eq!(
+        page_texts(&eng2).first().map(String::as_str),
+        Some("稻"),
+        "重启后应从 user.tsv 恢复加成"
+    );
 }
 
 // ======================================================================
@@ -634,7 +746,11 @@ fn 配置损坏_报人话错误() {
     let p = td.join("config.toml");
     std::fs::write(&p, "这不是 toml [[[\npage_size = ").unwrap();
     let err = Config::load(&p).unwrap_err();
-    assert!(err.message().contains("损坏"), "应提示配置损坏:{}", err.message());
+    assert!(
+        err.message().contains("损坏"),
+        "应提示配置损坏:{}",
+        err.message()
+    );
 }
 
 #[test]
@@ -654,9 +770,17 @@ fn 配置取值非法_报人话错误() {
 fn set_config_生效并重置默认模式() {
     let mut eng = engine();
     type_str(&mut eng, "ni"); // 留下组合
-    eng.set_config(Config { page_size: 3, mode: Mode::English, ..Config::default() });
+    eng.set_config(Config {
+        page_size: 3,
+        mode: Mode::English,
+        ..Config::default()
+    });
     assert_eq!(eng.config().page_size, 3);
-    assert_eq!(eng.mode(), Mode::English, "config.mode 是启动默认模式,set_config 会重置");
+    assert_eq!(
+        eng.mode(),
+        Mode::English,
+        "config.mode 是启动默认模式,set_config 会重置"
+    );
     assert!(eng.buffer().is_empty(), "切模式应清空组合");
 }
 
@@ -669,16 +793,16 @@ fn 同分候选_按通用词频兜底排序() {
     // dh 下的 到/稻 频次不同,不足以触发兜底;用 suggestion 中被加成的"稻"验证
     // suggestion 兜底:构造两个同频词条的临时词库。
     let td = TempDir::new();
-    std::fs::write(
-        td.join("wubi.tsv"),
-        "z\t甲\t100\nz\t乙\t100\n",
-    )
-    .unwrap();
+    std::fs::write(td.join("wubi.tsv"), "z\t甲\t100\nz\t乙\t100\n").unwrap();
     std::fs::write(td.join("suggestion.tsv"), "乙\t5000\n甲\t10\n").unwrap();
     let mut eng = Engine::new(&td.path).unwrap();
     type_str(&mut eng, "z");
     let page = page_texts(&eng);
-    assert_eq!(page, vec!["乙".to_string(), "甲".to_string()], "同分时 suggestion 高者在前");
+    assert_eq!(
+        page,
+        vec!["乙".to_string(), "甲".to_string()],
+        "同分时 suggestion 高者在前"
+    );
 }
 
 #[test]

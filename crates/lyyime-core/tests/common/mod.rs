@@ -22,8 +22,8 @@ pub struct TempDir {
 impl TempDir {
     pub fn new() -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir()
-            .join(format!("lyyime-core-test-{}-{n}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("lyyime-core-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
         Self { path }
     }
@@ -69,10 +69,13 @@ pub fn engine_real() -> Engine {
 
 /// 从 fixtures 构造引擎,用户词典指向给定 tempdir(学习类测试专用)。
 pub fn engine_with_user_dict(td: &TempDir) -> Engine {
-    engine_with_fixtures(&fixtures(), Config {
-        user_dict: Some(td.join("user.tsv")),
-        ..Config::default()
-    })
+    engine_with_fixtures(
+        &fixtures(),
+        Config {
+            user_dict: Some(td.join("user.tsv")),
+            ..Config::default()
+        },
+    )
 }
 
 /// 从 fixtures 构造引擎并套用自定义配置;未指定 user_dict 时同样落到临时目录。
@@ -83,7 +86,10 @@ pub fn engine_with(cfg: Config) -> Engine {
 /// 通用:指定词库目录 + 配置构造引擎;用户词典缺省落到独立临时目录。
 pub fn engine_with_fixtures(dir: &Path, cfg: Config) -> Engine {
     let mut eng = Engine::new(dir).unwrap();
-    let cfg = Config { user_dict: cfg.user_dict.or_else(|| Some(leaked_user_dict())), ..cfg };
+    let cfg = Config {
+        user_dict: cfg.user_dict.or_else(|| Some(leaked_user_dict())),
+        ..cfg
+    };
     eng.set_config(cfg);
     eng
 }

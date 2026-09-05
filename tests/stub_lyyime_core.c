@@ -294,15 +294,18 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr,
         e->page = 0;
         return r;
 
-    case 9: /* LKEY_SHIFTPRESS:模式翻转 + ModeChanged */
-        newmode = e->mode ? 0 : 1;
-        snprintf(json, sizeof(json), "[{\"t\":\"mode\",\"m\":%d}]", newmode);
-        r = stub_write_out(json, buf, buf_cap);
-        if (r < 0) return r;
-        e->mode = newmode;
-        e->buf[0] = '\0';
-        e->page = 0;
-        return r;
+    case 9: /* LKEY_SHIFTPRESS:有缓冲上屏英文原串;空缓冲吞键 */
+        if (e->buf[0] != '\0') {
+            snprintf(json, sizeof(json),
+                     "[{\"t\":\"commit\",\"s\":\"%s\"},{\"t\":\"preedit\"}]",
+                     e->buf);
+            r = stub_write_out(json, buf, buf_cap);
+            if (r < 0) return r;
+            e->buf[0] = '\0';
+            e->page = 0;
+            return r;
+        }
+        return stub_write_out("[{\"t\":\"consumed\"}]", buf, buf_cap);
 
     default: /* LKEY_OTHER:有缓冲先 reset(preedit 清空)再 pass */
         if (e->buf[0] != '\0') {

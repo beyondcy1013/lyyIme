@@ -18,6 +18,7 @@ typedef struct SettingsUi {
     GtkWidget *chk_auto;
     GtkWidget *chk_punct;
     GtkWidget *chk_learn;
+    GtkWidget *chk_commit_four;
     GtkWidget *chk_autostart;
     int built; /* .ui 加载成功标记;失败时 show 给出降级提示 */
     char ui_dir[1200];

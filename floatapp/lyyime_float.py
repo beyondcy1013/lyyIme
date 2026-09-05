@@ -14,6 +14,7 @@
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -32,6 +33,7 @@ TABLE_DIR = '/usr/share/ibus-table/tables'
 CFG_DIR = os.path.expanduser('~/.config/lyyime')
 CFG_FILE = os.path.join(CFG_DIR, 'config.json')
 FREQ_FILE = os.path.join(CFG_DIR, 'user_freq.json')
+PID_FILE = os.path.expanduser('~/.local/share/lyyime/float.pid')
 
 
 def load_cfg():
@@ -429,10 +431,62 @@ class LyyImeApp:
         Gtk.main_quit()
 
 
+def pidfile_alive(path):
+    """读 pidfile 并确认进程存活;残留/非法内容视为不存在。"""
+    try:
+        with open(path) as f:
+            pid = int(f.read().strip())
+    except Exception:
+        return 0
+    if pid <= 0:
+        return 0
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return 0
+    return pid
+
+
+def write_pidfile(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write(f'{os.getpid()}\n')
+
+
 def main():
+    # WM_CLASS 与桌面入口 StartupWMClass 对应(窗口归组/再次唤起识别)
+    GLib.set_prgname('lyyime-float')
+    # 单实例:已有悬浮窗在跑 → SIGUSR1 唤起(显示+聚焦)后自身退出,避免重复开窗
+    alive = pidfile_alive(PID_FILE)
+    if alive and alive != os.getpid():
+        try:
+            os.kill(alive, signal.SIGUSR1)
+            print(f'lyyime-float 已在运行(pid={alive}),已唤起其悬浮窗。',
+                  file=sys.stderr)
+            return
+        except OSError:
+            pass
+    write_pidfile(PID_FILE)
+
     app = LyyImeApp()
+
+    def on_wake():
+        if not app.win.get_visible():
+            app.win.show_all()
+        app.win.present()
+        app.reassert_above()
+        app.focus_entry()
+        return False
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, on_wake)
     GLib.timeout_add(3000, lambda: (app.save_position(), False)[1])
-    Gtk.main()
+    try:
+        Gtk.main()
+    finally:
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
 
 
 if __name__ == '__main__':

@@ -16,7 +16,10 @@ pub struct QuoteState {
 impl QuoteState {
     /// 初始状态:两种引号都从开引号开始。
     pub fn new() -> Self {
-        Self { single_open: true, double_open: true }
+        Self {
+            single_open: true,
+            double_open: true,
+        }
     }
 }
 
@@ -40,12 +43,20 @@ pub fn to_chinese(c: char, quotes: &mut QuoteState) -> Option<char> {
         '\'' => {
             let open = quotes.single_open;
             quotes.single_open = !open;
-            if open { '\u{2018}' } else { '\u{2019}' }
+            if open {
+                '\u{2018}'
+            } else {
+                '\u{2019}'
+            }
         }
         '"' => {
             let open = quotes.double_open;
             quotes.double_open = !open;
-            if open { '\u{201C}' } else { '\u{201D}' }
+            if open {
+                '\u{201C}'
+            } else {
+                '\u{201D}'
+            }
         }
         '(' => '(',
         ')' => ')',

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- lyyIme 悬浮窗图标:输入光标 + 悬浮候选条(纯矢量形状,勿用 <text>,大尺寸会糊) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <rect x="0" y="0" width="24" height="24" rx="5" fill="#3584e4"/>
+  <rect x="5" y="4.5" width="2.6" height="10" rx="1.3" fill="#ffffff"/>
+  <rect x="9.4" y="8.4" width="9.6" height="2.2" rx="1.1" fill="#ffffff" opacity="0.85"/>
+  <rect x="3.5" y="16" width="17" height="4.6" rx="2.3" fill="#ffffff"/>
+  <circle cx="8" cy="18.3" r="1.15" fill="#3584e4"/>
+  <circle cx="12" cy="18.3" r="1.15" fill="#3584e4"/>
+  <circle cx="16" cy="18.3" r="1.15" fill="#3584e4"/>
+</svg>

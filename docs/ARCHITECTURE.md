@@ -95,6 +95,8 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 
 `key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10`。
 
+`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。
+
 **chr 传值约定(v1.1 实现期确认)**:`chr` 携带 Char/Punct/**Digit** 的码点——Digit 传 `'1'..'9'`(ASCII 0x31..0x39),core 按 `chr-'0'` 取值;其余 key_id 填 0。**有状态纪律**:`lyyime_process_key` 必须先生成完整 effects JSON、确认写入容量足够后才落内部状态变更,保证宿主因 `-needed` 扩容重试时同一键不会二次生效。
 
 ## 4. 数据文件格式(data/runtime/,UTF-8 TSV,dicttool 产物)
@@ -129,7 +131,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
    | english_with_cn | 30 | buffer 是完整高频英文词但存在中文命中 |
    | pinyin_abbrev | 20 | 简拼 |
    `freq_norm = log10(1+freq) / log10(1+maxf_of_file) × 10`(每文件独立归一,加载时缓存 max)。设计动机:各源频率尺度差 4 个数量级以上(拼音单字 1e9 vs 词组 1e3),加性权重会被大频值跨层碾压;层级化后同层内同源尺度自然一致。用户词加成为层内 freq 乘子(×1.5)。输出前 page_size 条。
-   英文通道修订:完整英文词 ∈ english.tsv 前 mixed_auto_commit_top_n(默认 500)时即使有中文命中也入选(english_with_cn);∈ 前 en_freq_top_n(2000)且无中文命中时进 english_no_cn;**直通上屏(auto-commit)仅在"无中文命中"或"top-500 词"时触发**。
+   英文通道修订:完整英文词 ∈ english.tsv 前 mixed_auto_commit_top_n(默认 500)时即使有中文命中也入选(english_with_cn);∈ 前 en_freq_top_n(2000)且无中文命中时进 english_no_cn。**中文态下英文词只作为候选展示;Space 是确认键,始终顶屏当前选中,英文输出先 Shift 单击切换到英文态。**
 6. **学习**:commit 候选词 → freq_extra += 1,重排时乘 user 权重。
 
 ## 6. 按键行为规范(宿主必须一致实现)
@@ -138,13 +140,14 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 |---|---|
 | a–z | 缓冲,更新 preedit/候选 |
 | 1–9 | 有候选:选第 N 个上屏;无候选:Pass(数字原样) |
-| Space | 有候选:顶屏首选;无缓冲:Pass(空格);有缓冲无候选:**Commit(原字母)**(中英混合直通) |
+| Space | **任何时候都确认当前选中项**:有候选顶屏首选;有缓冲无候选 Commit(原字母);无缓冲 Pass(空格) |
 | Enter | 有缓冲:Commit(原字母);无缓冲:Pass |
 | Backspace | 有缓冲删尾;空:Pass |
 | Esc | 清缓冲(Consumed);空:Pass |
 | `-`/`=` | 有候选翻页(Consumed);否则 Pass |
 | 标点 | 中文态空缓冲→Commit(对应中文标点);有缓冲→Commit(首选)+Commit(中文标点);英文态 Pass |
-| Shift 单击 | toggle_mode + ModeChanged(单击=按下后未产生其它键即释放,且无其它修饰) |
+| Shift 按下 | 有缓冲:**Commit(原字母)**(英文原串);空缓冲:Consumed 并进入单击检测 |
+| Shift 单击(空缓冲) | toggle_mode + ModeChanged(单击=按下后未产生其它键即释放,且无其它修饰) |
 | 其它键 | Pass(有缓冲时先 reset) |
 
 中文标点映射(可配置):`,.?!;:'"()[]{}` → `,.?!;:''""()【】{}` 等,默认集在 core `punct.rs`。

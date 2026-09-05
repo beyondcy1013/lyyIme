@@ -22,6 +22,8 @@ static void ui_from_config(SettingsUi *ui)
                                  c->chinese_punct);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_learn),
                                  c->learning);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_commit_four),
+                                 c->commit_after_four);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_autostart),
                                  c->autostart);
 }
@@ -40,6 +42,8 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_punct));
     c->learning =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_learn));
+    c->commit_after_four =
+        gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_commit_four));
     c->autostart =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_autostart));
 }
@@ -64,9 +68,10 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     lyy_engine_reload(app);
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d font=%d autostart=%d",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d font=%d autostart=%d",
             c.page_size, c.mixed_english, c.auto_commit_english,
-            c.chinese_punct, c.learning, c.font_size, c.autostart);
+            c.chinese_punct, c.learning, c.commit_after_four, c.font_size,
+            c.autostart);
     gtk_widget_hide(ui->window);
 }
 
@@ -126,11 +131,14 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_chinese_punct"));
     ui->chk_learn =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_learning"));
+    ui->chk_commit_four = GTK_WIDGET(
+        gtk_builder_get_object(builder, "chk_commit_after_four"));
     ui->chk_autostart =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_autostart"));
 
     if (!ui->window || !ui->spin_page || !ui->spin_font || !ui->chk_mixed ||
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
+        !ui->chk_commit_four ||
         !ui->chk_autostart) {
         lyy_log(&lyy_app()->log, "ERROR 设置界面缺少控件(%s)", file);
         g_object_unref(builder);

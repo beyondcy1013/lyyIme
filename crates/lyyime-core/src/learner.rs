@@ -34,7 +34,13 @@ fn now_epoch() -> u64 {
 
 impl Learner {
     pub(crate) fn new(enabled: bool, path: PathBuf) -> Self {
-        Self { enabled, path, map: HashMap::new(), unsaved: 0, dirty: false }
+        Self {
+            enabled,
+            path,
+            map: HashMap::new(),
+            unsaved: 0,
+            dirty: false,
+        }
     }
 
     /// 从 user.tsv 装载历史词频;文件缺失/损坏行静默忽略。
@@ -47,8 +53,12 @@ impl Learner {
                 continue;
             }
             let mut it = line.split('\t');
-            let (Some(word), Some(extra)) = (it.next(), it.next()) else { continue };
-            let Ok(extra) = extra.parse::<u64>() else { continue };
+            let (Some(word), Some(extra)) = (it.next(), it.next()) else {
+                continue;
+            };
+            let Ok(extra) = extra.parse::<u64>() else {
+                continue;
+            };
             let epoch = it.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             if word.is_empty() {
                 continue;
@@ -86,8 +96,9 @@ impl Learner {
         }
         if let Some(dir) = self.path.parent() {
             if !dir.as_os_str().is_empty() {
-                std::fs::create_dir_all(dir)
-                    .map_err(|e| Error::new(format!("无法创建用户词典目录 {}: {e}", dir.display())))?;
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    Error::new(format!("无法创建用户词典目录 {}: {e}", dir.display()))
+                })?;
             }
         }
         let mut text = String::new();

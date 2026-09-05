@@ -35,7 +35,11 @@ fn cli_replay_逐键输出效果json() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 6, "5 个字母 + 1 个空格,每键一行:{:?}", stdout);
     assert!(lines[0].contains("\"key\":\"n\""), "{:?}", lines[0]);
-    assert!(lines[0].contains("\"t\":\"preedit\",\"s\":\"n\""), "{:?}", lines[0]);
+    assert!(
+        lines[0].contains("\"t\":\"preedit\",\"s\":\"n\""),
+        "{:?}",
+        lines[0]
+    );
     assert!(lines[0].contains("\"t\":\"cands\""), "{:?}", lines[0]);
     // 最后一行:空格顶屏"你好"。
     assert!(
@@ -87,7 +91,11 @@ fn cli_shift标点翻页回放() {
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.lines().next().unwrap().contains("\"t\":\"mode\",\"m\":1"));
+    assert!(stdout
+        .lines()
+        .next()
+        .unwrap()
+        .contains("\"t\":\"mode\",\"m\":1"));
     assert!(stdout.contains("\"key\":\"n\"") && stdout.contains("\"t\":\"pass\""));
     let last = stdout.lines().last().unwrap();
     assert!(last.contains("\"t\":\"commit\",\"s\":\"你\""), "{:?}", last);
@@ -101,7 +109,11 @@ fn cli_参数错误_退出码2与人话提示() {
     let out = cli(&td).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("用法") || stderr.contains("错误"), "{:?}", stderr);
+    assert!(
+        stderr.contains("用法") || stderr.contains("错误"),
+        "{:?}",
+        stderr
+    );
     // 未知子命令。
     let out = cli(&td)
         .args(["--data-dir", fixtures().to_str().unwrap(), "dance", "abc"])
@@ -110,7 +122,12 @@ fn cli_参数错误_退出码2与人话提示() {
     assert_eq!(out.status.code(), Some(2));
     // 未知键标记。
     let out = cli(&td)
-        .args(["--data-dir", fixtures().to_str().unwrap(), "replay", "<boom>"])
+        .args([
+            "--data-dir",
+            fixtures().to_str().unwrap(),
+            "replay",
+            "<boom>",
+        ])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));

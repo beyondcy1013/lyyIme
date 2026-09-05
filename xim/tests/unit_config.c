@@ -1,7 +1,7 @@
 /*
  * config(TOML 平面子集)单元测试(headless)
  * 覆盖:默认值、加载(存在/不存在)、保存后在位更新、未知行与注释保留、
- *       布尔写法保持、非法值钳制、autostart 开关(写/删 desktop 文件)。
+ *       布尔写法保持与翻转落盘、非法值钳制、autostart 开关(写/删 desktop 文件)。
  * 运行:make test(build/tests/unit_config,全绿退出 0)
  */
 #include "config.h"
@@ -48,7 +48,8 @@ int main(void)
     /* 1. 默认值 */
     LyyConfig c;
     lyy_config_defaults(&c);
-    CHECK(c.page_size == 5 && c.mixed_english == 1 && c.font_size == 14 &&
+    CHECK(c.page_size == 5 && c.mixed_english == 1 &&
+              c.commit_after_four == 0 && c.font_size == 14 &&
               c.autostart == 0,
           "默认值正确");
 
@@ -59,6 +60,7 @@ int main(void)
     /* 3. 保存生成文件,含全部管理键与中文注释 */
     c.page_size = 7;
     c.autostart = 1;
+    c.commit_after_four = 1;
     CHECK(lyy_config_save(path, &c) == 0, "保存成功");
     char *body = read_all(path);
     CHECK(body && strstr(body, "page_size = 7") && strstr(body, "候选数"),
@@ -95,6 +97,33 @@ int main(void)
     fclose(fp);
     lyy_config_load(path, &c2);
     CHECK(c2.page_size == 5 && c2.font_size == 14, "越界值钳制回默认");
+
+    /* 7. 布尔值翻转必须落盘:文件已有 false,置 1 后保存必须写回 true */
+    fp = fopen(path, "w");
+    fprintf(fp, "autostart = false\n");
+    fclose(fp);
+    LyyConfig c3;
+    lyy_config_load(path, &c3);
+    CHECK(c3.autostart == 0, "读到已有 false 值");
+    c3.autostart = 1;
+    CHECK(lyy_config_save(path, &c3) == 0, "翻转后保存成功");
+    body = read_all(path);
+    CHECK(body && strstr(body, "autostart = true"),
+          "已有 false 值翻转后写回 true(不得冻结旧值)");
+    g_free(body);
+
+    /* 8. 数字写法保持:autostart = 0 翻转后写 1(而非 true) */
+    fp = fopen(path, "w");
+    fprintf(fp, "autostart = 0\n");
+    fclose(fp);
+    lyy_config_load(path, &c3);
+    c3.autostart = 1;
+    lyy_config_save(path, &c3);
+    body = read_all(path);
+    CHECK(body && strstr(body, "autostart = 1") &&
+              !strstr(body, "autostart = true"),
+          "数字写法保持且值更新");
+    g_free(body);
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);

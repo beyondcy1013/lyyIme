@@ -31,7 +31,7 @@ install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim.desktop" <<
 Type=Application
 Name=lyyIme 独立外挂输入法
 Name[en]=lyyIme Standalone IME
-Comment=不依赖 ibus/fcitx 的 XIM 独立输入法(Mode B)
+Comment=XIM 后台服务(开机自启后应用内直接打字,无主窗口;点击本图标=唤起设置)
 Exec=$PREFIX/bin/lyyime-xim
 Icon=lyyime-xim
 Terminal=false

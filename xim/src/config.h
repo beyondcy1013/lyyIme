@@ -16,6 +16,7 @@ typedef struct {
     int auto_commit_english; /* 高置信英文词标点/空格自动直通 */
     int chinese_punct;       /* 中文态使用中文标点 */
     int learning;            /* 用户词学习开关 */
+    int commit_after_four;   /* 满足四码后,继续输入字母先顶屏当前选中 */
     int font_size;           /* 候选窗字体大小(10..28) */
     int autostart;           /* 开机自启(写 ~/.config/autostart) */
 } LyyConfig;

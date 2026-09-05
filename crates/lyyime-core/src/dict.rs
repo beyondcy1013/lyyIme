@@ -139,7 +139,9 @@ impl DictIndex {
         for cols in read_rows(path, 3) {
             let code = cols[0].to_lowercase();
             let word = cols[1].clone();
-            let Ok(freq) = cols[2].parse::<u64>() else { continue };
+            let Ok(freq) = cols[2].parse::<u64>() else {
+                continue;
+            };
             if code.is_empty() || word.is_empty() || !code.is_ascii() {
                 continue;
             }
@@ -154,7 +156,11 @@ impl DictIndex {
             words.truncate(WUBI_PER_CODE);
             let base = self.wubi.len() as u32;
             for (word, freq) in words {
-                self.wubi.push(WubiEntry { code: code.clone(), word, freq });
+                self.wubi.push(WubiEntry {
+                    code: code.clone(),
+                    word,
+                    freq,
+                });
             }
             let idxs: Vec<u32> = (base..self.wubi.len() as u32).collect();
             self.wubi_exact.insert(code.clone(), idxs);
@@ -174,11 +180,7 @@ impl DictIndex {
                 self.wubi[b as usize]
                     .freq
                     .cmp(&self.wubi[a as usize].freq)
-                    .then_with(|| {
-                        self.wubi[a as usize]
-                            .word
-                            .cmp(&self.wubi[b as usize].word)
-                    })
+                    .then_with(|| self.wubi[a as usize].word.cmp(&self.wubi[b as usize].word))
             });
             bucket.truncate(WUBI_BUCKET);
         }
@@ -190,8 +192,12 @@ impl DictIndex {
         let mut map: HashMap<String, Vec<(char, u64)>> = HashMap::new();
         for cols in read_rows(path, 3) {
             let py = cols[0].to_lowercase();
-            let Some(ch) = cols[1].chars().next() else { continue };
-            let Ok(freq) = cols[2].parse::<u64>() else { continue };
+            let Some(ch) = cols[1].chars().next() else {
+                continue;
+            };
+            let Ok(freq) = cols[2].parse::<u64>() else {
+                continue;
+            };
             if py.is_empty() || !py.is_ascii() || ch.is_whitespace() {
                 continue;
             }
@@ -225,19 +231,24 @@ impl DictIndex {
         for cols in read_rows(path, 3) {
             let word = cols[0].clone();
             let py = cols[1].to_lowercase();
-            let Ok(freq) = cols[2].parse::<u64>() else { continue };
-            let sylls: Vec<String> =
-                py.split_whitespace().map(str::to_string).collect();
+            let Ok(freq) = cols[2].parse::<u64>() else {
+                continue;
+            };
+            let sylls: Vec<String> = py.split_whitespace().map(str::to_string).collect();
             if word.is_empty() || sylls.is_empty() {
                 continue;
             }
             if sylls.iter().any(|s| s.is_empty() || !s.is_ascii()) {
                 continue;
             }
-            let jian: String =
-                sylls.iter().filter_map(|s| s.chars().next()).collect();
+            let jian: String = sylls.iter().filter_map(|s| s.chars().next()).collect();
             let idx = self.phrases.len() as u32;
-            self.phrases.push(PhraseEntry { word, sylls, jian, freq });
+            self.phrases.push(PhraseEntry {
+                word,
+                sylls,
+                jian,
+                freq,
+            });
             let joined = self.phrases[idx as usize].sylls.join(" ");
             self.py_exact.entry(joined).or_default().push(idx);
             // 音节级前缀(不含全串):缺尾音节查询用。
@@ -270,7 +281,9 @@ impl DictIndex {
         let mut rows = Vec::new();
         for cols in read_rows(path, 2) {
             let word = cols[0].to_lowercase();
-            let Ok(freq) = cols[1].parse::<u64>() else { continue };
+            let Ok(freq) = cols[1].parse::<u64>() else {
+                continue;
+            };
             if word.is_empty() || !word.is_ascii() || !seen.insert(word.clone()) {
                 continue;
             }
@@ -281,7 +294,12 @@ impl DictIndex {
         }
         // 词频名次(1 起):按频次降序,同频按词序稳定 —— 供 en_freq_top_n 判定。
         let mut order: Vec<usize> = (0..rows.len()).collect();
-        order.sort_by(|&a, &b| rows[b].1.cmp(&rows[a].1).then_with(|| rows[a].0.cmp(&rows[b].0)));
+        order.sort_by(|&a, &b| {
+            rows[b]
+                .1
+                .cmp(&rows[a].1)
+                .then_with(|| rows[a].0.cmp(&rows[b].0))
+        });
         for (rank, &i) in order.iter().enumerate() {
             self.en_rank.insert(rows[i].0.clone(), (rank + 1) as u32);
         }
@@ -312,7 +330,9 @@ impl DictIndex {
         let mut count = 0usize;
         for cols in read_rows(path, 2) {
             let word = cols[0].clone();
-            let Ok(freq) = cols[1].parse::<u64>() else { continue };
+            let Ok(freq) = cols[1].parse::<u64>() else {
+                continue;
+            };
             if word.is_empty() {
                 continue;
             }
@@ -337,7 +357,11 @@ fn read_rows(path: &Path, min_cols: usize) -> Vec<Vec<String>> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| line.split('\t').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+        .map(|line| {
+            line.split('\t')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>()
+        })
         .filter(|cols| cols.len() >= min_cols)
         .collect()
 }

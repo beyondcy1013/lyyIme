@@ -220,6 +220,15 @@ class LogicTestCase(unittest.TestCase):
         self.assertTrue(ret_release, 'Shift 单击释放应被消费')
         self.assertEqual(host.modes, [1], '应广播 ModeChanged(1=英文)')
 
+    def test_shift_press_with_buffer_commits_raw_letters(self):
+        logic, host, _ = self.make_logic()
+        for ch in 'ni':
+            self.press(logic, ord(ch))
+        self.assertTrue(self.press(logic, self.K_SHIFT_L))
+        self.assertEqual(host.commits, ['ni'])
+        self.assertIsNone(host.last_preedit)
+        self.assertEqual(host.modes, [], '有缓冲 Shift 上屏原串,不切换模式')
+
     def test_shift_combo_letter_does_not_toggle(self):
         logic, host, _ = self.make_logic()
         self.press(logic, self.K_SHIFT_L)                    # Shift 按下
@@ -406,8 +415,9 @@ class LogicTestCase(unittest.TestCase):
         self.assertEqual(cand0, 'n壹')
         self.assertEqual(ffi.cand_comment(0), '注壹')
         self.assertEqual(ffi.cand(99), '', '越界候选返回空串')
+        ffi.reset()
         mode_eff = ffi.process_key(lyyime_ffi.LKEY_SHIFTPRESS, 0)
-        self.assertEqual(mode_eff, [{'t': 'mode', 'm': 1}])
+        self.assertEqual(mode_eff, [{'t': 'consumed'}])
         pass_eff = ffi.process_key(lyyime_ffi.LKEY_OTHER, 0)
         self.assertEqual(pass_eff, [{'t': 'pass'}])
 

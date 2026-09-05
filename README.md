@@ -1,6 +1,6 @@
 # lyyIme — Linux 五笔/拼音混合输入法
 
-类搜狗体验的五笔/拼音混打输入法,针对 Linux XFCE + X11(本机 openEuler 24.03)。
+类搜狗体验的**拼音/五笔混输**输入法,针对 Linux XFCE + X11(openEuler 24.03 实测)。
 **双模式**,互为备份,解决"输入法框架底层总是出问题"的痛点:
 
 | 模式 | 形态 | 依赖 | 适用 |
@@ -8,7 +8,9 @@
 | **A · ibus 引擎** | 标准 ibus 输入法(python + Rust FFI) | ibus | 日常桌面,托盘切换 |
 | **B · 独立外挂** | 单一可执行程序 `lyyime-xim`(类万能五笔外挂,最小 XIM server + GTK3 候选窗) | 无(只要 X11) | 框架坏掉时的兜底,GTK3/Xlib/终端可用 |
 
-## 功能
+## 核心特性:拼音五笔混输
+
+不切换输入方案,不打模式开关:五笔86、全拼、简拼、英文共用一个 12 字母缓冲区;候选按“五笔精确 → 拼音完整切分 → 简拼/前缀 → 用户词学习 → 英文兜底”合并排序。
 
 - 五笔86 + 全拼/简拼**同一字母空间混打**,候选合并智能排序
 - **Shift 单击**切换中/英文(组合键不误触)
@@ -30,6 +32,7 @@ lyyime-doctor check                       # 体检;lyyime-doctor fix --all 修�
 ## 文档
 
 - [AGENTS.MD](AGENTS.MD) — 项目规则与并发协作纪律(开发者必读)
+
 - [docs/PLAN.md](docs/PLAN.md) — 里程碑与验收标准
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 架构与接口合同
 - [docs/RESEARCH.md](docs/RESEARCH.md) — 调研结论

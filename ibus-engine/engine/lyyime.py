@@ -93,22 +93,29 @@ DATA_DIR_DEFAULT = os.path.join(
     'lyyime')
 
 
-def read_page_size():
-    """读 ~/.config/lyyime/config.toml 的 page_size(与 core/app 共用配置)。
-
-    读不到或非法时回退 DEFAULT_PAGE_SIZE,绝不因配置缺失而崩溃。
-    """
-    default = DEFAULT_PAGE_SIZE
+def _read_toml_config():
+    """读取 ~/.config/lyyime/config.toml;读不到/损坏时返回空 dict。"""
     cfg_path = os.path.join(
         os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'),
         'lyyime', 'config.toml')
     try:
         with open(cfg_path, 'rb') as fh:
-            cfg = tomllib.load(fh)
-        size = int(cfg.get('page_size', default))
-        return min(9, max(1, size))
+            return tomllib.load(fh)
     except (OSError, ValueError, tomllib.TOMLDecodeError):
-        return default
+        return {}
+
+
+def read_page_size():
+    """读共用 config.toml 的 page_size;非法值回退默认。"""
+    default = DEFAULT_PAGE_SIZE
+    size = int(_read_toml_config().get('page_size', default))
+    return min(9, max(1, size))
+
+
+def read_commit_after_four():
+    """读共用 config.toml 的 commit_on_extra_after_four(默认 false)。"""
+    return bool(_read_toml_config().get(
+        'commit_on_extra_after_four', False))
 
 
 class EngineLogic(object):
@@ -128,10 +135,12 @@ class EngineLogic(object):
     :param page_size: 候选页大小(仅展示用,翻页/选词由 core 驱动)。
     """
 
-    def __init__(self, host, ffi=None, page_size=DEFAULT_PAGE_SIZE):
+    def __init__(self, host, ffi=None, page_size=DEFAULT_PAGE_SIZE,
+                 commit_after_four=False):
         self.host = host
         self.ffi = ffi
         self.page_size = page_size
+        self.commit_after_four = commit_after_four
         self.input_purpose = 0          # 宿主经 set_content_type 更新
         self.degraded = ffi is None     # True = 英文直通降级态
         self.mode = ffi.mode() if ffi is not None else 0
@@ -166,8 +175,11 @@ class EngineLogic(object):
                 # Shift 参与组合键(Ctrl/Alt/Super+Shift):放行,不算单击
                 self._pending_shift = None
                 return False
-            # 单击按下:先吞下,等待 release;若期间来任何其它键则作废
-            self._pending_shift = keyval
+            # Shift 按下:有缓冲立即上屏英文原串;空缓冲进入单击检测。
+            effects = self.ffi.process_key(LKEY_SHIFTPRESS, 0)
+            consumed = self._dispatch(effects)
+            if self._preedit is None:
+                self._pending_shift = keyval
             return True
         # 其它键按下:无论成败都取消未决的 Shift 单击
         self._pending_shift = None
@@ -340,8 +352,10 @@ class LyyimeEngine(IBus.Engine):
         # FFI 失败不抛出:进入降级英文直通,引擎照常工作
         try:
             ffi = LyyimeFfi()
+            # 词库目录默认由 core 内部处理;四码顶屏等共享选项启动时同步。
             self._logic = EngineLogic(host=self, ffi=ffi,
-                                      page_size=read_page_size())
+                                      page_size=read_page_size(),
+                                      commit_after_four=read_commit_after_four())
         except Exception:  # noqa: BLE001 —— 降级必须兜住一切初始化异常
             LOGGER.exception('核心库初始化失败,进入英文直通降级模式')
             self._logic = EngineLogic(host=self, ffi=None)

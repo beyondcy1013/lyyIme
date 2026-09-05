@@ -97,9 +97,11 @@ static void hide_preedit(App *app)
 }
 
 static void apply_effects(App *app, xcb_im_input_context_t *ic,
-                          xcb_key_press_event_t *ev, const char *json)
+                          xcb_key_press_event_t *ev, const char *json,
+                          int *had_content_out)
 {
     xcb_im_t *im = app->xim.im;
+    int had_content = 0;
     LyyEffect effects[16];
     int count = 0;
     if (lyy_effects_parse(json, effects, 16, &count) != 0) {
@@ -114,6 +116,7 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         switch (e->kind) {
         case LYY_EFF_COMMIT:
             if (e->s[0]) {
+                had_content = 1;
                 do_commit(im, ic, e->s);
                 lyy_log(&app->log, "commit: %s", e->s);
             }
@@ -121,6 +124,8 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         case LYY_EFF_PREEDIT:
             /* 无 "s" 字段=清空预编辑(主控通报形态),set 空串即清除 */
             lyy_candwin_set_preedit(&app->candwin, e->s);
+            if (e->s[0])
+                had_content = 1;
             break;
         case LYY_EFF_CANDS: {
             lyy_candwin_begin_rows(&app->candwin);
@@ -154,6 +159,8 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         }
     }
     lyy_candwin_commit_layout(&app->candwin);
+    if (had_content_out)
+        *had_content_out = had_content;
 }
 
 /* ---- forward event 主处理(§6 按键行为 + Shift 单击/组合判定) ---- */
@@ -180,7 +187,9 @@ static gboolean shift_click_timeout(gpointer user_data)
         return G_SOURCE_REMOVE;
     st->shift_pending = 0;
     app->shift_pending = 0;
-    /* 单击确认:切回英文(trigger off,应用此后直接收键) */
+    /* 单击确认:通过 XIM trigger 协议切英文(应用此后直接收键) */
+    xcb_im_preedit_end(app->xim.im, app->xim.focused_ic);
+    xcb_flush(app->xim.conn);
     lyy_xim_set_trigger(app, 0);
     lyy_log(&app->log, "Shift 单击(时间窗确认)→ 英文直通(trigger off)");
     return G_SOURCE_REMOVE;
@@ -212,30 +221,30 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
 
     /* ---- Shift 触发键 ---- */
     if (lyy_keysym_is_shift(base_sym)) {
-        if (is_press) {
-            if (!st->shift_pending) {
-                st->shift_pending = 1;
-                app->shift_pending = 1;
-                if (app->shift_timer_id)
+        if (!is_press) {
+            /* 单击确认主路径:本服务端已请求转发 KeyRelease,按下挂起后
+             * release 必然随后到达,即视为一次完整单击 → 切英文。
+             * (280ms 时间窗仅为不转发 release 的客户端兜底,见 timeout。) */
+            if (st->shift_pending) {
+                if (app->shift_timer_id) {
                     g_source_remove(app->shift_timer_id);
-                app->shift_timer_id =
-                    g_timeout_add(LYY_SHIFT_CLICK_MS, shift_click_timeout, app);
-                lyy_log(&app->log, "Shift 按下,挂起等待单击判定");
+                    app->shift_timer_id = 0;
+                }
+                st->shift_pending = 0;
+                app->shift_pending = 0;
+                xcb_im_preedit_end(app->xim.im, app->xim.focused_ic);
+                xcb_flush(app->xim.conn);
+                lyy_xim_set_trigger(app, 0);
+                lyy_log(&app->log,
+                        "Shift 单击(release 确认)→ 英文直通(trigger off)");
             }
-        } else if (st->shift_pending) {
-            /* 客户端转发了 release:立即确认单击(快于时间窗) */
-            if (app->shift_timer_id) {
-                g_source_remove(app->shift_timer_id);
-                app->shift_timer_id = 0;
-            }
-            st->shift_pending = 0;
-            app->shift_pending = 0;
-            lyy_xim_set_trigger(app, 0);
-            lyy_log(&app->log, "Shift 单击(release 确认)→ 英文直通(trigger off)");
-        } else {
             xcb_im_forward_event(xs->im, ic, ev);
+            return;
         }
-        return;
+        /* 组合守护:off→on 后立刻收到 Shift 按下,视为一次完整单击开新组合。 */
+        if (st->combo_guard && now_ms() - st->guard_ms <= LYY_COMBO_GUARD_MS) {
+            st->combo_guard = 0;
+        }
     }
 
     /* ---- Shift 组合/后续键:取消挂起的单击判定 ---- */
@@ -281,6 +290,10 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
     }
 
     lyy_keysym_map(sym, &key, &chr);
+    if (is_press && lyy_keysym_is_shift(base_sym)) {
+        key = LKEY_SHIFTPRESS;
+        chr = 0;
+    }
     lyy_log(&app->log, "forward keysym=0x%lx → LKey=%d chr=%u",
             (unsigned long)sym, key, chr);
 
@@ -292,7 +305,20 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         xcb_im_forward_event(xs->im, ic, ev);
         return;
     }
-    apply_effects(app, ic, ev, json);
+    int had_content = 0;
+    apply_effects(app, ic, ev, json, &had_content);
+
+    /* Shift:core 已按"有缓冲上屏英文;空缓冲吞键"处理后,
+     * 空缓冲才作为 Shift 单击挂起,交给释放/时间窗确认。 */
+    if (key == LKEY_SHIFTPRESS && !had_content && !st->shift_pending) {
+        st->shift_pending = 1;
+        app->shift_pending = 1;
+        if (app->shift_timer_id)
+            g_source_remove(app->shift_timer_id);
+        app->shift_timer_id =
+            g_timeout_add(LYY_SHIFT_CLICK_MS, shift_click_timeout, app);
+        lyy_log(&app->log, "Shift 单击判定:按下挂起,等待时间窗确认");
+    }
 }
 
 /* 取消 Shift 单击挂起(焦点切换/IC 销毁/进入新触发时调用) */

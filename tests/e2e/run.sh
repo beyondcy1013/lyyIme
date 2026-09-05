@@ -88,18 +88,18 @@ xdotool key 1
 wait_buffer "你好" 8
 echo "PASS B1:真库数字选词 nihao→你好"
 
-xdotool type --delay 80 "the"; sleep 0.3; xdotool key comma
-wait_buffer "你好the," 8
-echo "PASS B2:top-500 英文词直通 the,"
+# 新契约(v1.2):Shift 按下时有缓冲 → 上屏英文原串;随后单击确认切到英文态
+xdotool type --delay 80 "the"; sleep 0.3; xdotool key Shift_L
+wait_buffer "你好the" 8
+echo "PASS B2:Shift 按下上屏英文原串 the"
 
-xdotool key Shift_L; sleep 0.6
 xdotool type --delay 80 "abc"
-wait_buffer "你好the,abc" 8
-echo "PASS B3:Shift 单击后英文直通 abc"
+wait_buffer "你好theabc" 8
+echo "PASS B3:英文态直通 abc"
 
 xdotool key Shift_L; sleep 0.6
 xdotool type --delay 80 "zhongguo"; sleep 0.4; xdotool key space
-wait_buffer "你好the,abc中国" 8
+wait_buffer "你好theabc中国" 8
 echo "PASS B4:Shift 回中文,zhongguo 顶屏 中国"
 echo "Mode B 最终缓冲: $(cat "$BUFFER")"
 kill "$CLIENT_PID" "$XIM_PID" 2>/dev/null || true

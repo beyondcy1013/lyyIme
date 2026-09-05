@@ -119,6 +119,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 1. 缓冲区 = 连续小写字母(≤12),Backspace 删尾。
 2. **五笔通道**:查 wubi.tsv,`code == buf` 完全命中优先;`code 是 buf 前缀` 给渐进候选;取每码频次前 9。
 3. **拼音通道**:对 buf 做音节切分(DP,音节表取自 pinyin_char 去重),允许末音节不完整;查 pinyin_phrase(词组)与 pinyin_char(单字);简拼(每音节首字母,≥2 键)低权重参与。
+   **注释反查五笔**:候选的 comment 编码提示统一为五笔——拼音命中的词经 wubi.tsv 的词→码反查索引(`wubi_rev`,同词多码取最长全码)显示其五笔编码,便于拼音打字时学习五笔;词不在五笔表时保留拼音注释兜底。五笔候选注释仍为其命中编码,英文候选仍为 `en`。
 4. **英文通道**(修订版细则见第 5 条末"英文通道修订"):无中文命中 → 前缀候选;buffer 是完整高频英文词 → 即使有中文命中也入选;直通上屏按"无中文命中 或 top-500 词"门控。
 5. **合并排序(v1.1,真实词库集成后修订——层级主导词典序)**:排序键为**词典序 (tier, specificity, freq_norm)**——层间不可跨越,层内先按 specificity(词组音节数放大、完整片段>更短片段、完全同码英文词 +0.5,用于压制伪切分),再按 `freq_norm ∈ [0,10)`。实现详见 `crates/lyyime-core/src/rank.rs`(模块文档含层级表)。设计动机:各源频率尺度差 4 个数量级以上,加性权重会被大频值跨层碾压。
    | 层 | tier_base | 说明 |
@@ -176,8 +177,9 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 
 ## 9. lyyime-doctor(工具菜单核心)
 
-`check` 项(输出 JSON+文本):XMODIFIERS/GTK_IM_MODULE/QT_IM_MODULE 是否指向运行中的框架;ibus-daemon 存活;lyyime 引擎组件 XML 是否就位(ibuscache);autostart 项;GTK2/3 与 Qt 的 immodule 文件存在性;字体缓存;`~/.local/share/lyyime` 数据完整性;最近日志错误。
-`fix`(幂等,可 `--dry-run`):写会话环境(Xfce: ~/.xprofile + xfconf)、`ibus write-cache` + 重启 ibus-daemon、重建 autostart、重装/重转词库、清 GTK immodule 缓存。GUI 由 lyyime-app 工具菜单嵌入(列表+一键修复)。
+`check` 项(输出 JSON+文本,共 10 项):env(XMODIFIERS/GTK_IM_MODULE/QT_IM_MODULE 是否指向运行中的框架);gui-env(采样桌面会话进程 `/proc/<pid>/environ` 的真实三件套,含跨进程一致性——诊断以 GUI 进程环境为准,不看调用方 shell);session-bus(IBus 是否注册在桌面会话真实使用的总线上:busctl 地面真值,daemon 进程环境兜底——根治「daemon 活着但总线接错」的假活故障);daemon(ibus-daemon 存活);engine-register(lyyime 引擎组件 XML 是否就位/ibus 缓存);autostart 项;GTK2/3 与 Qt 的 immodule 文件存在性;`~/.local/share/lyyime` 数据完整性;最近日志错误;locale 编码。
+`fix`(幂等,可 `--dry-run`):写会话环境(~/.xprofile + ~/.config/lyyime/env.sh,managed block;Mode B 用 modeb-env)、`ibus write-cache` + 重启 ibus-daemon(**按会话真实环境注入 DBUS_SESSION_BUS_ADDRESS/DISPLAY 后拉起**,取自 GUI 进程 environ,根治接错总线)、重建 autostart、重装/重转词库、清 GTK immodule 缓存。GUI 由 lyyime-app 工具菜单嵌入(列表+一键修复)。
+`probe`(端到端验证):自建 `lyyime-probe` 窗口 + `xdotool windowfocus` 显式聚焦(绝不碰用户焦点窗口)+ 注入字母 + 缓冲断言;通过=环境→总线→daemon→引擎→上屏全通;对「字母直通」(IM 未接管→指向 gui-env/session-bus)与「全角字母」(引擎全角模式,Shift+Space)自动判因。
 
 ### 9.1 输入法管理(工具菜单 · 增删其它输入法)
 

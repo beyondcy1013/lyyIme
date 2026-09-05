@@ -71,7 +71,7 @@ fn cli_cands_输出候选明细() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let last = stdout.lines().last().unwrap();
     assert!(last.contains("\"text\":\"你\""), "{:?}", last);
-    assert!(last.contains("\"comment\":\"ni\""), "{:?}", last);
+    assert!(last.contains("\"comment\":\"wqiy\""), "{:?}", last);
     assert!(last.contains("\"kind\":\"Pinyin\""), "{:?}", last);
     assert!(last.contains("\"i\":1"), "{:?}", last);
 }

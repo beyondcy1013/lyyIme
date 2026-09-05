@@ -45,6 +45,8 @@ pub(crate) struct DictIndex {
     pub wubi_exact: HashMap<String, Vec<u32>>,
     /// 前缀索引:任意前缀 → 词条下标(渐进候选)。
     pub wubi_prefix: HashMap<String, Vec<u32>>,
+    /// 反查:词 → 五笔编码(拼音候选注释统一为五笔码;同词多码取最长全码)。
+    pub wubi_rev: HashMap<String, String>,
     pub wubi_max: u64,
 
     // ---- 拼音通道 ----
@@ -99,6 +101,7 @@ impl DictIndex {
             wubi: Vec::new(),
             wubi_exact: HashMap::new(),
             wubi_prefix: HashMap::new(),
+            wubi_rev: HashMap::new(),
             wubi_max: 0,
             py_chars: HashMap::new(),
             syllables: HashSet::new(),
@@ -136,6 +139,8 @@ impl DictIndex {
 
     fn load_wubi(&mut self, path: &Path) {
         let mut by_code: HashMap<String, Vec<(String, u64)>> = HashMap::new();
+        // 反查暂存:word → (最优码, 该码词频)。
+        let mut rev: HashMap<String, (String, u64)> = HashMap::new();
         for cols in read_rows(path, 3) {
             let code = cols[0].to_lowercase();
             let word = cols[1].clone();
@@ -145,7 +150,21 @@ impl DictIndex {
             if code.is_empty() || word.is_empty() || !code.is_ascii() {
                 continue;
             }
-            by_code.entry(code).or_default().push((word, freq));
+            by_code.entry(code.clone()).or_default().push((word.clone(), freq));
+            // 同词多码取最长码(全码优先于简码),同长取频高,再同取字典序小,保证确定。
+            match rev.get_mut(&word) {
+                Some(slot) => {
+                    let better = code.len() > slot.0.len()
+                        || (code.len() == slot.0.len()
+                            && (freq > slot.1 || (freq == slot.1 && code < slot.0)));
+                    if better {
+                        *slot = (code.clone(), freq);
+                    }
+                }
+                None => {
+                    rev.insert(word, (code, freq));
+                }
+            }
         }
         if by_code.is_empty() {
             return;
@@ -185,6 +204,10 @@ impl DictIndex {
             bucket.truncate(WUBI_BUCKET);
         }
         self.wubi_max = self.wubi.iter().map(|e| e.freq).max().unwrap_or(0);
+        self.wubi_rev = rev
+            .into_iter()
+            .map(|(word, (code, _))| (word, code))
+            .collect();
         self.loaded_channels += 1;
     }
 

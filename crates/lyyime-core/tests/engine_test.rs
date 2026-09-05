@@ -171,7 +171,10 @@ fn 拼音单字_全拼排序按频次() {
     type_str(&mut eng, "ni");
     let page = page_texts(&eng);
     assert_eq!(page, vec!["你".to_string(), "尼".to_string()]);
-    assert_eq!(eng.flush_page()[0].comment, "ni");
+    // 反查:拼音候选注释为该字的五笔码;同字多码取最长全码 wqiy 而非简码 wq。
+    assert_eq!(eng.flush_page()[0].comment, "wqiy");
+    // 词不在五笔表时保留拼音注释兜底。
+    assert_eq!(eng.flush_page()[1].comment, "ni");
 }
 
 #[test]
@@ -181,6 +184,35 @@ fn 拼音词组_全拼命中第一() {
     let page = page_texts(&eng);
     assert_eq!(page.first().map(String::as_str), Some("你好"));
     assert!(page.contains(&"好".to_string()), "末音节单字也应出现");
+}
+
+#[test]
+fn 反查_拼音候选注释为五笔编码() {
+    let mut eng = engine();
+    type_str(&mut eng, "nihao");
+    let page = eng.flush_page();
+    let ni_hao = page.iter().find(|c| c.text == "你好").expect("你好 应在候选");
+    assert_eq!(ni_hao.comment, "wqvb", "拼音词组应反查五笔编码");
+    let hao = page.iter().find(|c| c.text == "好").expect("好 应在候选");
+    assert_eq!(hao.comment, "vbg", "拼音单字应反查五笔编码");
+}
+
+#[test]
+fn 反查_末音节不完整与简拼注释同样为五笔码() {
+    let mut eng = engine();
+    type_str(&mut eng, "niha");
+    let page = eng.flush_page();
+    let ni_hao = page.iter().find(|c| c.text == "你好").expect("你好 应在候选");
+    assert_eq!(ni_hao.comment, "wqvb", "缺尾词组注释也应反查五笔编码");
+
+    let mut eng = engine();
+    type_str(&mut eng, "nh");
+    let page = eng.flush_page();
+    let ni_hao = page
+        .iter()
+        .find(|c| c.text == "你好")
+        .expect("简拼应命中你好");
+    assert_eq!(ni_hao.comment, "wqvb", "简拼候选注释也应反查五笔编码");
 }
 
 #[test]

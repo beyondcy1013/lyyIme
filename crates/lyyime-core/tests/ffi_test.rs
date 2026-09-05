@@ -173,7 +173,7 @@ fn ffi_候选与注释读取() {
     }
     let (text, comment) = eng.cand(0);
     assert_eq!(text, "你好");
-    assert_eq!(comment, "ni hao");
+    assert_eq!(comment, "wqvb", "拼音命中的候选注释应反查为五笔编码");
     // 越界下标:写空串,返回 1(内容仅 \0)。
     let mut buf = vec![0u8; 64];
     let n = unsafe { lyyime_cand(eng.0, 9, buf.as_mut_ptr() as *mut c_char, 64) };

@@ -633,6 +633,9 @@ impl Engine {
     ///
     /// spec(完整音节偏好):词组按音节数放大;末音节单字记 1;
     /// 不完整片段越接近真实音节越具体(frag_len 计入),同层内先排更完整的匹配。
+    ///
+    /// 注释统一为五笔码(反查):即使输入拼音,候选后的编码也始终显示该词的
+    /// 五笔编码;词不在五笔表时才保留拼音注释兜底。
     fn pinyin_candidates(&self, buf: &str, pool: &mut HashMap<String, RawCand>) -> usize {
         if self.dict.syllables.is_empty() {
             return 0;
@@ -649,7 +652,7 @@ impl Engine {
                     insert_cand(
                         pool,
                         p.word.clone(),
-                        joined.clone(),
+                        self.wubi_comment(&p.word, joined.clone()),
                         rank::TIER_PINYIN_FULL,
                         (p.sylls.len() * 3) as f32,
                         rank::norm10(p.freq, dict.py_phrase_max),
@@ -665,7 +668,7 @@ impl Engine {
                     insert_cand(
                         pool,
                         ch.to_string(),
-                        last.to_string(),
+                        self.wubi_comment(&ch.to_string(), last.to_string()),
                         rank::TIER_PINYIN_FULL,
                         1.0,
                         rank::norm10(*freq, dict.py_char_max),
@@ -697,16 +700,16 @@ impl Engine {
                     // 词组必须还有下一个音节来消化这个不完整片段。
                     if p.sylls.len() > seg.len() && p.sylls[seg.len()].starts_with(frag) {
                         let spec = seg.len() as f32 * 3.0 + 1.0 + frag_len / 10.0;
-                        insert_cand(
-                            pool,
-                            p.word.clone(),
-                            format!("{joined} {frag}"),
-                            rank::TIER_PINYIN_PARTIAL,
-                            spec,
-                            rank::norm10(p.freq, dict.py_phrase_max),
-                            CandKind::Pinyin,
-                            suggestion_of(dict, &p.word),
-                        );
+                    insert_cand(
+                        pool,
+                        p.word.clone(),
+                        self.wubi_comment(&p.word, format!("{joined} {frag}")),
+                        rank::TIER_PINYIN_PARTIAL,
+                        spec,
+                        rank::norm10(p.freq, dict.py_phrase_max),
+                        CandKind::Pinyin,
+                        suggestion_of(dict, &p.word),
+                    );
                         hits += 1;
                     }
                 }
@@ -724,7 +727,7 @@ impl Engine {
                             insert_cand(
                                 pool,
                                 ch.to_string(),
-                                syll.clone(),
+                                self.wubi_comment(&ch.to_string(), syll.clone()),
                                 rank::TIER_PINYIN_PARTIAL,
                                 spec,
                                 rank::norm10(*freq, dict.py_char_max),
@@ -753,7 +756,7 @@ impl Engine {
                             insert_cand(
                                 pool,
                                 ch.to_string(),
-                                syll.clone(),
+                                self.wubi_comment(&ch.to_string(), syll.clone()),
                                 rank::TIER_PINYIN_PARTIAL,
                                 spec,
                                 rank::norm10(*freq, dict.py_char_max),
@@ -775,7 +778,7 @@ impl Engine {
                     insert_cand(
                         pool,
                         p.word.clone(),
-                        p.jian.clone(),
+                        self.wubi_comment(&p.word, p.jian.clone()),
                         rank::TIER_PINYIN_ABBREV,
                         1.0,
                         rank::norm10(p.freq, dict.py_phrase_max),
@@ -792,7 +795,7 @@ impl Engine {
                     insert_cand(
                         pool,
                         p.word.clone(),
-                        format!("{}?", p.jian),
+                        self.wubi_comment(&p.word, format!("{}?", p.jian)),
                         rank::TIER_PINYIN_ABBREV,
                         1.0,
                         rank::norm10(p.freq, dict.py_phrase_max),
@@ -804,6 +807,16 @@ impl Engine {
             }
         }
         hits
+    }
+
+    /// 反查五笔注释:候选注释统一为五笔编码——拼音命中的词显示其五笔码
+    /// (拼音打字也能看到五笔编码,便于学习反查);词不在五笔表时保留
+    /// 原通道注释(拼音)兜底。
+    fn wubi_comment(&self, word: &str, fallback: String) -> String {
+        match self.dict.wubi_rev.get(word) {
+            Some(code) => code.clone(),
+            None => fallback,
+        }
     }
 
     /// 英文通道(修订 §5.C):无中文命中时的前缀候选。

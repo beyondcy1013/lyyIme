@@ -7,20 +7,23 @@
 
 | 层 | 命令 | 依赖 | 断言内容 |
 |---|---|---|---|
-| core 单测 | `bash scripts/test.sh core` | 无 | 五笔/拼音/混合/标点/翻页/学习/FFI JSON(≥40 test) |
+| core 单测 | `bash scripts/test.sh core` | 无 | 五笔/拼音/混合/标点/翻页/学习/FFI JSON(≥40 test);热键解析/规范化/冲突自动升级(`hotkey` 模块,别名归一、+alt/+shift 阶梯、加载自愈) |
 | dicttool | `cargo test -p lyyime-dicttool` + `dicttool verify data/runtime` | 无 | 14 test + 40 项数据校验(行数/排序/抽样) |
 | doctor 单测 | `cargo test -p lyyime-doctor` | 无(tempdir 注入) | 60 test:8 检查项、6 修复幂等、ImeManager catalog/保护规则 |
 | doctor e2e | `bash tests/e2e/doctor_test.sh` | 真机(root) | 破坏 env→检出→修复→恢复;ime-list 真实枚举;dry-run 预览 |
 | ibus 引擎单测 | `python3 tests/unit_ibus_engine.py` | 桩库(gcc 自动编译)或真库 | 效果流:ni hao→候选、选词、Shift 单击、密码框、release 放行 |
-| xim 解析器单测 | `make -C xim test` | 无 | effects JSON 迷你解析器(≥8 test) |
-| Mode B e2e | `bash tests/e2e/xim_e2e.sh` | Xvfb :98 + 桩库/真库 | XIM 连接、nihao 选词上屏、Shift 切换、造词、CapsLock 大写态直通(AB/Shift→n)、退出清理 |
-| 全链路 e2e | `bash tests/e2e/run.sh`(M6) | Xvfb + 真库 + 全部安装 | 双模式真实打字断言 + 四码唯一 + /AI 全链路 + CapsLock 大写态直通 |
+| xim 解析器单测 | `make -C xim test` | 无 | effects JSON 迷你解析器 + config 读写(含热键冲突自愈 §15)+ 热键解析/规范化/冲突升级(`unit_hotkey.c` §7/§8) |
+| Mode B e2e | `bash tests/e2e/xim_e2e.sh` | Xvfb :98 + 桩库/真库 | XIM 连接、nihao 选词上屏、Shift 切换、造词、CapsLock 大写态直通(AB/Shift→n)、截屏热键(场景 F)、退出清理 |
+| 全链路 e2e | `bash tests/e2e/run.sh`(M6) | Xvfb + 真库 + 全部安装 | 双模式真实打字断言 + 四码唯一 + /AI 全链路 + CapsLock 大写态直通 + 截屏热键(PASS A4) |
 | 机制探针(留档) | `tests/e2e/x11grab_probe*.c` | Xvfb :99 | grab 回放不可靠/中文注入可行(架构决策证据) |
 
 ## 当前状态(2026-09-06)
 
-全部层通过:Rust 172 单测 ✅ / ibus 引擎 26+冒烟 ✅ / xim 单测+e2e ✅ / doctor e2e ✅ /
+全部层通过:Rust 单测(core/ibus/shot/float/doctor)✅ / ibus 引擎 26+冒烟 ✅ / xim 单测+e2e ✅ / doctor e2e ✅ /
 **双模式全链路 `tests/e2e/run.sh` ✅**(真库+真实词库)。
+快捷键冲突自动升级(§13.3)已实测:Xvfb 内 ① 冲突配置启动 → 日志「截屏快捷键 … 已自动改为 …」;
+② SIGUSR1 打开设置窗 → 截屏框键入 ctrl+equal 保存 → 弹窗说明、输入框与 config.toml 均为
+ctrl+alt+equal、日志「快捷键冲突自动升级:截屏快捷键 ctrl+equal → ctrl+alt+equal」。
 
 ## 一键
 

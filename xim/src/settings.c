@@ -161,15 +161,17 @@ static gboolean hotkeys_validate_and_resolve(SettingsUi *ui, LyyConfig *c,
 
     char next[128];
     if (lyy_hotkey_escalate(target, other, next, sizeof(next))) {
+        char tprev[LYY_CFG_STR_BASE];
+        snprintf(tprev, sizeof(tprev), "%s", target); /* 改写前留底供日志 */
         snprintf(tbuf, tcap, "%s", next);
         gtk_entry_set_text(GTK_ENTRY(tent), next); /* 所见即所得 */
         hotkey_msg_dialog(
             ui, GTK_MESSAGE_INFO,
             g_strdup_printf("「%s」%s 与「%s」冲突,已自动改为 %s"
                             "(原组合 → +Alt → +Alt+Shift 逐级避让)。",
-                            tname, target, oname, next));
+                            tname, tprev, oname, next));
         lyy_log(&lyy_app()->log, "快捷键冲突自动升级:%s %s → %s", tname,
-                target, next);
+                tprev, next);
         return TRUE;
     }
     hotkey_msg_dialog(

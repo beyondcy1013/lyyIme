@@ -357,3 +357,25 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
   (命中/吞键/中英态/配置非法)+ `xim/tests/unit_config.c` §14 +
   `shot_e2e.sh`(7 场景)+ `xim_e2e.sh` 场景 F + `run.sh` PASS A4(双模式
   热键→拉起桩全链路)。
+
+### 13.3 快捷键冲突自动升级(造词/截屏通用,2026-09-06 新增)
+
+快捷键与其它 lyyime 快捷键占用同一 `修饰+键` 组合时自动避让("自动滑向
+下一级"),升级阶梯 = **原组合 → +Alt → +Alt+Shift**(已含的修饰自动跳过;
+如 ctrl+equal → ctrl+alt+equal → ctrl+alt+shift+equal)。
+
+- **判定**:规范化后比较 —— 别名归一(control≡ctrl、"="≡equal、
+  mod4/win≡super)+ 修饰定序(ctrl+alt+super+shift)+ 键名标准形;
+  写法非法的热键不参与冲突(宿主按各自合同回退默认)。
+- **设置窗保存**(Mode B `settings.c on_ok`):写法非法 → 报错并还原该
+  输入框,不保存;两键冲突时**刚改动的一侧**避让(两侧同改/都未改则截屏
+  让位),最终值**直接回写输入框**(所见即所得)并弹窗说明;三级全占用 →
+  报错还原该侧,请人工修改。
+- **配置加载**(Mode A `read_core_config` / Mode B `main.c` 启动):冲突
+  即自愈,**截屏热键让位**(工具键让位打字键)并写日志;设置窗打开时
+  显示的即自愈后的生效值。
+- **规格单源**:`lyyime-core src/hotkey.rs`(parse_hotkey / canon_hotkey /
+  escalate_hotkey / resolve_config_hotkeys;Mode A `keysym.rs` 直接复用),
+  Mode B C 镜像 `keysym_map.c lyy_hotkey_canon / lyy_hotkey_escalate` +
+  `config.c lyy_config_resolve_hotkey_conflicts`,两端单测各自覆盖
+  (core `hotkey` 用例、`unit_hotkey.c` §7/§8、`unit_config.c` §15)。

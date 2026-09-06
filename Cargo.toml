@@ -14,7 +14,10 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["lyy"]
-description = "Linux 五笔/拼音混合输入法(ibus 引擎 + X11 独立外挂双模式)"
+description = "Linux 五笔/拼音混合输入法(ibus 引擎 + XIM 外挂 + 悬浮窗三形态,内置 AI 助手)"
+license = "MIT"
+repository = "https://github.com/beyondcy1013/lyyIme"
+homepage = "https://github.com/beyondcy1013/lyyIme"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -298,6 +298,65 @@ int main(void)
     CHECK(lyy_config_resolve_hotkey_conflicts(&c14, note, sizeof(note)) == 0,
           "非法写法不参与冲突");
 
+    /* 16. 快速功能键(合同 §14):默认表 / [[quick_actions]] 解析 / 保存回读 */
+    LyyConfig q0;
+    lyy_config_defaults(&q0);
+    CHECK(q0.quick_actions_enabled == 1 && q0.quick_actions_count == 2 &&
+              strcmp(q0.quick_actions[0].trigger, "peizhi") == 0 &&
+              strcmp(q0.quick_actions[0].label, "打开配置") == 0 &&
+              strcmp(q0.quick_actions[0].command, "@settings") == 0 &&
+              strcmp(q0.quick_actions[1].trigger, "bangzhu") == 0 &&
+              strcmp(q0.quick_actions[1].command, "@help") == 0,
+          "快速功能键默认表(peizhi/bangzhu)");
+
+    /* 带 [[quick_actions]] 块的文件:解析出条目与开关 */
+    FILE *fqa = fopen(path, "w");
+    fprintf(fqa,
+            "quick_actions_enabled = false\n"
+            "[[quick_actions]]\n"
+            "trigger = \"rizhi\"\n"
+            "label = \"看日志\"\n"
+            "command = \"tail -f xim.log\"\n"
+            "[[quick_actions]]\n"
+            "trigger = \"bad1\"\n"
+            "label = \"非法\"\n"
+            "command = \"x\"\n");
+    fclose(fqa);
+    LyyConfig q1;
+    CHECK(lyy_config_load(path, &q1) == 0 && q1.quick_actions_enabled == 0,
+          "[[quick_actions]] 文件解析:开关为 false");
+    CHECK(q1.quick_actions_count == 1 &&
+              strcmp(q1.quick_actions[0].trigger, "rizhi") == 0 &&
+              strcmp(q1.quick_actions[0].label, "看日志") == 0 &&
+              strcmp(q1.quick_actions[0].command, "tail -f xim.log") == 0,
+          "非法触发词条目被剔除,合法条目保留");
+    /* 全部条目非法 → 回退内置默认表 */
+    FILE *fqa2 = fopen(path, "w");
+    fprintf(fqa2, "[[quick_actions]]\ntrigger = \"BAD\"\nlabel = \"x\"\ncommand = \"y\"\n");
+    fclose(fqa2);
+    LyyConfig q2;
+    lyy_config_load(path, &q2);
+    CHECK(q2.quick_actions_count == 2 &&
+              strcmp(q2.quick_actions[0].trigger, "peizhi") == 0,
+          "全部条目非法回退默认表");
+
+    /* 保存回读:[[quick_actions]] 块按当前表重写,块内键可再解析 */
+    LyyConfig q3 = q0;
+    snprintf(q3.quick_actions[0].command, sizeof(q3.quick_actions[0].command),
+             "%s", "xfce4-terminal");
+    CHECK(lyy_config_save(path, &q3) == 0, "保存含 [[quick_actions]] 的配置");
+    char *qbody = read_all(path);
+    CHECK(qbody && strstr(qbody, "[[quick_actions]]") &&
+              strstr(qbody, "trigger = \"peizhi\"") &&
+              strstr(qbody, "command = \"xfce4-terminal\""),
+          "保存产物含 [[quick_actions]] 块");
+    g_free(qbody);
+    LyyConfig q4;
+    CHECK(lyy_config_load(path, &q4) == 0 &&
+              q4.quick_actions_count == 2 &&
+              strcmp(q4.quick_actions[0].command, "xfce4-terminal") == 0,
+          "保存后回读一致");
+
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);
 

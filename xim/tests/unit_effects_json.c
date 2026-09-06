@@ -153,6 +153,21 @@ int main(void)
               !strcmp(eff[0].s, "已造词:你好(wqvb)"),
           "notice 效果解析");
 
+    /* 19. action 效果(合同 §14:快速功能键命中,i = 配置下标) */
+    n = -1;
+    CHECK(parse_ok("[{\"t\":\"action\",\"i\":0},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]",
+                   eff, 16, &n) == 0 &&
+              n == 3 && eff[0].kind == LYY_EFF_ACTION && eff[0].i == 0 &&
+              eff[1].kind == LYY_EFF_PREEDIT && eff[2].kind == LYY_EFF_CANDS,
+          "action 效果解析(i=0,含清除序列)");
+    n = -1;
+    CHECK(parse_ok("[{\"t\":\"action\",\"i\":7}]", eff, 16, &n) == 0 &&
+              n == 1 && eff[0].kind == LYY_EFF_ACTION && eff[0].i == 7,
+          "action 下标任意值");
+    /* 未知键仍判违约(新键 i 不放宽其它键) */
+    CHECK(parse_ok("[{\"t\":\"action\",\"i\":0,\"x\":1}]", eff, 16, &n) != 0,
+          "schema 之外的键仍违约");
+
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);
     return g_failed ? 1 : 0;

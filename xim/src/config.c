@@ -339,11 +339,18 @@ static int qa_trigger_valid(const char *s)
     return 1;
 }
 
-/* [[quick_actions]] 块内当前条目:表头开新条目(容量满则丢弃后续条目) */
+/* [[quick_actions]] 块内当前条目:首个表头出现时清掉预置默认表(文件表
+ * 即最终表),随后每表头开新条目(容量满则丢弃后续条目) */
 static LyyQuickAction *qa_current(LyyConfig *c, int *in_qa, int *overflow)
 {
+    if (!*in_qa && c->quick_actions_count > 0) {
+        /* 首个表头:丢弃 defaults 预置的默认表,从 0 开始收录文件条目 */
+        memset(c->quick_actions, 0, sizeof(c->quick_actions));
+        c->quick_actions_count = 0;
+    }
     if (*overflow || c->quick_actions_count >= LYY_QA_MAX) {
         *overflow = 1;
+        *in_qa = 1;
         return NULL;
     }
     LyyQuickAction *a = &c->quick_actions[c->quick_actions_count];
@@ -672,7 +679,11 @@ int lyy_config_save(const char *path, const LyyConfig *c)
             char sec[64];
             if (qa_header_of(p, sec, sizeof(sec)) &&
                 !strcmp(sec, "quick_actions")) {
-                /* §14:首个块位置重写为当前表,后续旧块整块跳过 */
+                /* §14:首个块位置重写为当前表,后续旧块整块跳过。
+                 * 数组表头同样是"段头":首个块位置兼作顶层补齐键的插入点,
+                 * 保证 quick_actions_enabled 等顶层键落在块之前(合法 TOML)。 */
+                if (sec_off == (size_t)-1)
+                    sec_off = out.len;
                 if (!qa_written) {
                     if (write_qa_blocks(&out, c) != 0)
                         goto out;
@@ -681,6 +692,8 @@ int lyy_config_save(const char *path, const LyyConfig *c)
                 in_qa_save = 1;
                 handled = 1;
             } else if (qa_header_of(p, sec, sizeof(sec))) {
+                if (sec_off == (size_t)-1)
+                    sec_off = out.len;
                 in_qa_save = 0; /* 其它 [[表]]:未知段,原样保留 */
             } else if (section_of(p, sec, sizeof(sec))) {
                 if (sec_off == (size_t)-1)

@@ -72,7 +72,7 @@ MOCK_AI_DUMP="$AI_DUMP" python3 "$ROOT/tests/e2e/mock_ai_server.py" \
 for _ in $(seq 1 50); do [[ -s "$AI_PORT_FILE" ]] && break; sleep 0.1; done
 [[ -s "$AI_PORT_FILE" ]] || fail "mock AI 服务未就绪"
 AI_PORT="$(cat "$AI_PORT_FILE")"
-write_ai_config() { # $1=HOME(隔离);开启 AI 指向 mock 服务
+write_ai_config() { # $1=HOME(隔离) $2=功能键 marker 路径;开启 AI + 快速功能键(§14)
     mkdir -p "$1/.config/lyyime"
     cat > "$1/.config/lyyime/config.toml" <<EOF
 [ai]
@@ -80,6 +80,11 @@ enabled = true
 api_base = "http://127.0.0.1:$AI_PORT/v1"
 api_key = "sk-e2e"
 model = "e2e-model"
+quick_actions_enabled = true
+[[quick_actions]]
+trigger = "ceshi"
+label = "E2E 功能键"
+command = "touch $2"
 EOF
 }
 wait_buffer() { # $1=期望 $2=超时秒
@@ -108,7 +113,8 @@ export LANG=zh_CN.utf8 LC_ALL=zh_CN.utf8
 export LYYIME_DATA_DIR="$DATA_DIR" LYYIME_CORE_LIB="$CORE_LIB"
 export LYYIME_AI_HELPER="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-ai"
 export LYYIME_RES_DIR="$ROOT/xim/res"   # e2e 测仓库自带设置界面/样式
-write_ai_config "$HOME"
+QA_MARKER="$WORK/qa-marker"
+write_ai_config "$HOME" "$QA_MARKER"
 start_xvfb 97
 
 LYYIME_CORE_LIB="$CORE_LIB" LYYIME_DATA_DIR="$DATA_DIR" "$XIM_BIN" >"$WORK/xim.stdout" 2>&1 &
@@ -166,6 +172,16 @@ grep -q '"path": "/v1/chat/completions"' "$AI_DUMP" || fail "mock 未收到请�
 grep -q '"content": "hi"' "$AI_DUMP" || fail "提示词内容不符:$(cat "$AI_DUMP")"
 grep -q 'Bearer sk-e2e' "$AI_DUMP" || fail "鉴权头未携带"
 echo "PASS B6:/AI hi → mock 回复 AI回复OK 已上屏"
+
+# ---- 快速功能键(合同 §14):触发词 ceshi(词库有命中,功能候选居第 2 位)
+#      → 数字 2 选中 → 宿主执行 command(touch marker),不上屏文本 ----
+xdotool type --delay 80 "ceshi"; sleep 0.5
+xdotool key 2
+for _ in $(seq 1 60); do [[ -f "$QA_MARKER" ]] && break; sleep 0.1; done
+[[ -f "$QA_MARKER" ]] || fail "Mode B 快速功能键未执行(marker 未出现):$(tail -5 "$XIM_LOG")"
+grep -q "快速功能键命中\[0\]" "$XIM_LOG" || fail "Mode B 日志无功能键执行记录"
+grep -qF "E2E 功能键" "$BUFFER" && fail "功能键标签不应上屏:$(cat "$BUFFER")"
+echo "PASS B7:触发词 ceshi + 数字 2 → 执行功能键命令(marker 出现,文本未上屏)"
 echo "Mode B 最终缓冲: $(cat "$BUFFER")"
 kill "$CLIENT_PID" "$XIM_PID" 2>/dev/null || true
 cleanup_work; trap cleanup_all EXIT
@@ -175,7 +191,8 @@ echo "== [2/7] Mode A:ibus 引擎(隔离会话,Xvfb :96) =="
 new_work
 export DISPLAY=:96 GTK_IM_MODULE=ibus XMODIFIERS=@im=ibus
 export LYYIME_DATA_DIR="$DATA_DIR" LYYIME_CORE_LIB="$CORE_LIB"
-write_ai_config "$HOME"
+QA_MARKER_A="$WORK/qa-marker"
+write_ai_config "$HOME" "$QA_MARKER_A"
 # 截屏热键桩(A4):引擎经 ibus-daemon 继承 LYYIME_SHOT,命中即拉起写 marker
 SHOT_MARKER="$WORK/shot-marker"
 cat > "$WORK/stub-shot" <<STUB
@@ -259,6 +276,10 @@ dbus-run-session -- bash -c '
     # ---- 截屏热键(合同 §13):命中吞键并拉起 $LYYIME_SHOT 桩 ----
     xdotool key ctrl+alt+a
     sleep 1
+    # ---- 快速功能键(合同 §14):ceshi + 数字 2 → 宿主执行命令(marker) ----
+    xdotool type --delay 90 "ceshi"; sleep 0.5
+    xdotool key 2
+    sleep 1.5
 '
 wait_buffer "你好the网络ok" 10
 IBUS_LOG="$WORK/home/.local/share/lyyime/logs/ibus.log"
@@ -277,6 +298,9 @@ echo "PASS A3:CapsLock 大写态直通 AB/Shift→n"
 [[ -f "$SHOT_MARKER" ]] || fail "Mode A 截屏热键未拉起助手(marker 未出现)"
 grep -q "已拉起截屏助手" "$IBUS_LOG" || fail "ibus 日志无截屏拉起记录"
 echo "PASS A4:Mode A 截屏热键 ctrl+alt+a → 拉起 lyyime-shot(桩)并吞键"
+[[ -f "$QA_MARKER_A" ]] || fail "Mode A 快速功能键未执行(marker 未出现):$(tail -5 "$IBUS_LOG")"
+grep -q "快速功能键命中" "$IBUS_LOG" || fail "Mode A 日志无功能键执行记录"
+echo "PASS A5:触发词 ceshi + 数字 2 → 执行功能键命令(marker 出现,文本未上屏)"
 echo "Mode A 最终缓冲: $(cat "$BUFFER")"
 
 ############################################
@@ -284,4 +308,4 @@ echo "== [3/7] 截屏助手 lyyime-shot(Xvfb :95) =="
 LYYIME_SHOT_BIN="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-shot" bash "$ROOT/tests/e2e/shot_e2e.sh"
 
 echo "== [4/7] 汇总 =="
-echo "E2E-ALL-PASS: Mode B(8 断言)+ Mode A(6 断言)+ /AI 全链路 + lyyime-shot 通过 ✅"
+echo "E2E-ALL-PASS: Mode B(9 断言)+ Mode A(7 断言)+ /AI 全链路 + lyyime-shot + 快速功能键通过 ✅"

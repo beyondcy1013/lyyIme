@@ -67,11 +67,12 @@ pub enum Effect {
     Notice(String),               // 辅助区临时提示(造词结果等,宿主数秒后清除)
     Hint(String),                 // 词组效率提示(候选条展示,无定时,下一次输入清除)
     ModeChanged(Mode),            // 宿主更新 UI 指示
+    Action(usize),                // 快速功能键命中(§14):宿主执行功能,不上屏文本
 }
 
 #[derive(Clone, Debug)]
 pub struct Candidate { pub text: String, pub comment: String, pub score: f32, pub kind: CandKind }
-pub enum CandKind { Wubi, Pinyin, English, User }
+pub enum CandKind { Wubi, Pinyin, English, User, Action(u8) }  // Action(§14)=quick_actions 下标
 ```
 
 约定:
@@ -91,12 +92,19 @@ int   lyyime_toggle_mode(void* eng);               /* 返回新 mode */
    返回 effects JSON 写入 buf 所需字节数(含\0);若 buf_cap 不够,不写入并返回 -needed。
    effects JSON: [{"t":"commit","s":"你好"},{"t":"preedit","s":"nihao"},{"t":"cands","n":5,"page":0,"pages":3},
                   {"t":"pass"},{"t":"consumed"},{"t":"notice","s":"已造词:你好(wqvb)"},
-                  {"t":"hint","s":"词组提示:「你好」可用 wqvb 打出"},{"t":"mode","m":1}]
+                  {"t":"hint","s":"词组提示:「你好」可用 wqvb 打出"},{"t":"mode","m":1},
+                  {"t":"action","i":0}]   /* §14 快速功能键命中,i=quick_actions 下标 */
    cands 的具体候选另取:lyyime_cand(eng, i, buf, cap) 返回候选文本,-needed 表示不足;
    lyyime_cand_comment 同理。 */
 int64_t lyyime_process_key(void* eng, int key_id, uint32_t chr, char* buf, int64_t buf_cap);
 int   lyyime_cand(void* eng, int i, char* buf, int cap);
 int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
+/* §14 快速功能键(可选符号组:旧库缺任一符号时宿主只禁用该功能,不整体降级) */
+int   lyyime_set_quick_actions_enabled(void* eng, int enabled);   /* 返回生效 0/1 */
+void  lyyime_clear_quick_actions(void* eng);
+int   lyyime_add_quick_action(void* eng, const char* trigger, const char* label, const char* command);  /* 0 成功 -1 非法/超上限 */
+int   lyyime_action_command(void* eng, int i, char* buf, int cap); /* 第 i 条 command,-needed 同上 */
+int64_t lyyime_select_candidate(void* eng, int idx, char* buf, int64_t buf_cap); /* 点选候选(§14),两段式纪律同 process_key */
 ```
 
 `key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10, LKEY_COIN=11, LKEY_LEFT=12, LKEY_RIGHT=13, LKEY_UP=14, LKEY_DOWN=15`(11–15 见 §12)。
@@ -151,8 +159,8 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 | a–z | 缓冲,更新 preedit/候选 |
 | CapsLock 大写态 + 字母 | **原样直通英文,不进组词缓冲**:无 Shift 输出大写字母;Shift+字母由应用按 Caps+Shift 翻译输出小写字母。直通前宿主送 core `Other` 复位可能残留的缓冲(CapsLock 键本身经"其它键"路径清缓冲);数字/标点等非字母键不受 CapsLock 影响,行为同常态 |
 | 四码唯一上屏(可配置) | 恰好输入第 4 个字母且合并候选唯一:core 直接 Commit(该候选),缓冲与候选一并清空;多候选不触发。默认开启(`commit_unique_four`),关闭后第 4 键保持组合(§3) |
-| 1–9 | 有候选:选第 N 个上屏;无候选:Pass(数字原样) |
-| Space | **任何时候都确认当前选中项**:有候选顶屏首选;有缓冲无候选 Commit(原字母);无缓冲 Pass(空格) |
+| 1–9 | 有候选:选第 N 个上屏;无候选:Pass(数字原样)。选中快速功能键候选(§14)时回 `Action(i)` 而非 Commit |
+| Space | **任何时候都确认当前选中项**:有候选顶屏首选(首选为快速功能键候选时同样回 `Action(i)`,§14);有缓冲无候选 Commit(原字母);无缓冲 Pass(空格) |
 | Enter | 有缓冲:Commit(原字母);无缓冲:Pass |
 | Backspace | 有缓冲删尾;空:Pass |
 | Esc | 清缓冲(Consumed);空:Pass |
@@ -379,3 +387,51 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
   Mode B C 镜像 `keysym_map.c lyy_hotkey_canon / lyy_hotkey_escalate` +
   `config.c lyy_config_resolve_hotkey_conflicts`,两端单测各自覆盖
   (core `hotkey` 用例、`unit_hotkey.c` §7/§8、`unit_config.c` §15)。
+
+## 14. 快速功能键(触发词候选,数字/点选执行)
+
+对标"输入特定词弹出功能入口"的效率玩法:输入缓冲与配置的触发词**完全相等**
+时,候选条追加"功能候选"(注释固定为「功能键」),数字键/鼠标点选/空格确认
+后宿主执行对应功能 —— **不上屏任何文本、不学习、不入造词历史**。
+
+### 14.1 交互合同(Mode A / Mode B 宿主必须一致实现)
+
+| 环节 | 行为 |
+|---|---|
+| 触发 | 缓冲 == 触发词(整串,非前缀)时候选追加功能候选;紧跟首选之后(无词库命中时置顶),多条触发词按配置顺序;普通候选永不功能键顶替,四码唯一上屏/四码顶屏对功能键候选不触发(功能必须经用户确认) |
+| 展示 | 候选文本 = `label`,注释 = 「功能键」;总开关 `quick_actions_enabled` 关闭则整表不生效 |
+| 执行 | 数字 1–9 / 鼠标点击候选行 / Space 确认首选 → core 回 `Effect::Action(i)`(i = 配置下标) + 清除效果流;宿主执行 `command`,不上屏文本 |
+| 标点/Enter 收尾 | 功能键候选不作首选文本:退回原始字母直通(不会把 label 当文字打出) |
+| command 语义 | `@settings` = 打开设置窗;`@help` = 辅助区帮助提示(两宿主同文案);其余按 `sh -c` 执行(异步,不阻塞按键流) |
+
+### 14.2 配置与实现
+
+- **配置**(`config.toml`,三端共用;键名两端同名,吸取 §8 历史陷阱教训):
+  顶层 `quick_actions_enabled = true` + `[[quick_actions]]` 数组表
+  (`trigger` = 1–12 个小写字母 / `label` = 候选文本 / `command`)。缺省表 =
+  peizhi(打开配置)/ bangzhu(帮助),与 core `Config::default` 一致;
+  条目上限 8(`QUICK_ACTIONS_MAX`/`LYY_QA_MAX`);非法触发词的条目剔除,
+  全部非法回退默认表。core 侧非法配置判"配置损坏"(人话错误)。
+- **core**:`types.rs` `CandKind::Action(u8)` + `Effect::Action(usize)`;
+  `engine.rs` `insert_quick_actions`(重算后追加)与 `plan_select`
+  (数字/空格/点选三路共用的选中分发);`config.rs` `QuickAction` 全链路
+  (字段/校验/example_toml 回环);FFI 见 §3 可选符号组
+  (`lyyime_set_quick_actions_enabled / clear / add / action_command /
+  select_candidate`)。
+- **Mode A**:`main.rs read_core_config` 增读 `quick_actions_enabled` 与
+  `[[quick_actions]]`(非法条目跳过)→ `logic.rs` `Host::on_action` 回调 +
+  `select_candidate`(点选)→ `service.rs` `run_quick_action`(执行)与
+  `candidate_clicked`(ibus D-Bus 点选入口);托盘设置入口复用 `launch_setup`。
+- **Mode B**:`config.c` `[[quick_actions]]` 块解析/原位重写(首个块位置
+  重写、缺失追加文件尾;数组表头兼作顶层键插入点,保证合法 TOML)→
+  `common.c lyy_engine_ensure` 注入(core FFI `qa_ok` 可选符号组,旧库缺失
+  只禁用该功能)→ `xim_server.c` `LYY_EFF_ACTION` 分支 `lyy_run_quick_action`
+  + `lyy_candwin_row_clicked`(候选窗行点击 → `lyyime_select_candidate`,
+  与数字选词同一条效果流路径)→ 设置窗「快速功能键」复选框
+  (`settings.ui chk_quick_actions`),保存即生效(引擎重建重注入)。
+- **测试**:core `engine_test` 快速功能键 8 例(触发/置顶/不顶替/数字/点选/
+  多条/开关/四码不直上/标点收尾)+ `ffi_test` 3 例(action JSON/点选 JSON/
+  注入与开关)+ `config.rs` 回环 2 例;Mode A `logic.rs` 2 例;
+  `xim/tests/unit_effects_json.c` §19(action 解析)+ `unit_config.c` §16
+  (默认表/解析/剔除/保存回读)+ 桩库 §14 符号;`tests/e2e/run.sh` 双模式
+  触发词→命令执行断言(marker 文件)。

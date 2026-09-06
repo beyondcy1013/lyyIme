@@ -497,7 +497,10 @@ fn 英文自动直通_标点同样直通原词() {
     let mut eng = engine();
     type_str(&mut eng, "thex");
     let fx = eng.process_key(LKey::Punct(','));
-    assert_eq!(commits(&fx), vec!["thex".to_string(), ",".to_string()]);
+    assert_eq!(
+        commits(&fx),
+        vec!["thex".to_string(), "\u{FF0C}".to_string()]
+    );
 }
 
 /// 构造仅含 english.tsv 的临时词库,目标词分别落在词频第 1999/2000/2001 名。
@@ -577,9 +580,9 @@ fn 英文态_一切按键直通() {
 fn 中文态空缓冲_标点转中文标点() {
     let mut eng = engine();
     let fx = eng.process_key(LKey::Punct(','));
-    assert_eq!(commits(&fx), vec![",".to_string()]);
+    assert_eq!(commits(&fx), vec!["\u{FF0C}".to_string()]);
     let fx = eng.process_key(LKey::Punct('?'));
-    assert_eq!(commits(&fx), vec!["?".to_string()]);
+    assert_eq!(commits(&fx), vec!["\u{FF1F}".to_string()]);
     let fx = eng.process_key(LKey::Punct('['));
     assert_eq!(commits(&fx), vec!["【".to_string()]);
 }
@@ -589,7 +592,10 @@ fn 中文态有缓冲_先上屏首选再上中文标点() {
     let mut eng = engine();
     type_str(&mut eng, "ni");
     let fx = eng.process_key(LKey::Punct(','));
-    assert_eq!(commits(&fx), vec!["你".to_string(), ",".to_string()]);
+    assert_eq!(
+        commits(&fx),
+        vec!["你".to_string(), "\u{FF0C}".to_string()]
+    );
     assert!(eng.buffer().is_empty());
 }
 

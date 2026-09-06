@@ -107,7 +107,7 @@ lyyime-doctor fix --all         # 一键修复(环境变量/总线/引擎注册/
 | `lyyime-core` | Rust | 输入引擎核心(混输排序/词库/用户词/AI/造词/统计),C ABI FFI |
 | `lyyime-ibus` | Rust | ibus 引擎(zbus 直连,Mode A) |
 | `xim/` | C | 独立 XIM server 外挂 `lyyime-xim`(xcb-imdkit + GTK3 候选窗,Mode B) |
-| `lyyime-float` | Rust | 悬浮窗输入(单实例,焦点自动回传,Mode C) |
+| `lyyime-float` | Rust | 悬浮窗输入(单实例,焦点自动回传,Mode C;中文标点直上,空缓冲退格/删除直通) |
 | `lyyime-ai` / `lyyime-shot` | Rust | AI 助手 / 截屏助手 |
 | `lyyime-doctor` | Rust | 诊断修复 CLI(输入法管理/环境修复/真屏探测) |
 | `lyyime-dicttool` | Rust | 词库工具(ibus 码表转换/联网抓取/校验/查询) |

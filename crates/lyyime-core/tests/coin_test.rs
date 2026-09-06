@@ -211,7 +211,7 @@ fn 造词模式中数字放行标点取消并输出中文标点() {
     // 重新进入后按逗号:取消造词,标点按当前合同输出。
     let _ = eng.process_key(LKey::Coin);
     let fx = eng.process_key(LKey::Punct(','));
-    assert!(has_commit(&fx, ","), "标点效果流: {:?}", commits(&fx));
+    assert!(has_commit(&fx, "\u{FF0C}"), "标点效果流: {:?}", commits(&fx));
     assert!(eng.flush_page().is_empty());
 }
 

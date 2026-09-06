@@ -99,7 +99,12 @@ fn cli_shift标点翻页回放() {
     assert!(stdout.contains("\"key\":\"n\"") && stdout.contains("\"t\":\"pass\""));
     let last = stdout.lines().last().unwrap();
     assert!(last.contains("\"t\":\"commit\",\"s\":\"你\""), "{:?}", last);
-    assert!(last.contains("\"t\":\"commit\",\"s\":\",\""), "{:?}", last);
+    assert!(
+        // 全角逗号(U+FF0C);不用原字符书写,避免与半角肉眼混淆
+        last.contains("\"t\":\"commit\",\"s\":\"\u{FF0C}\""),
+        "{:?}",
+        last
+    );
 }
 
 #[test]

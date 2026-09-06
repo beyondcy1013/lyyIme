@@ -289,9 +289,9 @@ fn ffi_key_id映射_数字选词与标点翻页() {
         json.contains("{\"t\":\"commit\",\"s\":\"尼\"}"),
         "数字 2 应选中尼:{json}"
     );
-    // 标点:空缓冲出中文标点。
+    // 标点:空缓冲出中文标点(全角逗号 U+FF0C)。
     let json = eng.key(LKEY_PUNCT, ',' as u32);
-    assert_eq!(json, "[{\"t\":\"commit\",\"s\":\",\"}]");
+    assert_eq!(json, "[{\"t\":\"commit\",\"s\":\"\u{FF0C}\"}]");
 }
 
 #[test]

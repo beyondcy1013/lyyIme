@@ -129,7 +129,7 @@ fn 真尺度_the_英文候选在列且标点直通() {
     let fx = eng.process_key(LKey::Punct(','));
     assert_eq!(
         commits(&fx),
-        vec!["the".to_string(), ",".to_string()],
+        vec!["the".to_string(), "\u{FF0C}".to_string()],
         "高频英文词遇标点直通"
     );
 }

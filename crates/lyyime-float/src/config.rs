@@ -38,6 +38,15 @@ pub struct Config {
     pub send: String,
     #[serde(default)]
     pub position: Option<[i32; 2]>,
+    /// 输入停顿时在状态行显示今日输入统计(总开关)
+    #[serde(default = "default_true")]
+    pub stats_enabled: bool,
+    /// 停顿多少秒后开始显示(3–300)
+    #[serde(default = "default_stats_pause")]
+    pub stats_pause_secs: u32,
+    /// 计入速度的最长停顿秒数;超过的空隙(思考/离开)不计入活跃时长(5–600)
+    #[serde(default = "default_stats_idle")]
+    pub stats_idle_exclude_secs: u32,
 }
 
 fn default_dict() -> String {
@@ -46,10 +55,26 @@ fn default_dict() -> String {
 fn default_send() -> String {
     "type".into()
 }
+fn default_true() -> bool {
+    true
+}
+fn default_stats_pause() -> u32 {
+    10
+}
+fn default_stats_idle() -> u32 {
+    30
+}
 
 impl Default for Config {
     fn default() -> Self {
-        Config { dict: default_dict(), send: default_send(), position: None }
+        Config {
+            dict: default_dict(),
+            send: default_send(),
+            position: None,
+            stats_enabled: default_true(),
+            stats_pause_secs: default_stats_pause(),
+            stats_idle_exclude_secs: default_stats_idle(),
+        }
     }
 }
 

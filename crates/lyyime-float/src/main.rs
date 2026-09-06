@@ -19,6 +19,12 @@ mod xtrack;
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("--pad") => ui::run_pad(),
+        Some("--smoke-stats") => {
+            if let Err(e) = ui::run_smoke_stats() {
+                eprintln!("冒烟失败: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("--smoke-phrases") => {
             if let Err(e) = ui::run_smoke_phrases() {
                 eprintln!("冒烟失败: {e}");

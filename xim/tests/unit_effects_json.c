@@ -137,7 +137,15 @@ int main(void)
               n == 1,
           "空白容错");
 
-    /* 17. notice 效果(合同 §12:造词结果提示) */
+    /* 17. hint 效果(合同 §6:词组效率提示) */
+    n = -1;
+    CHECK(parse_ok("[{\"t\":\"hint\",\"s\":\"词组提示:「你好」可用 wqvb 打出\"}]",
+                   eff, 16, &n) == 0 &&
+              n == 1 && eff[0].kind == LYY_EFF_HINT &&
+              !strcmp(eff[0].s, "词组提示:「你好」可用 wqvb 打出"),
+          "hint 效果解析");
+
+    /* 18. notice 效果(合同 §12:造词结果提示) */
     n = -1;
     CHECK(parse_ok("[{\"t\":\"notice\",\"s\":\"已造词:你好(wqvb)\"}]",
                    eff, 16, &n) == 0 &&

@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "effects_json.h"
+#include "shot.h"
 #include "encoding.h"
 #include "imdkit.h"
 #include "keysym_map.h"
@@ -121,6 +122,21 @@ void lyy_show_notice(App *app, const char *text)
     app->notice_timer_id = g_timeout_add_seconds(4, notice_timeout, app);
 }
 
+/* ---- hint 词组效率提示(合同 §6):与 notice 同候选条通道,但**不带定时**
+ * ——保留到下一次输入产生新效果流时由后续 preedit/cands/清除效果替换或隐藏。*/
+static void show_hint(App *app, const char *text)
+{
+    /* 未到的 notice 清除定时会让提示提前消失,先作废 */
+    if (app->notice_timer_id) {
+        g_source_remove(app->notice_timer_id);
+        app->notice_timer_id = 0;
+    }
+    lyy_candwin_begin_rows(&app->candwin);
+    lyy_candwin_set_preedit(&app->candwin, text);
+    lyy_candwin_set_page(&app->candwin, 0, 0);
+    lyy_candwin_commit_layout(&app->candwin);
+}
+
 /* ---- 造词热键解析(启动/设置保存后调用;失败回退默认 Ctrl+=) ---- */
 void lyy_app_reload_hotkey(App *app)
 {
@@ -141,6 +157,24 @@ void lyy_app_reload_hotkey(App *app)
         lyy_log(&app->log,
                 "WARN 造词热键配置不合法(%s),回退默认 ctrl+equal",
                 app->config.coin_hotkey);
+    }
+
+    /* 截屏热键(合同 §13):解析失败同样回退默认 */
+    if (lyy_hotkey_parse(app->config.shot_hotkey, &mods, &sym)) {
+        app->hotkey_shot.mods = mods;
+        app->hotkey_shot.sym = sym;
+        app->hotkey_shot.ok = 1;
+        lyy_log(&app->log, "截屏热键:%s(mods=0x%x keysym=0x%x)",
+                app->config.shot_hotkey, mods, sym);
+    } else {
+        if (lyy_hotkey_parse("ctrl+alt+a", &mods, &sym)) {
+            app->hotkey_shot.mods = mods;
+            app->hotkey_shot.sym = sym;
+            app->hotkey_shot.ok = 1;
+        }
+        lyy_log(&app->log,
+                "WARN 截屏热键配置不合法(%s),回退默认 ctrl+alt+a",
+                app->config.shot_hotkey);
     }
 }
 
@@ -251,6 +285,13 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
             if (e->s[0]) {
                 lyy_show_notice(app, e->s);
                 lyy_log(&app->log, "notice: %s", e->s);
+            }
+            break;
+        case LYY_EFF_HINT:
+            /* /AI 采集态不打扰:候选条预编辑行正展示提示词 */
+            if (e->s[0] && !ai_capture) {
+                show_hint(app, e->s);
+                lyy_log(&app->log, "hint: %s", e->s);
             }
             break;
         case LYY_EFF_MODE:
@@ -382,6 +423,18 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         }
     }
 
+    /* ---- 截屏热键(合同 §13;默认 Ctrl+Alt+A,shot_hotkey 可配置) ----
+     * 纯工具组合键:直接拉起 lyyime-shot 子进程并吞键,不经 core、不进组词。
+     * 仅 trigger on(中文接管)可见;英文直通态按键不经本服务,托盘菜单兜底。 */
+    if (is_press && app->hotkey_shot.ok &&
+        lyy_hotkey_match(ev->state & LYY_CLEAN_MOD_MASK, (uint32_t)sym,
+                         app->hotkey_shot.mods, app->hotkey_shot.sym)) {
+        lyy_ai_reset(app);
+        lyy_log(&app->log, "截屏热键命中 keysym=0x%lx", (unsigned long)sym);
+        lyy_spawn_shot(app);
+        return;
+    }
+
     /* ---- 造词热键(合同 §12;默认 Ctrl+=,coin_hotkey 可配置) ----
      * 位置在 AI 触发之前:与 Mode A 一致,组合键先放弃 AI 会话再进造词。 */
     int coin_key = 0;
@@ -403,6 +456,23 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
             xcb_im_forward_event(xs->im, ic, ev);
             return;
         }
+    }
+
+    /* CapsLock 大写态(合同 §6):字母键一律原样直通英文,不进组词缓冲 ——
+     * 无 Shift 输出大写字母;Shift+字母(键值列 1)由应用按 Caps+Shift
+     * 翻译输出小写字母。直通前送 core LKEY_OTHER 复位可能残留的组词缓冲
+     * (空缓冲 core 恒回 Pass,由 apply_effects 原样回放一次,不重复转发)。
+     * 数字/标点等非字母键不受 CapsLock 影响,继续走常态。 */
+    if (is_press && (ev->state & XCB_MOD_MASK_LOCK) &&
+        (((sym >= (uint32_t)'A') && (sym <= (uint32_t)'Z')) ||
+         ((sym >= (uint32_t)'a') && (sym <= (uint32_t)'z')))) {
+        lyy_log(&app->log, "CapsLock 大写态字母直通 keysym=0x%lx",
+                (unsigned long)sym);
+        if (lyy_ai_feed_core(app, ev, (uint32_t)sym, LKEY_OTHER, 0) == -1) {
+            lyy_core_mark_degraded(app, "process_key 调用失败");
+            xcb_im_forward_event(xs->im, ic, ev);
+        }
+        return;
     }
 
     /* 中文态 Shift+字母:大写字母无组词语义,原样直通(主流输入法行为) */

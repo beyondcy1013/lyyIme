@@ -161,3 +161,14 @@ pub fn coin_candidate(eng: &Engine) -> Option<(String, String)> {
         .filter(|_| eng.page() == 0)
         .map(|c| (c.text.clone(), c.comment.clone()))
 }
+
+/// 取效果流里的全部 Hint 文本(词组效率提示)。
+pub fn hints(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Hint(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}

@@ -85,6 +85,52 @@ int main(void)
     CHECK(lyy_hotkey_match(0x04, 0x2d, 0x04, 0x3d) == 0,
           "键不符不命中");
 
+    /* 7. 规范化(合同 §12.3/§13):别名归一 + 修饰定序 + 键名标准形 */
+    char canon[128];
+    CHECK(lyy_hotkey_canon("ctrl+equal", canon, sizeof(canon)) == 1 &&
+              strcmp(canon, "ctrl+equal") == 0,
+          "canon 基本形");
+    CHECK(lyy_hotkey_canon("Ctrl + =", canon, sizeof(canon)) == 1 &&
+              strcmp(canon, "ctrl+equal") == 0,
+          "canon 别名归一(= ≡ equal、大小写/空白容错)");
+    CHECK(lyy_hotkey_canon("shift+mod4+A", canon, sizeof(canon)) == 1 &&
+              strcmp(canon, "super+shift+a") == 0,
+          "canon 修饰定序(ctrl+alt+super+shift)");
+    CHECK(lyy_hotkey_canon("control+0x31", canon, sizeof(canon)) == 1 &&
+              strcmp(canon, "ctrl+1") == 0,
+          "canon 键名标准形(control ≡ ctrl、0x → 字符)");
+    CHECK(lyy_hotkey_canon("equal", canon, sizeof(canon)) == 0,
+          "canon 非法写法拒绝");
+    CHECK(lyy_hotkey_canon("ctrl+pagedown", canon, sizeof(canon)) == 1 &&
+              strcmp(canon, "ctrl+pagedown") == 0,
+          "canon 功能键名保持");
+
+    /* 8. 冲突自动升级:原组合 → +Alt → +Alt+Shift 逐级避让 */
+    char next[128];
+    CHECK(lyy_hotkey_escalate("ctrl+equal", "ctrl+alt+a", next,
+                              sizeof(next)) == 1 &&
+              strcmp(next, "ctrl+equal") == 0,
+          "原组合空闲时原样返回");
+    CHECK(lyy_hotkey_escalate("ctrl+equal", "ctrl+equal", next,
+                              sizeof(next)) == 1 &&
+              strcmp(next, "ctrl+alt+equal") == 0,
+          "被占 → +Alt(用户示例 CTRL+= → CTRL+ALT+=)");
+    CHECK(lyy_hotkey_escalate("ctrl+equal", "Ctrl + =", next,
+                              sizeof(next)) == 1 &&
+              strcmp(next, "ctrl+alt+equal") == 0,
+          "别名写法同样构成占用");
+    CHECK(lyy_hotkey_escalate("alt+a", "alt+a", next, sizeof(next)) == 1 &&
+              strcmp(next, "alt+shift+a") == 0,
+          "已含 Alt 的组合下一级直接 +Shift");
+    CHECK(lyy_hotkey_escalate("ctrl+equal", "乱写", next, sizeof(next)) == 1 &&
+              strcmp(next, "ctrl+equal") == 0,
+          "occupied 非法不构成占用");
+    CHECK(lyy_hotkey_escalate("ctrl+alt+shift+a", "ctrl+alt+shift+a", next,
+                              sizeof(next)) == 0,
+          "三级全占用返回 0(交由调用方人话提示)");
+    CHECK(lyy_hotkey_escalate("乱写", "", next, sizeof(next)) == 0,
+          "spec 非法返回 0");
+
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);
     return g_failed ? 1 : 0;

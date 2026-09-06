@@ -12,7 +12,7 @@ use lyyime_ai::AiConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use zbus::message::Message;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 const ENGINE_IFACE: &str = "org.freedesktop.IBus.Engine";
 const BUS_NAME: &str = "org.freedesktop.IBus.Lyyime";
@@ -35,7 +35,11 @@ pub enum Action {
     },
     ModeChanged(u8),
     Notice(String),
+    /// 词组效率提示:更新辅助区但**不自排清除定时**,保留到下一次输入
+    /// (下一次 Candidates/Notice 效果自然替换或隐藏)。
+    Hint(String),
     AiSubmit(String),
+    Shot,
 }
 
 impl logic::Host for CollectingHost {
@@ -65,8 +69,14 @@ impl logic::Host for CollectingHost {
     fn on_notice(&mut self, text: &str) {
         self.actions.push(Action::Notice(text.to_string()));
     }
+    fn on_hint(&mut self, text: &str) {
+        self.actions.push(Action::Hint(text.to_string()));
+    }
     fn on_ai_submit(&mut self, prompt: String) {
         self.actions.push(Action::AiSubmit(prompt));
+    }
+    fn on_shot(&mut self) {
+        self.actions.push(Action::Shot);
     }
 }
 
@@ -125,6 +135,58 @@ impl EngineService {
         )
     }
 
+    /// 普通菜单项(IBusProperty NORMAL)
+    fn menu_item(&self, key: &str, label: &str, icon: &str, tip: &str) -> OwnedValue {
+        OwnedValue::try_from(wire::property(
+            key,
+            wire::PROP_TYPE_NORMAL,
+            label,
+            icon,
+            tip,
+            "",
+            Vec::new(),
+        ))
+        .expect("IBusProperty -> OwnedValue")
+    }
+
+    /// 托盘菜单属性树:中英切换 + 截屏 + 设置 + 工具 + 关于。
+    /// 各项的响应在 property_activate 的同名分支(此前面板一直无菜单可点,
+    /// 本次随 §13 截屏入口一并接活)。
+    fn root_property(&self, mode: u8) -> zbus::zvariant::Value<'static> {
+        let shot_hotkey = self.0.logic.lock().unwrap().shot_hotkey_text().unwrap_or_else(|| "ctrl+alt+a".to_string());
+        let subs = vec![
+            OwnedValue::try_from(self.mode_property(mode)).expect("toggle -> OwnedValue"),
+            self.menu_item(
+                "tools.shot",
+                "截屏",
+                "camera-photo",
+                &format!(
+                    "框选截屏(拖拽选区,存图片目录并复制剪贴板;热键 {shot_hotkey},shot_hotkey 可配置)"
+                ),
+            ),
+            self.menu_item("setup", "设置…", "preferences-system", "打开 lyyIme 设置界面"),
+            self.menu_item(
+                "tools.fix",
+                "修复输入法…",
+                "system-run",
+                "诊断并修复输入法环境(dry-run 预览)",
+            ),
+            self.menu_item("tools.ime", "输入法管理…", "input-keyboard", "列出本机输入法"),
+            self.menu_item("tools.reload", "重载词库", "view-refresh", "重新加载词典与配置"),
+            self.menu_item("tools.logs", "打开日志目录", "text-x-generic", "定位 lyyime 日志文件"),
+            self.menu_item("about", "关于 lyyIme", "help-about", "版本信息"),
+        ];
+        wire::property(
+            "lyyime",
+            wire::PROP_TYPE_MENU,
+            "lyyIme",
+            &self.mode_icon(mode),
+            "lyyIme 五笔拼音菜单",
+            "",
+            subs,
+        )
+    }
+
     async fn emit<T>(&self, name: &str, body: &T) -> zbus::Result<()>
     where
         T: serde::Serialize + zbus::zvariant::Type,
@@ -137,7 +199,6 @@ impl EngineService {
             }
         }
         let msg = Message::signal(self.0.path.as_str(), ENGINE_IFACE, name)?.build(body)?;
-        use zbus::zvariant::DynamicType;
         logger::debug(&format!(
             "emit {name} sig={}",
             <&T as zbus::zvariant::Type>::signature().as_str()
@@ -230,7 +291,16 @@ impl EngineService {
                 self.schedule_notice_clear();
                 Ok(())
             }
+            Action::Hint(t) => {
+                logger::info(&format!("hint: {t}"));
+                self.emit("UpdateAuxiliaryText", &(wire::ibus_text(t, false), true))
+                    .await?;
+                // 作废未到的 notice 清除定时,提示保留到下一次输入(合同 §6)。
+                self.0.notice_gen.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
             Action::AiSubmit(_) => Ok(()), // 由调用方单独处理
+            Action::Shot => Ok(()),        // 由调用方单独处理
         }
     }
 
@@ -296,6 +366,43 @@ impl EngineService {
                 }
             });
         });
+    }
+
+    /// 拉起截屏助手 lyyime-shot(合同 §13):解析顺序 $LYYIME_SHOT → PATH →
+    /// 引擎二进制同级目录 → /usr/local/bin;缺失时辅助区给"人话"指引。
+    fn spawn_shot(&self) {
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("lyyime-shot")))
+            .filter(|p| p.is_file())
+            .map(|p| p.to_string_lossy().into_owned());
+        let system = {
+            let p = "/usr/local/bin/lyyime-shot";
+            std::path::Path::new(p).is_file().then(|| p.to_string())
+        };
+        let prog = std::env::var("LYYIME_SHOT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| which("lyyime-shot"))
+            .or(sibling)
+            .or(system);
+        let Some(prog) = prog else {
+            let this = self.clone();
+            let msg = "未找到 lyyime-shot:请先安装 lyyIme 截屏组件(scripts/install-all.sh)";
+            let _ = zbus::block_on(async {
+                this.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true))
+                    .await
+            });
+            return;
+        };
+        match std::process::Command::new(&prog)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => crate::logger::info(&format!("已拉起截屏助手:{prog}")),
+            Err(e) => crate::logger::error(&format!("拉起 lyyime-shot 失败({prog}):{e}")),
+        }
     }
 
     fn run_in_terminal(&self, argv: &[&str], title: &str) {
@@ -414,6 +521,7 @@ impl EngineService {
     async fn process_key_event(&self, keyval: u32, _keycode: u32, state: u32) -> bool {
         let mut actions = Vec::new();
         let mut ai_prompt: Option<String> = None;
+        let mut shot = false;
         let consumed = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
@@ -421,6 +529,7 @@ impl EngineService {
             for a in host.actions {
                 match a {
                     Action::AiSubmit(p) => ai_prompt = Some(p),
+                    Action::Shot => shot = true,
                     other => actions.push(other),
                 }
             }
@@ -434,6 +543,9 @@ impl EngineService {
         if let Some(p) = ai_prompt {
             self.spawn_ai(p);
         }
+        if shot {
+            self.spawn_shot();
+        }
         consumed
     }
 
@@ -443,16 +555,19 @@ impl EngineService {
             let c = lyyime_ai::load_config();
             Some(c)
         };
-        let actions = {
+        let (actions, mode) = {
             let mut logic = self.0.logic.lock().unwrap();
             logic.set_ai_cfg(cfg);
             let mut host = CollectingHost::default();
             logic.reset_session(&mut host);
-            host.actions
+            (host.actions, logic.mode)
         };
         for a in &actions {
             let _ = self.emit_action(a).await;
         }
+        // 菜单属性树(幂等):面板每次获得焦点都刷新一次
+        let boxed = zbus::zvariant::Value::Value(Box::new(self.root_property(mode)));
+        let _ = self.emit("UpdateProperty", &(boxed,)).await;
     }
 
     async fn focus_out(&self) {
@@ -498,6 +613,7 @@ impl EngineService {
                 }
             }
             "setup" => self.launch_setup(),
+            "tools.shot" => self.spawn_shot(),
             "tools.fix" => {
                 self.run_in_terminal(&["lyyime-doctor", "fix", "--all", "--dry-run"],
                                      "lyyIme 修复输入法(dry-run 预览)");
@@ -581,10 +697,7 @@ impl FactoryService {
         crate::logger::info(&format!("引擎实例已创建:{name}({path})"));
 
         let data_dir = crate::resolve_data_dir();
-        let (page_size, commit_after_four) = crate::read_core_config();
-        let mut core_cfg = lyyime_core::Config::default();
-        core_cfg.page_size = page_size;
-        core_cfg.commit_on_extra_after_four = commit_after_four;
+        let core_cfg = crate::read_core_config();
         let ai_cfg = lyyime_ai::load_config();
         // FFI/核心初始化失败不退出:EngineLogic 进入降级英文直通(合同 §7)
         let logic = EngineLogic::new(data_dir, Some(ai_cfg), core_cfg);

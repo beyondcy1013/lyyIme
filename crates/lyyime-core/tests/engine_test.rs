@@ -92,6 +92,8 @@ fn 五笔精确_优先于前缀() {
 fn 四码后续字母_开启后先上屏当前选中() {
     let mut eng = engine_with(Config {
         commit_on_extra_after_four: true,
+        // 本测单独验证“四码顶屏”:关掉四码唯一上屏,保证缓冲能停在四码。
+        commit_unique_four: false,
         ..Config::default()
     });
     type_str(&mut eng, "aaaa");
@@ -110,6 +112,140 @@ fn 四码后续字母_默认继续前缀组词() {
     let fx = eng.process_key(LKey::Char('g'));
     assert!(commits(&fx).is_empty());
     assert_eq!(eng.buffer(), "wglig");
+}
+
+// ----------------------------------------------------------------------
+// 四码唯一上屏(默认开启):恰好四码且候选唯一 → 免空格直接上屏
+// ----------------------------------------------------------------------
+
+#[test]
+fn 四码唯一_免空格直接上屏() {
+    let mut eng = engine();
+    type_str(&mut eng, "wqv");
+    assert_eq!(eng.buffer(), "wqv", "三码前保持组合");
+    // 第 4 键 wqvb → 唯一候选「你好」自动上屏。
+    let fx = eng.process_key(LKey::Char('b'));
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
+    assert!(eng.buffer().is_empty());
+    assert!(eng.flush_page().is_empty(), "上屏后候选一并清空");
+    // 自动上屏后缓冲已空:空格放行原样输出,不再顶屏。
+    assert!(is_pass(&eng.process_key(LKey::Space)));
+}
+
+#[test]
+fn 四码唯一_关闭后保持渐进组合() {
+    let mut eng = engine_with(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
+    type_str(&mut eng, "wqv");
+    let fx = eng.process_key(LKey::Char('b'));
+    assert!(commits(&fx).is_empty(), "关闭后第 4 键不上屏");
+    assert_eq!(eng.buffer(), "wqvb");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("你好"));
+}
+
+#[test]
+fn 四码多候选_不自动上屏() {
+    let mut eng = engine();
+    // xian 同时命中拼音多候选(先/西安/西…),虽满四码但不唯一,不触发。
+    let fx = type_str(&mut eng, "xian");
+    assert!(commits(&fx).is_empty(), "多候选四码不得自动上屏");
+    assert_eq!(eng.buffer(), "xian");
+    assert!(eng.flush_page().len() > 1);
+}
+
+// ----------------------------------------------------------------------
+// 词组效率提示(默认开启):上屏后最近几字有更省键的五笔词组 → Effect::Hint
+// ----------------------------------------------------------------------
+
+#[test]
+fn 词组提示_逐字上屏后提示更省词组() {
+    let mut eng = engine();
+    // 逐字打「你好」:wqiy+空格 → 你,再 vbg+空格 → 好(共 7 个字母)。
+    type_str(&mut eng, "wqiy");
+    let fx1 = eng.process_key(LKey::Space);
+    assert!(hints(&fx1).is_empty(), "只上屏一个字时无词组可提示");
+    let fx2 = eng.process_key(LKey::Char('v'));
+    assert!(hints(&fx2).is_empty());
+    eng.process_key(LKey::Char('b'));
+    eng.process_key(LKey::Char('g'));
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["好".to_string()]);
+    let hs = hints(&fx);
+    assert_eq!(hs.len(), 1, "恰一条提示:{hs:?}");
+    assert!(hs[0].contains("你好") && hs[0].contains("wqvb"), "提示={}", hs[0]);
+    // 提示位于效果流末尾(宿主先清组合显示再展示提示)。
+    assert!(matches!(fx.last(), Some(Effect::Hint(_))), "顺序={fx:?}");
+}
+
+#[test]
+fn 词组提示_同码词组打过不再提示() {
+    let mut eng = engine();
+    // wqvb 四码唯一自动上屏「你好」:实耗 4 键 = 词组编码 4 键,不更省 → 无提示。
+    let fx = type_str(&mut eng, "wqvb");
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
+    assert!(hints(&fx).is_empty(), "同码打过不应提示:{:?}", hints(&fx));
+    // 空格确认路径同样不提示。
+    let mut eng2 = engine_with(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
+    type_str(&mut eng2, "wqvb");
+    let fx2 = eng2.process_key(LKey::Space);
+    assert_eq!(commits(&fx2), vec!["你好".to_string()]);
+    assert!(hints(&fx2).is_empty());
+}
+
+#[test]
+fn 词组提示_拼音打词组提示五笔编码() {
+    let mut eng = engine();
+    // nihao+空格 顶屏词组「你好」(5 个字母 > wqvb 4 键)→ 提示五笔编码。
+    type_str(&mut eng, "nihao");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
+    let hs = hints(&fx);
+    assert!(hs.iter().any(|h| h.contains("你好") && h.contains("wqvb")), "提示={hs:?}");
+}
+
+#[test]
+fn 词组提示_下一次输入产生新效果流无残留提示() {
+    let mut eng = engine();
+    type_str(&mut eng, "wqiy");
+    eng.process_key(LKey::Space);
+    type_str(&mut eng, "vbg");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(hints(&fx).len(), 1);
+    // 后续任意输入:core 只出常规效果流,宿主据此替换/清除提示。
+    let fx_next = eng.process_key(LKey::Char('a'));
+    assert!(hints(&fx_next).is_empty());
+    assert!(matches!(fx_next.first(), Some(Effect::Preedit(Some(_)))));
+    let fx_esc = eng.process_key(LKey::Esc);
+    assert!(hints(&fx_esc).is_empty());
+}
+
+#[test]
+fn 词组提示_关闭后无提示() {
+    let mut eng = engine_with(Config {
+        phrase_hint: false,
+        ..Config::default()
+    });
+    type_str(&mut eng, "wqiy");
+    eng.process_key(LKey::Space);
+    type_str(&mut eng, "vbg");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["好".to_string()]);
+    assert!(hints(&fx).is_empty());
+}
+
+#[test]
+fn 词组提示_字母直通不提示() {
+    let mut eng = engine();
+    // 原始字母上屏不含汉字:不进造词/提示历史。
+    type_str(&mut eng, "abc");
+    let fx = eng.process_key(LKey::Enter);
+    assert_eq!(commits(&fx), vec!["abc".to_string()]);
+    assert!(hints(&fx).is_empty());
 }
 
 #[test]
@@ -146,7 +282,11 @@ fn 五笔前缀渐进_词组出现() {
 
 #[test]
 fn 五笔四码词组_完全命中第一() {
-    let mut eng = engine();
+    // 本测验证四码词组排序本身:关掉四码唯一上屏,缓冲才能停在四码展示候选。
+    let mut eng = engine_with(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
     type_str(&mut eng, "aaaa");
     let page = page_texts(&eng);
     assert_eq!(page.first().map(String::as_str), Some("恭恭敬敬"));
@@ -154,7 +294,10 @@ fn 五笔四码词组_完全命中第一() {
 
 #[test]
 fn 五笔空格顶屏首选() {
-    let mut eng = engine();
+    let mut eng = engine_with(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
     type_str(&mut eng, "aaaa");
     let fx = eng.process_key(LKey::Space);
     assert_eq!(commits(&fx), vec!["恭恭敬敬".to_string()]);
@@ -300,7 +443,12 @@ fn 全拼词组排序高于单字和简拼() {
 
 #[test]
 fn 无中文命中_出英文候选() {
-    let mut eng = engine();
+    // 本测验证英文通道候选:关掉四码唯一上屏(hell 在夹具中唯一命中 hello,
+    // 否则第 4 键会直接上屏)。
+    let mut eng = engine_with(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
     type_str(&mut eng, "hello");
     let page = page_texts(&eng);
     assert_eq!(page.first().map(String::as_str), Some("hello"));
@@ -354,6 +502,12 @@ fn 英文自动直通_标点同样直通原词() {
 
 /// 构造仅含 english.tsv 的临时词库,目标词分别落在词频第 1999/2000/2001 名。
 fn en_rank_fixture(td: &TempDir) -> Engine {
+    write_en_rank_rows(td);
+    engine_with_fixtures(&td.path, Config::default())
+}
+
+/// 只写 en_rank 词库行,供需要自定义配置的测试自建引擎。
+fn write_en_rank_rows(td: &TempDir) {
     let mut rows = vec!["thextra	50000".to_string(), "thex	40000".to_string()];
     for i in 0..1996 {
         rows.push(format!("zz{:04}	{}", i, 30000 - i as u64)); // 第 3..=1998 名
@@ -362,7 +516,6 @@ fn en_rank_fixture(td: &TempDir) -> Engine {
     rows.push("qworx	999".into()); // 第 2000 名(恰好达到 en_freq_top_n)
     rows.push("qwozz	998".into()); // 第 2001 名(超限)
     std::fs::write(td.join("english.tsv"), rows.join("\n")).unwrap();
-    engine_with_fixtures(&td.path, Config::default())
 }
 
 #[test]
@@ -384,7 +537,15 @@ fn en_freq_top_n_边界_超过上限不直通() {
     // en_freq_top_n 只门控"自动直通",不影响候选资格(修订 §5.C 实现口径):
     // 第 2001 名的完整英文词仍以 english_no_cn 层给出候选,空格走顶屏而非直通。
     let td = TempDir::new();
-    let mut eng = en_rank_fixture(&td);
+    // 关掉四码唯一上屏:夹具里 qwoz 唯一命中 qwozz,否则第 4 键会直接上屏。
+    write_en_rank_rows(&td);
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            commit_unique_four: false,
+            ..Config::default()
+        },
+    );
     type_str(&mut eng, "qwozz");
     assert!(
         page_texts(&eng).contains(&"qwozz".to_string()),

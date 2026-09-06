@@ -39,7 +39,7 @@ step "3/6 安装核心库、词库、CLI 工具到 $PREFIX"
 install -d "$LIBDIR" "$DATADIR" "$PREFIX/bin"
 install -m 0755 "$CARGO_TARGET_DIR/release/liblyyime_core.so" "$LIBDIR/"
 install -m 0644 data/runtime/*.tsv data/runtime/meta.json "$DATADIR/"
-install -m 0755 "$CARGO_TARGET_DIR/release/lyyime-cli" "$CARGO_TARGET_DIR/release/lyyime-doctor" "$CARGO_TARGET_DIR/release/dicttool" "$PREFIX/bin/"
+install -m 0755 "$CARGO_TARGET_DIR/release/lyyime-cli" "$CARGO_TARGET_DIR/release/lyyime-doctor" "$CARGO_TARGET_DIR/release/dicttool" "$CARGO_TARGET_DIR/release/lyyime-shot" "$PREFIX/bin/"
 echo "$LIBDIR" > /etc/ld.so.conf.d/lyyime.conf 2>/dev/null && ldconfig || echo "  (非 root:跳过 ldconfig,宿主将按 LYYIME_CORE_LIB/路径探测加载)"
 
 if [ "$DO_IBUS" = 1 ]; then
@@ -66,5 +66,6 @@ cat <<EOF
   Mode A:ibus 托盘选择 "lyyIme 五笔拼音"(如未出现:ibus restart)
   Mode B:运行 lyyime-xim,并让应用使用 XMODIFIERS=@im=lyyime GTK_IM_MODULE=xim(lyyime-doctor 可写入会话环境)
   Mode C:应用菜单 "lyyIme 悬浮窗输入"(lyyime-float, 兜底/免框架悬浮输入,支持自定义短语)
+  截屏:lyyime-shot(热键默认 Ctrl+Alt+A,shot_hotkey 可配置;托盘菜单亦有入口)
   修复/管理:lyyime-doctor check | fix --all | ime-list | ime-add <id>
 EOF

@@ -141,6 +141,18 @@ int lyyime_set_commit_after_four(void *eng, int enabled)
     return enabled ? 1 : 0;
 }
 
+int lyyime_set_commit_unique_four(void *eng, int enabled)
+{
+    (void)eng;
+    return enabled ? 1 : 0;
+}
+
+int lyyime_set_phrase_hint(void *eng, int enabled)
+{
+    (void)eng;
+    return enabled ? 1 : 0;
+}
+
 /* 效果 JSON 追加小工具:返回写入后总长(不含 \0),截断返回 -1 */
 typedef struct {
     char *buf;

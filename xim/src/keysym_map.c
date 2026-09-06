@@ -9,6 +9,7 @@
 #include <X11/keysymdef.h>
 #include <xcb/xproto.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,7 +29,8 @@ void lyy_keysym_map(uint32_t keysym, int *key, uint32_t *chr)
         *chr = keysym;
         return;
     }
-    /* 大写字母(Shift/capslock 进入):小写化后仍按字母缓冲 */
+    /* 大写字母(Shift 进入;CapsLock 大写态已在 xim_server 直通,
+     * 走不到这里):小写化后仍按字母缓冲 */
     if (keysym >= (uint32_t)'A' && keysym <= (uint32_t)'Z') {
         *key = LKEY_CHAR;
         *chr = (uint32_t)tolower((int)keysym);
@@ -262,4 +264,96 @@ int lyy_hotkey_match(uint32_t mods, uint32_t keysym, uint32_t hotkey_mods,
                      uint32_t hotkey_keysym)
 {
     return mods == hotkey_mods && keysym == hotkey_keysym;
+}
+
+/* ---- 规范化与冲突升级(合同 §12.3/§13;与 lyyime-core src/hotkey.rs 同规格)----
+ * 规范化:别名归一(control≡ctrl、mod1≡alt、mod4/win≡super、"="≡equal 等)
+ * + 修饰定序(ctrl+alt+super+shift)+ 键名标准形,用于冲突比较与设置窗回显;
+ * 升级:组合被占用时按 原组合 → +Alt → +Alt+Shift 逐级尝试空闲组合。 */
+
+/* keysym → 标准键名(与 lyy_hotkey_parse 的键名解析互逆,别名取正名;
+ * 表外 keysym 写作 0x 十六进制,保证任意合法解析结果都可回显) */
+static void hotkey_key_label(uint32_t sym, char *buf, size_t cap)
+{
+    if ((sym >= 'a' && sym <= 'z') || (sym >= '0' && sym <= '9')) {
+        snprintf(buf, cap, "%c", (char)sym);
+        return;
+    }
+    if (sym >= 0xffbe && sym <= 0xffc9) { /* F1–F12 */
+        snprintf(buf, cap, "f%u", (unsigned)(sym - 0xffbe + 1));
+        return;
+    }
+    if (sym >= 0xffca && sym <= 0xffd5) { /* F13–F24(与 parse 同段连续映射) */
+        snprintf(buf, cap, "f%u", (unsigned)(sym - 0xffca + 13));
+        return;
+    }
+    size_t cnt = sizeof(LYY_HOTKEY_KEYS) / sizeof(LYY_HOTKEY_KEYS[0]);
+    for (size_t k = 0; k < cnt; k++) {
+        if (LYY_HOTKEY_KEYS[k].keysym == sym) {
+            snprintf(buf, cap, "%s", LYY_HOTKEY_KEYS[k].name);
+            return;
+        }
+    }
+    snprintf(buf, cap, "0x%lx", (unsigned long)sym);
+}
+
+/* (修饰位, keysym) → 规范化串;缓冲不足返回 0 */
+static int hotkey_canon_from(uint32_t mods, uint32_t sym, char *out, size_t cap)
+{
+    static const struct {
+        uint32_t bit;
+        const char *name;
+    } MODS[] = {
+        { XCB_MOD_MASK_CONTROL, "ctrl" },
+        { XCB_MOD_MASK_1, "alt" },
+        { XCB_MOD_MASK_4, "super" },
+        { XCB_MOD_MASK_SHIFT, "shift" },
+    };
+    size_t off = 0;
+    for (size_t i = 0; i < sizeof(MODS) / sizeof(MODS[0]); i++) {
+        if (!(mods & MODS[i].bit))
+            continue;
+        int n = snprintf(out + off, cap - off, "%s%s", off ? "+" : "",
+                         MODS[i].name);
+        if (n < 0 || (size_t)n >= cap - off)
+            return 0;
+        off += (size_t)n;
+    }
+    char key[32];
+    hotkey_key_label(sym, key, sizeof(key));
+    int n = snprintf(out + off, cap - off, "%s%s", off ? "+" : "", key);
+    if (n < 0 || (size_t)n >= cap - off)
+        return 0;
+    return 1;
+}
+
+int lyy_hotkey_canon(const char *spec, char *out, size_t cap)
+{
+    uint32_t mods = 0, sym = 0;
+    if (!lyy_hotkey_parse(spec, &mods, &sym))
+        return 0;
+    return hotkey_canon_from(mods, sym, out, cap);
+}
+
+int lyy_hotkey_escalate(const char *spec, const char *occupied, char *out,
+                        size_t cap)
+{
+    uint32_t mods = 0, sym = 0, om = 0, os = 0;
+    if (!lyy_hotkey_parse(spec, &mods, &sym))
+        return 0;
+    /* occupied 写法非法不构成占用(宿主对非法热键本就不拦截) */
+    int occ_ok = lyy_hotkey_parse(occupied, &om, &os);
+    /* 阶梯:原组合 → +Alt → +Alt+Shift;已含的修饰自动跳过
+     * (候选与前一等级重合时必然同样被占,continue 语义天然去重) */
+    for (int level = 0; level < 3; level++) {
+        uint32_t cand = mods;
+        if (level >= 1)
+            cand |= XCB_MOD_MASK_1;
+        if (level >= 2)
+            cand |= XCB_MOD_MASK_SHIFT;
+        if (occ_ok && cand == om && sym == os)
+            continue;
+        return hotkey_canon_from(cand, sym, out, cap);
+    }
+    return 0;
 }

@@ -1,8 +1,8 @@
 //! dicttool 集成测试:用 rusqlite 内存库模拟 ibus-table schema → convert → 断言产物。
 //!
 //! 覆盖:tabkeys 大写多码归一、声调归一化(含轻声与防御性数字后缀)、
-//! 重复 (code,word) 取 MAX(freq)、空行/NULL/控制字符脏数据容错、排序、
-//! meta.json、幂等性,以及 fetch 阶段的纯解析函数。
+//! 重复 (code,word) 取 MAX(freq)、空行/NULL/控制字符脏数据容错、
+//! 海峰尾点隐藏词条过滤、排序、meta.json、幂等性,以及 fetch 阶段的纯解析函数。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,13 +43,14 @@ fn test_db() -> Connection {
     .unwrap();
     conn.execute("INSERT INTO ime VALUES ('serial_number','19991231')", []).unwrap();
 
-    // phrases:正常码 + 大写 tabkeys + 重复 (code,word) + 脏数据
+    // phrases:正常码 + 大写 tabkeys + 尾点隐藏词条 + 重复 (code,word) + 脏数据
     let phrases: Vec<(&str, Option<&str>, Option<i64>)> = vec![
         ("a", Some("工"), Some(2266)),
         ("w", Some("人"), Some(10837)),
         ("wq", Some("你"), Some(6946)),
         ("aaaa", Some("恭恭敬敬"), Some(641000)),
-        ("AAWI", Some("𤁱."), Some(100)),     // 大写码(海峰直上屏记法)→ 归一为 aawi
+        ("AAWI", Some("𤁱."), Some(100)),     // 海峰隐藏词条(尾点标记)→ 过滤,不进产物
+        ("AAWI", Some("阿"), Some(50)),       // 大写码(海峰直上屏记法)→ 归一为 aawi
         ("yyyy", Some("方言"), Some(3703000)),
         ("yyyy", Some("方言"), Some(999)),    // 重复 (code,word):取 max
         ("zz", Some("脏\u{1}行\u{7f}"), Some(500)), // 含控制字符:剥离后保留
@@ -115,7 +116,7 @@ fn wubi_lowercase_and_uppercase_tabkeys() {
     let (out, _) = convert("wubi-case");
     let text = read(&out, "wubi.tsv");
     // 大写 tabkeys 归一为小写
-    assert!(text.contains("aawi\t𤁱.\t100\n"), "缺 aawi 行:{}", text);
+    assert!(text.contains("aawi\t阿\t50\n"), "缺 aawi 行:{}", text);
     // 大小写不同但归一后同码的行共存
     assert!(text.contains("zz\t中间\t300\n"), "缺 zz/中间:{}", text);
     assert!(text.contains("a\t工\t2266\n"));
@@ -129,8 +130,21 @@ fn wubi_duplicate_takes_max_freq() {
     let text = read(&out, "wubi.tsv");
     let hits: Vec<&str> = text.lines().filter(|l| l.starts_with("yyyy\t方言\t")).collect();
     assert_eq!(hits, vec!["yyyy\t方言\t3703000"], "重复 (code,word) 应只留 max freq");
-    // 12 行输入:空词/NULL词/NULLfreq 各去 1,重复 yyyy 合并 1 → 8 行
+    // 13 行输入:空词/NULL词/NULLfreq/尾点隐藏各去 1,重复 yyyy 合并 1 → 8 行
     assert_eq!(counts.0, 8, "wubi.tsv 行数");
+}
+
+#[test]
+fn wubi_hidden_dotted_entries_filtered() {
+    let (out, counts) = convert("wubi-hidden");
+    let text = read(&out, "wubi.tsv");
+    // 海峰「词尾加 .」隐藏词条(生僻字/兼容字)不进产物:
+    // 多数字体无法渲染,且会破坏四码唯一上屏等候选数判定
+    assert!(!text.contains("𤁱"), "尾点隐藏词条应被过滤:{}", text);
+    assert!(!text.contains(".\t"), "词字段不得含点:{}", text);
+    // 同码非隐藏条目不受影响
+    assert!(text.contains("aawi\t阿\t50\n"), "非隐藏大写码条目应保留:{}", text);
+    assert_eq!(counts.0, 8, "wubi.tsv 行数(13 输入 - 4 脏/隐藏 - 1 合并)");
 }
 
 #[test]

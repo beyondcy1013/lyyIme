@@ -10,6 +10,9 @@
 //! - Enter:有缓冲上屏原始字母;空缓冲放行;
 //! - Backspace:删尾;Esc:清缓冲;`-`/`=`(PageUp/PageDown):翻页;
 //! - 标点:中文态空缓冲出中文标点;有缓冲先上屏首选再补中文标点;英文态放行;
+//! - 四码唯一上屏(可配置):恰好凑满四码且候选唯一时,免空格直接上屏;
+//! - 词组提示(可配置):上屏后最近几字有更省键的五笔词组时,效果流在
+//!   清除类效果之后追加 [`Effect::Hint`](候选条展示,下一次输入才清除);
 //! - ShiftPress:有缓冲上屏英文原串;空缓冲吞键,宿主判定单击后调
 //!   [`Engine::toggle_mode`];
 //! - 其它键:Pass(有缓冲先清缓冲)。
@@ -44,6 +47,10 @@ const SEGS_CAP: usize = 64;
 const RECENT_CAP: usize = 64;
 /// 造词一次选取的长度上限(词组编码取首末字,过长无意义)。
 const MAX_COIN_LEN: usize = 32;
+/// 词组提示回看的后缀长度上限(五笔词组常见 2–4 字,≥5 字收益低)。
+const PHRASE_HINT_MAX: usize = 6;
+/// 实耗键数定点系数:多字同屏时按键数均摊到字(×16 定点,u16 足够)。
+const COST_FIXED: u32 = 16;
 
 /// 排序前的原始候选(内部结构)。
 ///
@@ -116,6 +123,9 @@ pub(crate) struct Plan {
     learned: Option<String>,
     /// 造词:最近上屏 CJK 历史(合同 §12;仅 commit 含汉字时增长)。
     pub(crate) recent: Vec<char>,
+    /// 与 `recent` 一一对应的实耗键数(定点 ×[`COST_FIXED`];多字同屏均摊,
+    /// 供词组效率提示比较"词组编码 < 实敲键数")。
+    pub(crate) recent_cost: Vec<u16>,
     /// 造词:最近一次 commit 贡献的连续汉字数(Ctrl+= 的初始选长)。
     pub(crate) last_run: usize,
     /// 造词模式当前选取的尾部字长;None = 不在造词模式。
@@ -134,6 +144,7 @@ impl Plan {
             quotes: eng.quotes,
             learned: None,
             recent: eng.recent.clone(),
+            recent_cost: eng.recent_cost.clone(),
             last_run: eng.last_run,
             coin: eng.coin,
             user_word: None,
@@ -156,6 +167,8 @@ pub struct Engine {
     quotes: QuoteState,
     /// 最近上屏 CJK 历史(造词原料,合同 §12;焦点切换不清,跨窗口即失效)。
     recent: Vec<char>,
+    /// 与 recent 一一对应的实耗键数(词组效率提示用,见 [`Plan::recent_cost`])。
+    recent_cost: Vec<u16>,
     /// 最近一次 commit 贡献的连续汉字数(造词初始选长)。
     last_run: usize,
     /// 造词模式:Some(选长) = 进行中。
@@ -194,6 +207,7 @@ impl Engine {
             learner,
             quotes: QuoteState::new(),
             recent: Vec::new(),
+            recent_cost: Vec::new(),
             last_run: 0,
             coin: None,
             user_words,
@@ -405,6 +419,7 @@ impl Engine {
         self.cn_hit = plan.cn_hit;
         self.quotes = plan.quotes;
         self.recent = plan.recent;
+        self.recent_cost = plan.recent_cost;
         self.last_run = plan.last_run;
         self.coin = plan.coin;
         if let Some((word, code)) = plan.user_word {
@@ -445,6 +460,17 @@ impl Engine {
         p.buf.push(c);
         p.page = 0;
         self.recompute_into(p);
+        // 四码唯一上屏(可配置,借鉴搜狗/QQ 五笔的"四码唯一自动上屏"):
+        // 恰好凑满四码且合并排序后的候选唯一时,免空格直接上屏。
+        // 多候选(拼音/英文通道有共存候选)不触发,避免劫持混打渐进输入;
+        // 唯一性按完整候选列表判定,与空格顶屏的选择一致(免按空格而已)。
+        if self.cfg.commit_unique_four
+            && p.buf.chars().count() == 4
+            && p.cands.len() == 1
+        {
+            let text = p.cands[0].text.clone();
+            return plan_commit(self, p, &text, true);
+        }
         composition_effects(self, p)
     }
 
@@ -710,6 +736,40 @@ impl Engine {
     /// 本次组合结束是否值得学习(来自候选顶屏)。
     fn learn_worthy(&self, p: &Plan) -> bool {
         !plan_page_slice(self, p).is_empty()
+    }
+
+    /// 词组效率提示(借鉴万能五笔的高效词提示):最近上屏的连续汉字若
+    /// 恰好是词库中的五笔词组、且词组编码比刚才实敲的字母数更省,给出
+    /// 「词 + 编码」提示效果(宿主展示于候选条,直到下一次输入才清除)。
+    ///
+    /// 回看长度 2..min(recent, 6),取最长命中(节省最多、信息量最大);
+    /// 只提示"现在就能用该编码打出"的词(精确码桶内确有该词,含用户造词),
+    /// 拼音独有词组不冒充五笔编码。实耗键数按字均摊(多字同屏均计入),
+    /// 因此刚用同码词组打过的字不会再次提示(编码长 = 实耗,不严格更省)。
+    fn plan_phrase_hint(&self, p: &Plan) -> Option<Effect> {
+        if !self.cfg.phrase_hint || p.recent.len() < 2 {
+            return None;
+        }
+        let n = p.recent.len();
+        for len in (2..=n.min(PHRASE_HINT_MAX)).rev() {
+            let word: String = p.recent[n - len..].iter().collect();
+            let Some(code) = self.dict.wubi_rev.get(&word) else {
+                continue;
+            };
+            let typed: u32 = p.recent_cost[n - len..]
+                .iter()
+                .map(|&c| u32::from(c))
+                .sum();
+            let typeable = self
+                .dict
+                .wubi_exact
+                .get(code)
+                .is_some_and(|idxs| idxs.iter().any(|&i| self.dict.wubi[i as usize].word == word));
+            if typeable && u32::from(code.len() as u16) * COST_FIXED < typed {
+                return Some(Effect::Hint(format!("词组提示:「{word}」可用 {code} 打出")));
+            }
+        }
+        None
     }
 
     /// 组合结束时应上屏的文本:页内首选 > 原始字母。
@@ -1127,7 +1187,7 @@ fn plan_clear(p: &mut Plan) {
 }
 
 /// 结束本次组合并上屏 `text`;`learned` 表示该文本来自候选/自动直通,需要学习。
-fn plan_commit(_eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Effect> {
+fn plan_commit(eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Effect> {
     if learned {
         p.learned = Some(text.to_string());
     }
@@ -1137,17 +1197,27 @@ fn plan_commit(_eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Ef
     if !cjk.is_empty() {
         p.last_run = cjk.len().min(RECENT_CAP);
         p.recent.extend(cjk.iter().copied());
+        // 实耗键数 = 本组合敲的字母数,均摊到每个上屏字(词组提示比较基准)。
+        let cost = (p.buf.chars().count() as u32 * COST_FIXED / cjk.len() as u32) as u16;
+        p.recent_cost.extend(std::iter::repeat_n(cost, cjk.len()));
         let overflow = p.recent.len().saturating_sub(RECENT_CAP);
         if overflow > 0 {
             p.recent.drain(..overflow);
+            p.recent_cost.drain(..overflow);
         }
     }
     plan_clear(p);
-    vec![
+    let mut effects = vec![
         Effect::Commit(text.to_string()),
         Effect::Preedit(None),
         empty_cands(),
-    ]
+    ];
+    // 词组效率提示排在清除之后:宿主候选条先隐藏再展示提示,
+    // 并保留到下一次输入产生新效果流时才替换/清除。
+    if let Some(hint) = eng.plan_phrase_hint(p) {
+        effects.push(hint);
+    }
+    effects
 }
 
 /// CJK 统一表意字符(含扩展 A/兼容区;造词只认汉字)。

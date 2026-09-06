@@ -27,6 +27,19 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
    - 候选支持简码(`wq`→你)与词组(`wqvb`→你好),选词自动学习加权。
 3. 上屏后焦点自动回到目标窗口完成发送,再自动跳回悬浮窗继续打。
 
+## 输入统计(停顿显示今日字数与速度)
+
+打字停顿超过设定秒数(默认 10)后,状态行自动改显「**今日已输入 X 字 · 约
+Y 字/分**」;一恢复输入立即还原成目标窗口信息。速度按**活跃打字时长**计算:
+相邻两次上屏间隔超过「最长停顿」(默认 30 秒)的空隙(思考、离开)不计入
+时长,刷手机一下午不会把均速拉没。
+
+- 设置入口:菜单 ☰ → **输入统计设置…**(开关 + 两个秒数,修改即时生效,
+  另显示今日快照)。
+- 统计数据:`~/.local/share/lyyime/stats/日期.tsv`(core `stats` 模块);
+  **与 ibus 模式(Mode A)共用同一份数据**,两边打字都计入。
+- 计字口径:上屏文本的非空白字符数(汉字/字母/标点都算,空格换行不算)。
+
 ## 自定义短语与动态变量
 
 菜单 ☰ → **自定义短语管理…**:自定义编码(1–12 个小写字母)→ 任意长度文本,
@@ -72,7 +85,7 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
 
 ## 文件
 
-- `src/main.rs` 入口(主程序 / `--pad` 打字板 / `--smoke-phrases` 冒烟)
+- `src/main.rs` 入口(主程序 / `--pad` 打字板 / `--smoke-phrases` / `--smoke-stats` 冒烟)
 - `src/ui.rs` 主窗/候选渲染/按键/菜单/短语管理对话框/打字板
 - `src/dict.rs` 码表加载:读 `/usr/share/ibus-table/tables/wubi-{极点|海峰}86.db`
   (ibus-table SQLite,`phrases(tabkeys, phrase, freq)`,13.7 万条,内存前缀索引)
@@ -90,6 +103,9 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
 - `~/.config/lyyime/config.json`:`dict`(jidian86/haifeng86)、`send`(type/paste)、`position`
 - `~/.config/lyyime/user_freq.json`:选词学习(重码时高频词前置)
 - `~/.config/lyyime/phrase.json`:自定义短语(编码 → 文本列表,支持动态变量)
+- `~/.config/lyyime/config.json` 还含输入统计项:`stats_enabled`(默认 true)、
+  `stats_pause_secs`(默认 10)、`stats_idle_exclude_secs`(默认 30)
+- `~/.local/share/lyyime/stats/日期.tsv`:输入统计(按天,与 Mode A 共享)
 - `~/.local/share/lyyime/float.pid`:单实例 pidfile
 
 ## 测试
@@ -99,7 +115,7 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
   日期/时间触发词(首选触发/候选少触发/深埋不触发/整拼直触/自定义短语不受影响)、
   码表索引与学习加权。
 - `e2e_phrases.sh`:Xvfb 隔离屏全链路(词典回归 / 短语置顶 / 长短语自动粘贴 /
-  管理对话框冒烟 / jjad 动态日期真码表触发)。
+  管理对话框冒烟 / jjad 动态日期真码表触发 / 输入统计冒烟:记录→停顿显示→恢复)。
 
 ## 已知边界
 

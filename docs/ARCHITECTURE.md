@@ -65,6 +65,7 @@ pub enum Effect {
     Pass,                         // 宿主原样放行该键(英文态字母、未识别键)
     Consumed,                     // 吞掉但不产生可见效果
     Notice(String),               // 辅助区临时提示(造词结果等,宿主数秒后清除)
+    Hint(String),                 // 词组效率提示(候选条展示,无定时,下一次输入清除)
     ModeChanged(Mode),            // 宿主更新 UI 指示
 }
 
@@ -89,7 +90,8 @@ int   lyyime_toggle_mode(void* eng);               /* 返回新 mode */
 /* 喂键:key_id 见下表, chr 为 Char/Punct 的码点(其余填 0)。
    返回 effects JSON 写入 buf 所需字节数(含\0);若 buf_cap 不够,不写入并返回 -needed。
    effects JSON: [{"t":"commit","s":"你好"},{"t":"preedit","s":"nihao"},{"t":"cands","n":5,"page":0,"pages":3},
-                  {"t":"pass"},{"t":"consumed"},{"t":"notice","s":"已造词:你好(wqvb)"},{"t":"mode","m":1}]
+                  {"t":"pass"},{"t":"consumed"},{"t":"notice","s":"已造词:你好(wqvb)"},
+                  {"t":"hint","s":"词组提示:「你好」可用 wqvb 打出"},{"t":"mode","m":1}]
    cands 的具体候选另取:lyyime_cand(eng, i, buf, cap) 返回候选文本,-needed 表示不足;
    lyyime_cand_comment 同理。 */
 int64_t lyyime_process_key(void* eng, int key_id, uint32_t chr, char* buf, int64_t buf_cap);
@@ -99,7 +101,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 
 `key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10, LKEY_COIN=11, LKEY_LEFT=12, LKEY_RIGHT=13, LKEY_UP=14, LKEY_DOWN=15`(11–15 见 §12)。
 
-`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。
+`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。四码唯一上屏默认**开启**(`commit_unique_four = true`):恰好凑满四码且合并排序后候选唯一时,core 直接回 Commit(该候选),免按空格;多候选(拼音/英文通道有共存候选)不触发。**词组效率提示**默认**开启**(`phrase_hint = true`):每次 commit 含汉字后,core 回看最近 2–6 个上屏汉字,若该后缀是词库五笔词组(含用户造词)且词组编码长度**严格小于**这几个字实敲的字母数(多字同屏按均摊计),在同一效果流末尾追加 `{"t":"hint","s":"词组提示:「词」可用 编码 打出"}`;同码词组打过的不重复提示。宿主把 hint 展示在候选条/辅助区且**不做定时清除**,直到下一次输入产生新效果流时自然替换或隐藏。两项均有 FFI 开关:`lyyime_set_commit_after_four` / `lyyime_set_commit_unique_four` / `lyyime_set_phrase_hint`(非 0 启用,返回生效后的 0/1)。
 
 **chr 传值约定(v1.1 实现期确认)**:`chr` 携带 Char/Punct/**Digit** 的码点——Digit 传 `'1'..'9'`(ASCII 0x31..0x39),core 按 `chr-'0'` 取值;其余 key_id 填 0。**有状态纪律**:`lyyime_process_key` 必须先生成完整 effects JSON、确认写入容量足够后才落内部状态变更,保证宿主因 `-needed` 扩容重试时同一键不会二次生效。
 
@@ -107,7 +109,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 
 | 文件 | 列 | 说明 |
 |---|---|---|
-| `wubi.tsv` | `code\tword\tfreq` | 五笔码→词;含单字全码/简码与词组;按 code 升序、freq 降序 |
+| `wubi.tsv` | `code\tword\tfreq` | 五笔码→词;含单字全码/简码与词组;按 code 升序、freq 降序;海峰源库「词尾 `.`」隐藏词条(生僻字标记)在 convert 阶段过滤,不入表 |
 | `pinyin_char.tsv` | `pinyin\tchar\tfreq` | 全拼(无声调)→单字 |
 | `pinyin_phrase.tsv` | `word\tpinyin\tfreq` | 词组、无声调全拼(音节空格分隔)、词频 |
 | `english.tsv` | `word\tfreq` | 小写英文词+词频,≥1万行 |
@@ -117,7 +119,9 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 用户数据:`~/.local/share/lyyime/user.tsv`,格式 `word\tfreq_extra\tlast_used_epoch`;core 定期(每 64 次 commit/退出时)批量落盘。
 用户造词:`~/.local/share/lyyime/user_words.tsv`,格式 `word\tcode\tcount`(与 user.tsv 同目录,随 user_dict 覆盖迁移);启动时整表并入五笔索引,造词即时落盘(临时文件 + rename 原子替换),见 §12。
 
-配置:`~/.config/lyyime/config.toml`(doctor/app/ibus 共用;字段见 core `Config` 默认值,注释中文)。
+输入统计:`~/.local/share/lyyime/stats/YYYY-MM-DD.tsv`(本地日期,按天分文件),每行 `epoch_ms\tchars`——一次上屏一条(chars=非空白字符数)。Mode A(`EngineLogic::dispatch` 的 Commit 效果)与 Mode C(悬浮窗 commit 成功后)各自进程内追加同一目录(单行 O_APPEND,不交错)。查询走 core `stats` 模块(`today_summary`,纯函数、时间由调用方传入):字数 = 当天 chars 之和;速度 = 字数 ÷ 活跃时长,相邻上屏间隔 ≤ 排除阈值才计入时长(超时空隙——思考/离开——不算)。显示端为 lyyime-float:输入停顿 `stats_pause_secs`(默认 10)秒后在状态行显示「今日已输入 N 字 · 约 M 字/分」,重新输入即还原;配置在 float config.json:`stats_enabled` / `stats_pause_secs` / `stats_idle_exclude_secs`(悬浮窗菜单「输入统计设置…」可改)。统计为旁路功能,任何文件错误静默,绝不影响输入主链路。
+
+配置:`~/.config/lyyime/config.toml`(doctor/app/ibus 共用;字段见 core `Config` 默认值,注释中文)。快捷键类:`coin_hotkey`(§12)、`shot_hotkey`(§13),写法均为「修饰(ctrl/alt/super/shift,至少一个)+键名」。
 
 ## 5. 匹配与排序算法(v1)
 
@@ -145,6 +149,8 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 | 输入 | 行为 |
 |---|---|
 | a–z | 缓冲,更新 preedit/候选 |
+| CapsLock 大写态 + 字母 | **原样直通英文,不进组词缓冲**:无 Shift 输出大写字母;Shift+字母由应用按 Caps+Shift 翻译输出小写字母。直通前宿主送 core `Other` 复位可能残留的缓冲(CapsLock 键本身经"其它键"路径清缓冲);数字/标点等非字母键不受 CapsLock 影响,行为同常态 |
+| 四码唯一上屏(可配置) | 恰好输入第 4 个字母且合并候选唯一:core 直接 Commit(该候选),缓冲与候选一并清空;多候选不触发。默认开启(`commit_unique_four`),关闭后第 4 键保持组合(§3) |
 | 1–9 | 有候选:选第 N 个上屏;无候选:Pass(数字原样) |
 | Space | **任何时候都确认当前选中项**:有候选顶屏首选;有缓冲无候选 Commit(原字母);无缓冲 Pass(空格) |
 | Enter | 有缓冲:Commit(原字母);无缓冲:Pass |
@@ -152,6 +158,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 | Esc | 清缓冲(Consumed);空:Pass |
 | `-`/`=` | 有候选翻页(Consumed);否则 Pass |
 | 标点 | 中文态空缓冲→Commit(对应中文标点);有缓冲→Commit(首选)+Commit(中文标点);英文态 Pass |
+| 上屏后词组提示(可配置) | 含汉字的 Commit 之后,若最近 2–6 个上屏字有更省键的五笔词组(编码长 < 实敲字母数),效果流末尾追加 `Hint(「词」可用 编码 打出)`;宿主候选条展示、**无定时**,下一次输入的新效果流自然替换/清除(§3;`phrase_hint` 默认开) |
 | Shift 按下 | 有缓冲:**Commit(原字母)**(英文原串);空缓冲:Consumed 并进入单击检测 |
 | Shift 单击(空缓冲) | toggle_mode + ModeChanged(单击=按下后未产生其它键即释放,且无其它修饰) |
 | 其它键 | Pass(有缓冲时先 reset) |
@@ -165,7 +172,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 - 位置(安装后):`/usr/local/share/lyyime/ibus/engine/lyyime.py` + component XML `/usr/local/share/ibus/component/lyyime.xml`(engine name `lyyime`,symbol `伍`)。
 - `lyyime.py`:标准 `IBus.Engine` 子类;`do_process_key_event` 把 keysym/state 映射为 `LKey`(在 ctypes 边界小写化字母、区分 Shift 释放序列)→ `lyyime_process_key` → 依 JSON 效果流调用 `commit_text / update_preedit_text / update_lookup_table / page_up|down`。
 - 数字键选词、`-`/`=` 翻页由 core 返回 Candidates 后的 lookup table 承载;`Pass` 的键返回 `False` 让 ibus 放行。
-- 托盘属性菜单:开关中英 / 设置(拉起 `lyyime-app --settings`)/ 工具与修复(拉起 `lyyime-doctor --gui`)。
+- 托盘属性菜单:中英切换 / 截屏(§13)/ 设置(拉起 `lyyime-app --settings`)/ 工具与修复(拉起 `lyyime-doctor --gui`)。
 - 崩溃隔离:engine 异常时退化为英文直通并打日志 `~/.local/share/lyyime/logs/ibus.log`。
 
 ## 8. Mode B:lyyime-xim 独立外挂(X11,XIM server 路线)
@@ -177,7 +184,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 - **按键流**(root-window style):trigger on 后,XIM forward event → 映射 LKey → core.process_key → 效果流:Preedit/Candidates 画进自绘候选窗;Commit → `IMCommitString`(任意 Unicode);Pass 类键 → `IMForwardEvent`(协议级原样回放,零风险)。
 - **Shift 单击切换** = XIM trigger off/on:off 后应用直接收键(英文态),再 on 恢复中文态;由 XIM 协议原生保证,无任何 hack。
 - **候选窗**:GTK3 override-redirect、无边框、accept_focus(false),跟随光标(root style 下用 XQueryPointer);序号高亮首选、编码提示、翻页指示,样式对齐主流输入法。
-- **托盘**:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel):状态(中/EN)+ 右键菜单:启用/停用、模式、设置、工具(修复输入法 / 输入法管理(增删其它输入法、设默认,exec `lyyime-doctor` CLI 并解析 JSON,危险操作 GTK 确认对话框)、重载词库、日志)、退出。
+- **托盘**:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel):状态(中/EN)+ 右键菜单:启用/停用、模式、设置、工具(截屏(§13)/ 修复输入法 / 输入法管理(增删其它输入法、设默认,exec `lyyime-doctor` CLI 并解析 JSON,危险操作 GTK 确认对话框)、重载词库、日志)、退出。
 - **设置窗**:GTK3(GtkBuilder .ui),读写 ~/.config/lyyime/config.toml,保存即 set_config 生效;含 Mode B 专属项(XMODIFIERS 一键切换到 lyyime/恢复 ibus)。
 - **探路石前置**:先交付"最小 XIM server + GTK3 Entry 连通"spike(Xvfb 实证),通过后才铺全量;失败则升级为自带 GTK immodule 方案并回报主控。
 - 设置窗:GTK3,读写 config.toml,保存即生效(core set_config)。
@@ -208,6 +215,7 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
 | dicttool | verify 子命令 + 固定断言 | crates/lyyime-dicttool |
 | ibus 引擎 | 不经 daemon 直接实例化喢单元键 | tests/unit_ibus_engine.py |
 | Mode B 全链路 | Xvfb :99 + xdotool key/send,断言 gedit/简单 GTK 文本域内容 | tests/e2e/run.sh |
+| 截屏助手 | Xvfb :95:--auto 精确裁剪 / --full / 框选拖拽 / 单击与 Esc 取消 / 双击整屏 | tests/e2e/shot_e2e.sh |
 | doctor | 破坏环境→check 发现→fix 恢复 | tests/e2e/doctor_test.sh |
 
 ## 11. AI 助手(/AI 触发调用自定义大模型)
@@ -310,3 +318,42 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
   Mode A `tests/unit_ibus_engine.py::CoinHotkeyTestCase`(桩库演示串
   "你好好吗");Mode B `xim/tests/unit_hotkey.c` + `unit_config.c` §13 +
   `xim_e2e.sh` 场景 D(ctrl+equal→Right→Return 全链路)。
+
+
+## 13. 截屏助手(lyyime-shot,自定义快捷键,Ctrl+Alt+A 默认)
+
+对标搜狗/QQ 截屏:热键拉起框选截屏,拖拽选区,图片存图片目录并复制
+剪贴板,桌面通知给路径。实现为独立 Rust/GTK3 程序 `crates/lyyime-shot`
+(`lyyime-shot`),输入法宿主只负责热键拦截与拉起 —— 截屏进程崩溃/缺失
+均不影响输入法主流程。截图机制:`gdk_pixbuf_get_from_window(root)`
+(X11 XGetImage);覆盖窗展示**先截好的**整屏快照(冻结画面)后框选,
+避免自截(借鉴 GNOME Screenshot / flameshot 流程)。
+
+### 13.1 交互合同(Mode A / Mode B 宿主必须一致实现)
+
+| 输入 | 行为 |
+|---|---|
+| 截屏热键(默认 Ctrl+Alt+A,`shot_hotkey` 可配置) | 命中即吞键并拉起 `lyyime-shot`(不进组词缓冲、不经 core、放弃 /AI 会话);英文态:Mode A 中 ibus 激活期间按键必经引擎,中英态同效;Mode B 英文直通态(trigger off)按键不经 XIM 服务,该态下用托盘「截屏」菜单兜底 |
+| 框选窗内 拖拽 | 选区(冻结画面上,选区外压暗、虚线边框、尺寸角标);抬起确认 |
+| 框选窗内 Esc / 单击(无拖拽) | 取消(无产物,退出码 0) |
+| 框选窗内 Enter / Space | 确认当前选区;无选区 = 整屏 |
+| 双击 | 整屏(单击取消有 280ms 消歧定时) |
+| 确认后 | PNG 存 `$LYYIME_SHOT_DIR` → `--dir` → `~/图片` → `~/Pictures` → `~`,文件名 `lyyIme_YYYYMMDD_HHMMSS.png`(同秒递增 `_1`);复制 CLIPBOARD;notify-send 通知;stdout 输出 `已保存:<路径>` |
+
+### 13.2 配置与实现
+
+- **配置**:`config.toml` 顶层 `shot_hotkey = "ctrl+alt+a"`(三端共用;
+  写法同 §12 `coin_hotkey`,core 仅集中 schema 不消费)。
+- **Mode A**:`keysym.rs parse_hotkey`(与 Mode B C 版同规格,单测各自
+  覆盖)→ `logic.rs on_press` 在 BLOCKING 组合放行之前精确匹配(修饰位只比
+  ctrl/alt/super/shift 四位,CapsLock/NumLock 不影响)→ `Host::on_shot` →
+  `service.rs spawn_shot` 异步拉起,缺失时辅助区给安装指引;托盘菜单属性树
+  (`root_property`)含「截屏」等全部入口(property_activate 同名分支)。
+- **Mode B**:`shot.c lyy_spawn_shot`(helper 解析:$LYYIME_SHOT →
+  /usr/local/bin → exe 同级 → PATH,与 AI helper 同思路;E2E 经
+  `$LYYIME_SHOT` 注入桩)→ `xim_server.c handle_key_event` 在造词热键之前
+  拦截;托盘工具菜单「截屏」;设置窗快捷键输入框保存即生效。
+- **测试**:shot crate 单测(时间戳/目录链/参数解析)+ Mode A logic 单测
+  (命中/吞键/中英态/配置非法)+ `xim/tests/unit_config.c` §14 +
+  `shot_e2e.sh`(7 场景)+ `xim_e2e.sh` 场景 F + `run.sh` PASS A4(双模式
+  热键→拉起桩全链路)。

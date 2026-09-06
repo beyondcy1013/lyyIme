@@ -7,7 +7,8 @@ mod common;
 use common::{fixtures, TempDir};
 use lyyime_core::ffi::{
     lyyime_cand, lyyime_cand_comment, lyyime_free, lyyime_mode, lyyime_new, lyyime_process_key,
-    lyyime_reset, lyyime_set_commit_after_four, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR,
+    lyyime_reset, lyyime_set_commit_after_four, lyyime_set_commit_unique_four,
+    lyyime_set_phrase_hint, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR,
     LKEY_DIGIT, LKEY_ENTER, LKEY_ESC, LKEY_OTHER, LKEY_PAGEDOWN, LKEY_PAGEUP, LKEY_PUNCT,
     LKEY_SHIFTPRESS, LKEY_SPACE,
 };
@@ -119,8 +120,40 @@ fn ffi_空格顶屏_commit与清除的json序列() {
     let json = eng.key(LKEY_SPACE, 0);
     assert_eq!(
         json,
-        "[{\"t\":\"commit\",\"s\":\"你好\"},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]"
+        "[{\"t\":\"commit\",\"s\":\"你好\"},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0},{\"t\":\"hint\",\"s\":\"词组提示:「你好」可用 wqvb 打出\"}]"
     );
+}
+
+#[test]
+fn ffi_词组提示开关() {
+    let mut eng = FfiEngine::new(&fixtures());
+    // 默认开启:逐字上屏「你」「好」后,第二次 commit 追加词组提示。
+    for c in "wqiy".chars() {
+        eng.key_char(c);
+    }
+    eng.key(LKEY_SPACE, 0);
+    for c in "vbg".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_SPACE, 0);
+    assert!(
+        json.contains("{\"t\":\"hint\",\"s\":\"词组提示:「你好」可用 wqvb 打出\"}"),
+        "{json}"
+    );
+    // 关闭:同样键序不再出 hint;setter 回环返回生效值。
+    assert_eq!(unsafe { lyyime_set_phrase_hint(eng.0, 0) }, 0);
+    for c in "wqiy".chars() {
+        eng.key_char(c);
+    }
+    eng.key(LKEY_SPACE, 0);
+    for c in "vbg".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_SPACE, 0);
+    assert!(!json.contains("\"t\":\"hint\""), "{json}");
+    assert_eq!(unsafe { lyyime_set_phrase_hint(eng.0, 1) }, 1);
+    // NULL 引擎:安全忽略,返回 0。
+    assert_eq!(unsafe { lyyime_set_phrase_hint(std::ptr::null_mut(), 1) }, 0);
 }
 
 #[test]
@@ -206,6 +239,8 @@ fn ffi_四码顶屏开关() {
     assert!(!json.contains("{\"t\":\"commit\"}"), "{json}");
 
     eng.key(LKEY_ESC, 0);
+    // 本测单独验证四码顶屏:先关掉四码唯一上屏,缓冲才能停在四码。
+    assert_eq!(unsafe { lyyime_set_commit_unique_four(eng.0, 0) }, 0);
     assert_eq!(unsafe { lyyime_set_commit_after_four(eng.0, 1) }, 1);
     for c in ['a', 'a', 'a', 'a'] {
         eng.key_char(c);
@@ -217,6 +252,30 @@ fn ffi_四码顶屏开关() {
     );
     assert!(json.contains("\"s\":\"g\""), "{json}");
     assert_eq!(unsafe { lyyime_set_commit_after_four(eng.0, 0) }, 0);
+}
+
+#[test]
+fn ffi_四码唯一上屏开关() {
+    let eng = FfiEngine::new(&fixtures());
+    let mut eng = eng;
+    // 默认开启:wqvb 唯一候选「你好」在第 4 键直接上屏(免空格)。
+    let mut json = String::new();
+    for c in "wqvb".chars() {
+        json = eng.key_char(c);
+    }
+    assert!(
+        json.contains("{\"t\":\"commit\",\"s\":\"你好\"}"),
+        "第 4 键应直接上屏:{json}"
+    );
+    assert!(json.contains("\"t\":\"preedit\""), "上屏应伴随预编辑清除");
+    // 关闭后第 4 键保持组合,仍由空格顶屏。
+    eng.key(LKEY_ESC, 0);
+    assert_eq!(unsafe { lyyime_set_commit_unique_four(eng.0, 0) }, 0);
+    for c in "wqvb".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_SPACE, 0);
+    assert!(json.contains("{\"t\":\"commit\",\"s\":\"你好\"}"), "{json}");
 }
 
 #[test]

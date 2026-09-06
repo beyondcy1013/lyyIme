@@ -49,8 +49,8 @@ int main(void)
     LyyConfig c;
     lyy_config_defaults(&c);
     CHECK(c.page_size == 5 && c.mixed_english == 1 &&
-              c.commit_after_four == 0 && c.font_size == 14 &&
-              c.autostart == 0,
+              c.commit_after_four == 0 && c.commit_unique_four == 1 &&
+              c.phrase_hint == 1 && c.font_size == 14 && c.autostart == 0,
           "默认值正确");
 
     /* 2. 加载不存在的文件 */
@@ -61,9 +61,13 @@ int main(void)
     c.page_size = 7;
     c.autostart = 1;
     c.commit_after_four = 1;
+    c.commit_unique_four = 0;
+    c.phrase_hint = 0;
     CHECK(lyy_config_save(path, &c) == 0, "保存成功");
     char *body = read_all(path);
-    CHECK(body && strstr(body, "page_size = 7") && strstr(body, "候选数"),
+    CHECK(body && strstr(body, "page_size = 7") && strstr(body, "候选数") &&
+              strstr(body, "commit_unique_four = false") &&
+              strstr(body, "phrase_hint = false"),
           "保存内容含键与注释");
 
     /* 4. 在文件中插入未知行/注释/[section],再保存,必须原样保留 */
@@ -89,7 +93,7 @@ int main(void)
     /* 6. 回读一致性 + 非法值钳制 */
     LyyConfig c2;
     CHECK(lyy_config_load(path, &c2) == 0 && c2.page_size == 9 &&
-              c2.mixed_english == 1,
+              c2.mixed_english == 1 && c2.phrase_hint == 0,
           "回读一致");
     g_free(body);
     fp = fopen(path, "w");
@@ -243,6 +247,56 @@ int main(void)
     lyy_config_load(path, &c11);
     CHECK(strcmp(c11.coin_hotkey, "ctrl+equal") == 0,
           "空热键回退默认 ctrl+equal");
+
+    /* 14. 截屏快捷键(shot_hotkey,合同 §13):默认值 / 保存回读 / 空串回退 */
+    CHECK(strcmp(c.shot_hotkey, "ctrl+alt+a") == 0,
+          "shot_hotkey 默认 ctrl+alt+a");
+    snprintf(c10.shot_hotkey, sizeof(c10.shot_hotkey), "%s", "ctrl+shift+x");
+    CHECK(lyy_config_save(path, &c10) == 0, "保存自定义截屏热键");
+    LyyConfig c12;
+    lyy_config_load(path, &c12);
+    CHECK(strcmp(c12.shot_hotkey, "ctrl+shift+x") == 0,
+          "截屏热键回读一致(不落段内)");
+    snprintf(c12.shot_hotkey, sizeof(c12.shot_hotkey), "%s", "");
+    CHECK(lyy_config_save(path, &c12) == 0, "保存空截屏热键");
+    LyyConfig c13;
+    lyy_config_load(path, &c13);
+    CHECK(strcmp(c13.shot_hotkey, "ctrl+alt+a") == 0,
+          "空截屏热键回退默认 ctrl+alt+a");
+
+    /* 15. 热键冲突自动升级(合同 §13):两键占用同一组合 → 截屏热键
+     * 按 原组合→+Alt→+Alt+Shift 逐级让位并写入人话说明 */
+    char note[512];
+    LyyConfig c14;
+    lyy_config_defaults(&c14);
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c14, note, sizeof(note)) == 0 &&
+              note[0] == '\0',
+          "无冲突时不动配置");
+    snprintf(c14.coin_hotkey, sizeof(c14.coin_hotkey), "%s", "ctrl+alt+a");
+    /* 与截屏默认 ctrl+alt+a 同组合 → 截屏升一级(+Shift,Alt 已含) */
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c14, note, sizeof(note)) == 1 &&
+              strcmp(c14.shot_hotkey, "ctrl+alt+shift+a") == 0 &&
+              strstr(note, "ctrl+alt+shift+a") != NULL,
+          "冲突时截屏热键逐级让位(+Shift)");
+    /* 别名写法同样判冲突(Ctrl + = ≡ ctrl+equal)→ 截屏升一级(+Alt) */
+    snprintf(c14.coin_hotkey, sizeof(c14.coin_hotkey), "%s", "Ctrl + =");
+    snprintf(c14.shot_hotkey, sizeof(c14.shot_hotkey), "%s", "ctrl+equal");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c14, note, sizeof(note)) == 1 &&
+              strcmp(c14.shot_hotkey, "ctrl+alt+equal") == 0,
+          "别名写法判冲突并升级(+Alt)");
+    /* 顶格组合(ctrl+alt+shift)冲突无级可升:配置不变,返回 -1 */
+    snprintf(c14.coin_hotkey, sizeof(c14.coin_hotkey), "%s",
+             "ctrl+alt+shift+a");
+    snprintf(c14.shot_hotkey, sizeof(c14.shot_hotkey), "%s",
+             "ctrl+alt+shift+a");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c14, note, sizeof(note)) ==
+                  -1 &&
+              strstr(note, "无法自动升级") != NULL,
+          "阶梯用尽给出人话说明");
+    /* 任一写法非法:不参与冲突(宿主按各自合同回退默认) */
+    snprintf(c14.coin_hotkey, sizeof(c14.coin_hotkey), "%s", "a");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c14, note, sizeof(note)) == 0,
+          "非法写法不参与冲突");
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);

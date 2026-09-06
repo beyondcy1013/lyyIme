@@ -7,6 +7,7 @@
 #   ③ 长短语(>40字)直输模式下自动改粘贴并完整上屏: csph
 #   ④ 短语管理对话框冒烟(--smoke-phrases): 新增/改码走真实回调链并落盘
 #   ⑤ 动态日期触发: jjad(五笔"日期")居首, 数字2选中动态今天日期上屏
+#   ⑥ CapsLock 大写态直通英文: 大写原样上屏(空格不顶屏中文), Shift+字母小写
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN=${BIN:-/data/cargo-target/local/lyyIme/debug/lyyime-float}
@@ -91,6 +92,28 @@ xdotool key 2; sleep 3
 C=$(pad_content); echo "⑤ jjad+2 => $C"
 TODAY=$(python3 -c "from datetime import date; d=date.today(); print(f'{d.year}年{d.month}月{d.day}日')")
 [ "$C" = "$TODAY" ] && echo '⑤ PASS 动态日期触发' || { echo "⑤ FAIL (期望 $TODAY)"; FAIL=1; }
+
+# ⑥ CapsLock 大写态直通英文(合同 §6): 空格原样上屏输入框内容, 不顶屏中文;
+#    Shift+字母 输出小写。注:Xvfb 的 XKB 只置 LOCK 修饰位、不做字母键值
+#    大写翻译,故本环境实收 'abN';真机 Xorg+XKB 键值随 Caps 变大写(ABn)。
+#    两条路径断言的同一合同点 = 大写态字母直通英文原串、绝不顶屏中文候选。
+clear_pad
+xdotool windowactivate $L; sleep 0.6
+xdotool key Caps_Lock; sleep 0.4
+xdotool type --delay 80 'ab'; sleep 0.4
+xdotool type --delay 80 'N'; sleep 0.4  # Shift+n: 小写 n(大写态语义)
+xdotool key space; sleep 3              # 大写态空格: 原样上屏, 不顶屏中文
+xdotool key Caps_Lock; sleep 0.4
+C=$(pad_content); echo "⑥ 大写态 ab+N+space => $C"
+[ "$C" = 'abN' ] && echo '⑥ PASS 大写态直通英文(不顶屏中文)' || { echo '⑥ FAIL'; FAIL=1; }
+
+# ⑦ 输入统计冒烟(独立进程 + 独立 HOME, 隔离①-⑥上屏已写入的统计):
+#    上屏记录 → 停顿显示今日字数 → 输入恢复
+SHOME=$(mktemp -d /tmp/lyyime-float-smoke.XXXXXX)
+HOME=$SHOME "$BIN" --smoke-stats >$LOG.stats 2>&1 \
+  && grep -q 'STATS-OK' $LOG.stats \
+  && echo '⑦ PASS 输入统计(记录/停顿显示/恢复)' || { echo '⑦ FAIL'; cat $LOG.stats; FAIL=1; }
+rm -rf "$SHOME"
 
 echo "== done (FAIL=$FAIL) =="
 exit $FAIL

@@ -248,11 +248,9 @@ mod tests {
     fn property_and_proplist_signature() {
         let p = property("InputMode", PROP_TYPE_TOGGLE, "中英切换", "icon", "tip", "中", vec![]);
         let inner: &Value = &p;
-        // property 返回 Structure 形式的 Value;sub_props/symbol 均为 v 装箱
-        assert_eq!(
-            inner.value_signature(),
-            "(sa{sv}su(sa{sv}sv)s(sa{sv}sv)bbuvv)"
-        );
+        // property 返回 Structure 形式的 Value;label/tooltip/symbol/sub_props
+        // 均为 v 装箱(对照头注释真机抓包形态 s a{sv} s u v s v b b u v v)
+        assert_eq!(inner.value_signature(), "(sa{sv}suvsvbbuvv)");
         // proplist_value 本身返回的是 v(装箱后), 内层才是 (sa{sv}av)
         let pl = proplist_value(vec![OwnedValue::try_from(p).expect("ok")]);
         if let Value::Value(inner) = &pl {
@@ -273,19 +271,26 @@ mod tests {
             "中",
             Vec::new(),
         );
+        // 与运行时 UpdateProperty 完全一致的报文路径:含 v 装箱字段的报文
+        // 必须经 zbus message 层序列化(zvariant::to_bytes 对 GVariant 直写
+        // 该形态不可用),字节即 D-Bus 消息体真值,python 侧可按此对照
         let boxed = Value::Value(Box::new(p));
-        let d = zvariant::to_bytes(
-            zbus::zvariant::serialized::Context::new(
-                zbus::zvariant::serialized::Format::GVariant,
-                zbus::zvariant::Endian::Little,
-                0,
-            ),
-            &(boxed,),
+        let msg = zbus::message::Message::signal(
+            "/org/freedesktop/IBus/Engine",
+            "org.freedesktop.IBus.Engine",
+            "UpdateProperty",
         )
-        .expect("gv to_bytes");
+        .expect("signal builder")
+        .build(&(boxed,))
+        .expect("build message");
         println!(
             "GVHEX={}",
-            d.bytes().iter().map(|b| format!("{b:02x}")).collect::<String>()
+            msg.body()
+                .data()
+                .bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         );
     }
 

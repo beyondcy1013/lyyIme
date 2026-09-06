@@ -20,10 +20,12 @@ use crate::sender;
 use crate::xtrack::XTrack;
 use gtk::prelude::*;
 use gtk::{gdk, glib, pango};
+use lyyime_core::stats;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const PAGE: usize = 9;
 const MAXC: usize = 45;
@@ -47,6 +49,10 @@ pub struct App {
     pub(crate) last_target: Rc<RefCell<(u32, String)>>,
     pub(crate) self_xid: Cell<u64>,
     pub(crate) phrase_dlg: RefCell<Option<gtk::Dialog>>,
+    /// 最近一次输入动作(打字/上屏),停顿检测基准
+    pub(crate) last_activity: Cell<Instant>,
+    /// 状态行当前是否在显示今日统计(输入恢复时还原)
+    pub(crate) stats_shown: Cell<bool>,
 }
 
 /// 构建 App + 全部布线 + 显示 + 定时器。返回后调用方进 gtk::main()。
@@ -72,6 +78,8 @@ pub fn create() -> Result<Rc<App>, anyhow::Error> {
         last_target: Rc::new(RefCell::new((0, String::new()))),
         self_xid: Cell::new(0),
         phrase_dlg: RefCell::new(None),
+        last_activity: Cell::new(Instant::now()),
+        stats_shown: Cell::new(false),
     });
     wire(&app);
     app.win.show_all();
@@ -84,7 +92,7 @@ pub fn create() -> Result<Rc<App>, anyhow::Error> {
     app.self_xid.set(xid);
     reload_dict(&app);
 
-    // 定时器: 目标窗口追踪 / 置顶保持 / 位置保存
+    // 定时器: 目标窗口追踪 / 置顶保持 / 位置保存 / 输入停顿统计
     {
         let app = app.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
@@ -104,6 +112,13 @@ pub fn create() -> Result<Rc<App>, anyhow::Error> {
         glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
             app.save_position();
             glib::ControlFlow::Break
+        });
+    }
+    {
+        let app = app.clone();
+        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+            poll_stats(&app);
+            glib::ControlFlow::Continue
         });
     }
     {
@@ -192,7 +207,10 @@ fn wire(app: &Rc<App>) {
         .set_placeholder_text(Some("打五笔: 空格上屏 · 数字选词 · Esc清空"));
     {
         let app2 = app.clone();
-        app.entry.connect_changed(move |_| refresh_cands(&app2));
+        app.entry.connect_changed(move |_| {
+            note_activity(&app2);
+            refresh_cands(&app2);
+        });
         let app3 = app.clone();
         app.entry
             .connect_key_press_event(move |_, ev| on_entry_key(&app3, ev));
@@ -309,6 +327,12 @@ fn open_menu(app: &Rc<App>) {
         it.connect_activate(move |_| open_manage_phrases(&app));
     }
     m.append(&it);
+    let it = gtk::MenuItem::with_label("输入统计设置…");
+    {
+        let app = app.clone();
+        it.connect_activate(move |_| open_stats_settings(&app));
+    }
+    m.append(&it);
     let it = gtk::MenuItem::with_label("显示系统打字板(复制中转)");
     it.connect_activate(|_| launch_pad());
     m.append(&it);
@@ -378,6 +402,166 @@ fn update_status(app: &Rc<App>) {
         if t.is_empty() { "(无)" } else { &t },
         dict
     ));
+}
+
+// ---------- 输入统计(停顿显示今日字数与速度) ----------
+/// 当前 epoch 毫秒(统计时间戳用)。
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 上屏文本计入今日统计(core stats 模块, 与 ibus 模式共用同一数据目录;
+/// 失败静默, 绝不影响输入主链路)。
+fn record_stats(text: &str) {
+    if let Some(dir) = stats::default_dir() {
+        let chars = text.chars().filter(|c| !c.is_whitespace()).count() as u64;
+        stats::record(&dir, chars, now_ms());
+    }
+}
+
+/// 有输入动作: 刷新活动时间; 若统计提示正在显示, 恢复正常状态行。
+fn note_activity(app: &Rc<App>) {
+    app.last_activity.set(Instant::now());
+    if app.stats_shown.get() {
+        app.stats_shown.set(false);
+        update_status(app);
+    }
+}
+
+/// 停顿检测(每秒): 输入停顿超过设定秒数且今日有输入时, 状态行改显
+/// 「今日已输入 N 字 · 约 M 字/分」; 重新输入由 note_activity 立即还原。
+fn poll_stats(app: &Rc<App>) {
+    let (enabled, pause_secs, idle_exclude) = {
+        let c = app.cfg.borrow();
+        (
+            c.stats_enabled,
+            c.stats_pause_secs.max(1) as u64,
+            c.stats_idle_exclude_secs as u64,
+        )
+    };
+    let idle = app.last_activity.get().elapsed().as_secs();
+    if app.stats_shown.get() {
+        // 显示态: 关闭功能或重新开始输入 → 还原
+        if !enabled || idle < pause_secs {
+            app.stats_shown.set(false);
+            update_status(app);
+        }
+        return;
+    }
+    if !enabled || !app.win.get_visible() || idle < pause_secs {
+        return;
+    }
+    let Some(dir) = stats::default_dir() else {
+        return;
+    };
+    let s = stats::today_summary(&dir, now_ms(), idle_exclude);
+    if s.chars == 0 {
+        return; // 今日还没有输入, 无统计可显示
+    }
+    let text = match s.speed_per_min() {
+        Some(spd) => format!("今日已输入 {} 字 · 约 {} 字/分", s.chars, spd),
+        None => format!("今日已输入 {} 字", s.chars),
+    };
+    app.status.set_text(&text);
+    app.stats_shown.set(true);
+}
+
+/// 「输入统计设置…」对话框: 开关 + 两个秒数, 修改即时保存生效。
+fn open_stats_settings(app: &Rc<App>) {
+    let dlg = gtk::Dialog::with_buttons(
+        Some("输入统计设置"),
+        Some(&app.win),
+        gtk::DialogFlags::empty(),
+        &[("关闭", gtk::ResponseType::Close)],
+    );
+    dlg.set_resizable(false);
+    {
+        let d = dlg.clone();
+        dlg.connect_response(move |_, _| unsafe { d.destroy() });
+    }
+    let box_ = dlg.content_area();
+    box_.set_spacing(6);
+    box_.set_border_width(10);
+
+    // 今日快照(打开时的即时值)
+    let snapshot = gtk::Label::new(None);
+    {
+        let line = match stats::default_dir() {
+            Some(dir) => {
+                let s = stats::today_summary(&dir, now_ms(), app.cfg.borrow().stats_idle_exclude_secs as u64);
+                match s.speed_per_min() {
+                    Some(spd) => format!("今日已输入 {} 字 · 约 {} 字/分", s.chars, spd),
+                    None if s.chars > 0 => format!("今日已输入 {} 字", s.chars),
+                    None => "今日还没有输入记录".to_string(),
+                }
+            }
+            None => "统计不可用(无用户数据目录)".to_string(),
+        };
+        snapshot.set_text(&line);
+    }
+    snapshot.set_halign(gtk::Align::Start);
+    box_.pack_start(&snapshot, false, false, 0);
+
+    let enable = gtk::CheckButton::with_label("输入停顿时在状态行显示今日统计");
+    enable.set_active(app.cfg.borrow().stats_enabled);
+    box_.pack_start(&enable, false, false, 0);
+
+    let make_row = |label: &str, spin: &gtk::SpinButton| {
+        let h = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let l = gtk::Label::new(Some(label));
+        h.pack_start(&l, false, false, 0);
+        h.pack_end(spin, false, false, 0);
+        h
+    };
+    let pause_spin = gtk::SpinButton::with_range(3.0, 300.0, 1.0);
+    pause_spin.set_value(f64::from(app.cfg.borrow().stats_pause_secs));
+    box_.pack_start(
+        &make_row("停顿多少秒后显示(秒):", &pause_spin),
+        false,
+        false,
+        0,
+    );
+    let idle_spin = gtk::SpinButton::with_range(5.0, 600.0, 1.0);
+    idle_spin.set_value(f64::from(app.cfg.borrow().stats_idle_exclude_secs));
+    box_.pack_start(
+        &make_row("计入速度的最长停顿(秒):", &idle_spin),
+        false,
+        false,
+        0,
+    );
+
+    let hint = gtk::Label::new(Some(
+        "速度 = 今日字数 ÷ 活跃打字时长;\n超过「最长停顿」的空隙(思考、离开)不计入时长。",
+    ));
+    hint.set_halign(gtk::Align::Start);
+    hint.style_context().add_class("dim-label");
+    box_.pack_start(&hint, false, false, 0);
+
+    {
+        let app = app.clone();
+        enable.connect_toggled(move |c| {
+            app.cfg.borrow_mut().stats_enabled = c.is_active();
+            let _ = app.cfg.borrow().save();
+        });
+    }
+    {
+        let app = app.clone();
+        pause_spin.connect_value_changed(move |sp| {
+            app.cfg.borrow_mut().stats_pause_secs = sp.value() as u32;
+            let _ = app.cfg.borrow().save();
+        });
+    }
+    {
+        let app = app.clone();
+        idle_spin.connect_value_changed(move |sp| {
+            app.cfg.borrow_mut().stats_idle_exclude_secs = sp.value() as u32;
+            let _ = app.cfg.borrow().save();
+        });
+    }
+    dlg.show_all();
 }
 
 // ---------- 目标窗口追踪 ----------
@@ -478,6 +662,15 @@ fn on_entry_key(app: &Rc<App>, ev: &gdk::EventKey) -> glib::Propagation {
     let kv = *ev.keyval(); // Key 解引用为 u32 keysym
     match kv {
         KEY_SPACE => {
+            // CapsLock 大写态(合同 §6):字母直通英文,原样上屏输入框内容
+            // (含大写),不顶屏中文候选;非大写态维持候选顶屏。
+            if ev.state().contains(gdk::ModifierType::LOCK_MASK) {
+                let code = app.entry.text().trim().to_string();
+                if !code.is_empty() {
+                    commit(app, code);
+                }
+                return glib::Propagation::Stop;
+            }
             let text = app
                 .cands
                 .borrow()
@@ -538,6 +731,8 @@ fn commit(app: &Rc<App>, text: String) {
     let clipboard = gtk::Clipboard::get(&gdk::SELECTION_CLIPBOARD);
     match sender::send(wid, &text, &method, Some(&clipboard)) {
         Ok(()) => {
+            // 输入统计(停顿显示的数据层): 上屏即记一次非空白字符数
+            record_stats(&text);
             // 选词学习: 用户词 +1, 持久化
             *app.user_freq.borrow_mut().entry(text.clone()).or_insert(0) += 1;
             config::save_user_freq(&app.user_freq.borrow());
@@ -965,6 +1160,53 @@ pub fn run_smoke_phrases() -> Result<(), String> {
     Ok(())
 }
 
+/// --smoke-stats: 输入统计冒烟(e2e 用, 不进主循环):
+/// 上屏记录 → 停顿显示 → 输入恢复;HOME 由 e2e 脚本指向临时目录,
+/// 不读写用户真实统计。断言失败即 panic(进程非 0 退出)。
+pub fn run_smoke_stats() -> Result<(), String> {
+    gtk::init().map_err(|e| format!("GTK 初始化失败: {e}"))?;
+    let app = create_app_for_smoke()?;
+    app.win.show_all();
+    pump_events();
+
+    // ① 上屏即记录: 4 个非空白字
+    record_stats("你好世界");
+    let dir = stats::default_dir().ok_or("无统计目录(HOME 未设置)")?;
+    let s = stats::today_summary(&dir, now_ms(), 30);
+    assert_eq!(s.chars, 4, "记录后今日字数应为 4");
+    assert_eq!(s.events, 1);
+
+    // ② 未达停顿阈值(刚输入完): 不显示统计
+    poll_stats(&app);
+    assert!(!app.stats_shown.get(), "刚输入完不应显示统计");
+    assert!(!app.status.text().contains("今日已输入"), "状态行不应是统计: {}", app.status.text());
+
+    // ③ 停顿超过阈值(默认 10s → 回拨 11s): 状态行显示统计
+    app.last_activity
+        .set(Instant::now() - std::time::Duration::from_secs(11));
+    poll_stats(&app);
+    assert!(app.stats_shown.get(), "停顿后应显示统计");
+    let shown = app.status.text().to_string();
+    assert!(
+        shown.contains("今日已输入 4 字"),
+        "状态行应含今日字数: {shown}"
+    );
+    // 单次上屏无活跃时长 → 不显示速度
+    assert!(!shown.contains("字/分"), "单次上屏不应显示速度: {shown}");
+
+    // ④ 重新输入: 立即还原状态行
+    note_activity(&app);
+    assert!(!app.stats_shown.get(), "输入恢复后应还原状态行");
+    assert!(
+        !app.status.text().contains("今日已输入"),
+        "还原后状态行不应是统计: {}",
+        app.status.text()
+    );
+
+    println!("STATS-OK");
+    Ok(())
+}
+
 fn pump_events() {
     let ctx = glib::MainContext::default();
     while ctx.pending() {
@@ -1002,5 +1244,7 @@ fn create_app_for_smoke() -> Result<Rc<App>, String> {
         last_target: Rc::new(RefCell::new((0, String::new()))),
         self_xid: Cell::new(0),
         phrase_dlg: RefCell::new(None),
+        last_activity: Cell::new(Instant::now()),
+        stats_shown: Cell::new(false),
     }))
 }

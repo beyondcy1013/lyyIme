@@ -9,8 +9,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "keysym_map.h"
+
 /* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键 */
-#define LYY_CFG_KEYS 15
+#define LYY_CFG_KEYS 18
 typedef enum { LYY_VT_INT, LYY_VT_BOOL, LYY_VT_STR } LyyValType;
 static const struct {
     const char *section;
@@ -26,6 +28,8 @@ static const struct {
     { NULL, "learning", LYY_VT_BOOL, "用户词学习开关" },
     { NULL, "commit_after_four", LYY_VT_BOOL,
       "满足四码后继续输入字母先上屏当前选中" },
+    { NULL, "commit_unique_four", LYY_VT_BOOL,
+      "恰好四码且候选唯一时免空格直接上屏" },
     { NULL, "font_size", LYY_VT_INT, "候选窗字体大小 10..28" },
     { NULL, "autostart", LYY_VT_BOOL, "开机自启(lyyime-xim)" },
     { "ai", "enabled", LYY_VT_BOOL, "AI 助手开关(中文态 /AI+提示词,回车调用)" },
@@ -37,6 +41,10 @@ static const struct {
     { "ai", "timeout", LYY_VT_INT, "AI 请求超时秒数 5..300" },
     { NULL, "coin_hotkey", LYY_VT_STR,
       "造词快捷键(上屏后按此键造词,方向键增减选字;ctrl/alt/super/shift+键名)" },
+    { NULL, "phrase_hint", LYY_VT_BOOL,
+      "词组效率提示(上屏后最近几字有更省键的词组时候选条提示词组与编码)" },
+    { NULL, "shot_hotkey", LYY_VT_STR,
+      "截屏快捷键(按下拉起框选截屏,存图片目录并复制剪贴板;ctrl/alt/super/shift+键名)" },
 };
 /* 行尾注释(# 之后)与布尔值写法缓存:load 时记下,save 时复用 */
 static char g_suffix[LYY_CFG_KEYS][256];
@@ -52,6 +60,8 @@ void lyy_config_defaults(LyyConfig *c)
     c->chinese_punct = 1;
     c->learning = 1;
     c->commit_after_four = 0;
+    c->commit_unique_four = 1;
+    c->phrase_hint = 1;
     c->font_size = 14;
     c->autostart = 0;
     c->ai_enabled = 0;
@@ -61,6 +71,7 @@ void lyy_config_defaults(LyyConfig *c)
     c->ai_system_prompt[0] = '\0';
     c->ai_timeout = 60;
     snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s", "ctrl+equal");
+    snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s", "ctrl+alt+a");
 }
 
 int lyy_config_ai_active(const LyyConfig *c)
@@ -195,18 +206,23 @@ static void clamp_key(LyyConfig *c, int idx)
         if (c->page_size < 1 || c->page_size > 9)
             c->page_size = 5;
         break;
-    case 6:
+    case 7:
         if (c->font_size < 10 || c->font_size > 28)
             c->font_size = 14;
         break;
-    case 13:
+    case 14:
         if (c->ai_timeout < 5 || c->ai_timeout > 300)
             c->ai_timeout = 60;
         break;
-    case 14:
+    case 15:
         if (c->coin_hotkey[0] == '\0')
             snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s",
                      "ctrl+equal");
+        break;
+    case 17:
+        if (c->shot_hotkey[0] == '\0')
+            snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s",
+                     "ctrl+alt+a");
         break;
     default:
         break;
@@ -222,17 +238,20 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
     case 3: c->chinese_punct = parse_bool(v, c->chinese_punct); break;
     case 4: c->learning = parse_bool(v, c->learning); break;
     case 5: c->commit_after_four = parse_bool(v, c->commit_after_four); break;
-    case 6: c->font_size = atoi(v); break;
-    case 7: c->autostart = parse_bool(v, c->autostart); break;
-    case 8: c->ai_enabled = parse_bool(v, c->ai_enabled); break;
-    case 9: snprintf(c->ai_api_base, sizeof(c->ai_api_base), "%s", v); break;
-    case 10: snprintf(c->ai_api_key, sizeof(c->ai_api_key), "%s", v); break;
-    case 11: snprintf(c->ai_model, sizeof(c->ai_model), "%s", v); break;
-    case 12:
+    case 6: c->commit_unique_four = parse_bool(v, c->commit_unique_four); break;
+    case 7: c->font_size = atoi(v); break;
+    case 8: c->autostart = parse_bool(v, c->autostart); break;
+    case 9: c->ai_enabled = parse_bool(v, c->ai_enabled); break;
+    case 10: snprintf(c->ai_api_base, sizeof(c->ai_api_base), "%s", v); break;
+    case 11: snprintf(c->ai_api_key, sizeof(c->ai_api_key), "%s", v); break;
+    case 12: snprintf(c->ai_model, sizeof(c->ai_model), "%s", v); break;
+    case 13:
         snprintf(c->ai_system_prompt, sizeof(c->ai_system_prompt), "%s", v);
         break;
-    case 13: c->ai_timeout = atoi(v); break;
-    case 14: snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s", v); break;
+    case 14: c->ai_timeout = atoi(v); break;
+    case 15: snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s", v); break;
+    case 16: c->phrase_hint = parse_bool(v, c->phrase_hint); break;
+    case 17: snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s", v); break;
     default: break;
     }
     clamp_key(c, idx);
@@ -279,6 +298,36 @@ int lyy_config_load(const char *path, LyyConfig *out)
     }
     fclose(fp);
     return 0;
+}
+
+int lyy_config_resolve_hotkey_conflicts(LyyConfig *c, char *note, size_t cap)
+{
+    if (note && cap)
+        note[0] = '\0';
+    char coin[128], shot[128];
+    /* 任一写法非法:宿主按各自合同回退默认并日志,不参与冲突 */
+    if (!lyy_hotkey_canon(c->coin_hotkey, coin, sizeof(coin)) ||
+        !lyy_hotkey_canon(c->shot_hotkey, shot, sizeof(shot)))
+        return 0;
+    if (strcmp(coin, shot) != 0)
+        return 0;
+    /* 占用同一组合:截屏热键逐级让位(工具键让位打字键,合同 §13) */
+    char next[128];
+    if (lyy_hotkey_escalate(c->shot_hotkey, c->coin_hotkey, next,
+                            sizeof(next))) {
+        snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s", next);
+        if (note && cap)
+            snprintf(note, cap,
+                     "截屏快捷键 %s 与造词快捷键冲突,已自动改为 %s"
+                     "(可在设置中修改)",
+                     shot, next);
+        return 1;
+    }
+    if (note && cap)
+        snprintf(note, cap,
+                 "截屏快捷键 %s 与造词快捷键冲突且无法自动升级,请修改其中一项",
+                 shot);
+    return -1;
 }
 
 /* ---- 保存:内存缓冲 + [ai] 段插入位 ---- */
@@ -341,15 +390,18 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     case 3: val = c->chinese_punct; break;
     case 4: val = c->learning; break;
     case 5: val = c->commit_after_four; break;
-    case 6: val = c->font_size; break;
-    case 7: val = c->autostart; break;
-    case 8: val = c->ai_enabled; break;
-    case 9: sval = c->ai_api_base; break;
-    case 10: sval = c->ai_api_key; break;
-    case 11: sval = c->ai_model; break;
-    case 12: sval = c->ai_system_prompt; break;
-    case 13: val = c->ai_timeout; break;
-    case 14: sval = c->coin_hotkey; break;
+    case 6: val = c->commit_unique_four; break;
+    case 7: val = c->font_size; break;
+    case 8: val = c->autostart; break;
+    case 9: val = c->ai_enabled; break;
+    case 10: sval = c->ai_api_base; break;
+    case 11: sval = c->ai_api_key; break;
+    case 12: sval = c->ai_model; break;
+    case 13: sval = c->ai_system_prompt; break;
+    case 14: val = c->ai_timeout; break;
+    case 15: sval = c->coin_hotkey; break;
+    case 16: val = c->phrase_hint; break;
+    case 17: sval = c->shot_hotkey; break;
     default: return 0;
     }
     if (g_keys[idx].type == LYY_VT_STR) {

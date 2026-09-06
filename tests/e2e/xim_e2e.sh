@@ -10,7 +10,9 @@
 #   B. Shift 单击 → 英文直通(trigger off):输入 abc 原样进 Entry,
 #      且 server 日志在切换后无 a/b/c 的 forward 记录;
 #   C. Shift 再单击 → 回中文(trigger on):输入 zh + 空格 → 顶屏首选
-#      "候选1"(桩库规则)→ Entry = "你号abc候选1"。
+#      "候选1"(桩库规则)→ Entry = "你号abc候选1";
+#   E. CapsLock 大写态:字母直通英文不进组词 —— 无 Shift 大写(ab→AB),
+#      Shift+字母 小写(Shift+n→n);关闭后组词恢复(zh+space→候选1)。
 set -euo pipefail
 
 XIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../xim" && pwd)"
@@ -21,6 +23,15 @@ KEEP=0
 WORK="$(mktemp -d /tmp/lyyime-e2e.XXXXXX)"
 export HOME="$WORK/home"
 mkdir -p "$HOME"
+
+# 截屏热键(场景 F):xim 启动前注入桩助手($LYYIME_SHOT),命中即被拉起
+SHOT_MARKER="$WORK/shot-marker"
+cat > "$WORK/stub-shot" <<STUB
+#!/usr/bin/env bash
+echo shot >>"$SHOT_MARKER"
+STUB
+chmod +x "$WORK/stub-shot"
+export LYYIME_SHOT="$WORK/stub-shot"
 
 export DISPLAY=:98
 export XMODIFIERS=@im=lyyime
@@ -156,9 +167,33 @@ xdotool key space
 wait_buffer "你号abc候选1拟好候选1" 8
 echo "PASS D:造词热键/方向键选字/存词提示/继续输入 全链路"
 
-echo "== [9/9] 汇总 =="
+echo "== [9/11] E:CapsLock 大写态字母直通(无 Shift 大写;Shift+字母 小写) =="
+xdotool key Caps_Lock; sleep 0.5
+xdotool type --delay 90 "ab"; sleep 0.5
+wait_buffer "你号abc候选1拟好候选1AB" 8
+xdotool type --delay 90 "N"; sleep 0.5 # xdotool 发 Shift+n:大写态下输出小写
+wait_buffer "你号abc候选1拟好候选1ABn" 8
+wait_log "CapsLock 大写态字母直通" 8
+xdotool key Caps_Lock; sleep 0.5 # 关大写态,组词应恢复
+xdotool type --delay 90 "zh"; sleep 0.3
+xdotool key space
+wait_buffer "你号abc候选1拟好候选1ABn候选1" 8
+echo "PASS E:CapsLock 大写态直通 AB/Shift→n,关闭后组词恢复"
+
+echo "== [10/11] F:截屏热键(Ctrl+Alt+A)拉起 lyyime-shot(合同 §13) =="
+rm -f "$SHOT_MARKER"
+xdotool key ctrl+alt+a
+for _ in $(seq 1 50); do [[ -f "$SHOT_MARKER" ]] && break; sleep 0.1; done
+[[ -f "$SHOT_MARKER" ]] || fail "截屏热键未拉起助手(marker 未出现)"
+wait_log "截屏热键命中" 5
+wait_log "已拉起截屏助手" 5
+# 吞键断言:组合键不产生任何输入,缓冲保持不变
+wait_buffer "你号abc候选1拟好候选1ABn候选1" 2
+echo "PASS F:截屏热键命中 → 拉起桩助手并吞键(缓冲不变)"
+
+echo "== [11/11] 汇总 =="
 wait_buffer "你号abc候选1" 2
 echo "最终缓冲: $(cat "$BUFFER")"
 echo "---- xim.log 关键行 ----"
-grep -E "XIM server ready|client 已连接|trigger|Shift 单击|commit|LKey" "$XIM_LOG" | head -30 || true
-echo "E2E PASS: Mode B 全链路(XIM 连接/组合拦截/数字选词/Shift 切换/顶屏/造词)全绿"
+grep -E "XIM server ready|client 已连接|trigger|Shift 单击|CapsLock|commit|LKey" "$XIM_LOG" | head -40 || true
+echo "E2E PASS: Mode B 全链路(XIM 连接/组合拦截/数字选词/Shift 切换/顶屏/造词/CapsLock 直通/截屏热键)全绿"

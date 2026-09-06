@@ -29,6 +29,8 @@ int lyy_engine_ensure(App *app)
         return -1;
     }
     app->core.lyyime_set_commit_after_four(app->engine, app->config.commit_after_four);
+    app->core.lyyime_set_commit_unique_four(app->engine, app->config.commit_unique_four);
+    app->core.lyyime_set_phrase_hint(app->engine, app->config.phrase_hint);
     lyy_log(&app->log, "core 引擎已创建:data_dir=%s", app->data_dir);
     return 0;
 }

@@ -34,6 +34,15 @@ else
     echo "== 警告:未找到 $AI_HELPER_SRC(先 scripts/build.sh),/AI 功能不可用 ==" >&2
 fi
 
+# 截屏助手(Rust 二进制 lyyime-shot;截屏热键与托盘"截屏"菜单共用)
+SHOT_SRC="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-shot"
+if [ -f "$SHOT_SRC" ]; then
+    install -D -m 0755 "$SHOT_SRC" "$PREFIX/bin/lyyime-shot"
+    echo "== 已安装截屏助手:$PREFIX/bin/lyyime-shot(热键默认 Ctrl+Alt+A) =="
+else
+    echo "== 警告:未找到 $SHOT_SRC(先 scripts/build.sh),截屏功能不可用 ==" >&2
+fi
+
 # 主启动器(应用菜单/桌面;重复点击=唤起已运行实例的设置窗)
 install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim.desktop" <<DESKTOP
 [Desktop Entry]

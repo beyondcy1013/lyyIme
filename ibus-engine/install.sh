@@ -84,6 +84,13 @@ if [ -n "${AI_SRC:-}" ]; then
     install -m 755 "$AI_SRC" "$TOOLS_DIR/lyyime-ai"
     log "已安装 AI 助手:$TOOLS_DIR/lyyime-ai(xim 的 /AI 亦复用)"
 fi
+SHOT_SRC="$(pick_bin lyyime-shot)" || true
+if [ -n "${SHOT_SRC:-}" ]; then
+    install -m 755 "$SHOT_SRC" "$BIN_DIR/lyyime-shot"
+    log "已安装截屏助手:$BIN_DIR/lyyime-shot(热键默认 Ctrl+Alt+A)"
+else
+    warn "未找到 lyyime-shot 二进制(截屏功能不可用,其余正常;先 scripts/build.sh)"
+fi
 for svg in "$SCRIPT_DIR"/icons/*.svg; do
     install -m 644 "$svg" "$ICON_DIR/$(basename "$svg")"
 done

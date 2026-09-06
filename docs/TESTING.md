@@ -13,8 +13,8 @@
 | doctor e2e | `bash tests/e2e/doctor_test.sh` | 真机(root) | 破坏 env→检出→修复→恢复;ime-list 真实枚举;dry-run 预览 |
 | ibus 引擎单测 | `python3 tests/unit_ibus_engine.py` | 桩库(gcc 自动编译)或真库 | 效果流:ni hao→候选、选词、Shift 单击、密码框、release 放行 |
 | xim 解析器单测 | `make -C xim test` | 无 | effects JSON 迷你解析器(≥8 test) |
-| Mode B e2e | `bash tests/e2e/xim_e2e.sh` | Xvfb :98 + 桩库/真库 | XIM 连接、nihao 选词上屏、Shift 切换、退出清理 |
-| 全链路 e2e | `bash tests/e2e/run.sh`(M6) | Xvfb + 真库 + 全部安装 | 双模式真实打字断言(M6 集成时补全) |
+| Mode B e2e | `bash tests/e2e/xim_e2e.sh` | Xvfb :98 + 桩库/真库 | XIM 连接、nihao 选词上屏、Shift 切换、造词、CapsLock 大写态直通(AB/Shift→n)、退出清理 |
+| 全链路 e2e | `bash tests/e2e/run.sh`(M6) | Xvfb + 真库 + 全部安装 | 双模式真实打字断言 + 四码唯一 + /AI 全链路 + CapsLock 大写态直通 |
 | 机制探针(留档) | `tests/e2e/x11grab_probe*.c` | Xvfb :99 | grab 回放不可靠/中文注入可行(架构决策证据) |
 
 ## 当前状态(2026-09-06)

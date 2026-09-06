@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   lyyime-xim 设置对话框(GtkBuilder 格式,GTK3)
-  项目:候选数 / 混合英文 / 自动直通 / 中文标点 / 学习开关 / 字体大小 / 开机自启
+  项目:候选数 / 混合英文 / 自动直通 / 中文标点 / 学习开关 / 四码顶屏 /
+       四码唯一上屏 / 字体大小 / 开机自启 / 造词与截屏快捷键(冲突自动避让)
   控件 id 与 src/settings.c 一一对应;按钮行为:确定=保存并即时生效,取消=还原。
 -->
 <interface domain="lyyime">
@@ -145,6 +146,30 @@
               </packing>
             </child>
             <child>
+              <object class="GtkCheckButton" id="chk_commit_unique_four">
+                <property name="visible">True</property>
+                <property name="label">四码唯一上屏(满四码且仅一个候选时免空格直接上屏)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">7</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_phrase_hint">
+                <property name="visible">True</property>
+                <property name="label">词组效率提示(上屏后最近几字有更省键的词组时候选条提示)</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">8</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
+            <child>
               <object class="GtkCheckButton" id="chk_autostart">
                 <property name="visible">True</property>
                 <property name="label">开机自启动(写入 ~/.config/autostart)</property>
@@ -152,7 +177,7 @@
               </object>
               <packing>
                 <property name="left-attach">0</property>
-                <property name="top-attach">7</property>
+                <property name="top-attach">9</property>
                 <property name="width">2</property>
               </packing>
             </child>
@@ -164,19 +189,42 @@
               </object>
               <packing>
                 <property name="left-attach">0</property>
-                <property name="top-attach">8</property>
+                <property name="top-attach">10</property>
               </packing>
             </child>
             <child>
               <object class="GtkEntry" id="ent_coin_hotkey">
                 <property name="visible">True</property>
-                <property name="tooltip-text">上屏汉字后按此键进入造词:方向键 →/↑ 多选一字、←/↓ 少选一字,回车存词,Esc 取消。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+equal、alt+comma、ctrl+f2</property>
+                <property name="tooltip-text">上屏汉字后按此键进入造词:方向键 →/↑ 多选一字、←/↓ 少选一字,回车存词,Esc 取消。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+equal、alt+comma、ctrl+f2。与截屏快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
                 <property name="halign">start</property>
                 <property name="width-chars">18</property>
               </object>
               <packing>
                 <property name="left-attach">1</property>
-                <property name="top-attach">8</property>
+                <property name="top-attach">10</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkLabel" id="lbl_shot_hotkey">
+                <property name="visible">True</property>
+                <property name="label">截屏快捷键:</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">11</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkEntry" id="ent_shot_hotkey">
+                <property name="visible">True</property>
+                <property name="tooltip-text">按下拉起框选截屏:拖拽选区(存图片目录并复制剪贴板),Esc 取消、Enter 确认、双击整屏。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+alt+a、ctrl+shift+x。与造词快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
+                <property name="halign">start</property>
+                <property name="width-chars">18</property>
+              </object>
+              <packing>
+                <property name="left-attach">1</property>
+                <property name="top-attach">11</property>
               </packing>
             </child>
           </object>

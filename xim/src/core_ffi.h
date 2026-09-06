@@ -44,6 +44,8 @@ typedef struct CoreFfi {
     int (*lyyime_mode)(void *eng);                    /* 0=中文 1=英文 */
     int (*lyyime_toggle_mode)(void *eng);             /* 返回新 mode */
     int (*lyyime_set_commit_after_four)(void *eng, int enabled); /* 返回生效值 */
+    int (*lyyime_set_commit_unique_four)(void *eng, int enabled); /* 返回生效值 */
+    int (*lyyime_set_phrase_hint)(void *eng, int enabled);        /* 返回生效值 */
     int64_t (*lyyime_process_key)(void *eng, int key_id, uint32_t chr,
                                   char *buf, int64_t buf_cap);
     int (*lyyime_cand)(void *eng, int i, char *buf, int cap);

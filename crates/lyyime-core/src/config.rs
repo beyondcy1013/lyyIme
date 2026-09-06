@@ -40,10 +40,19 @@ pub struct Config {
     pub mixed_auto_commit_top_n: usize,
     /// 满足四码后,再输入字母先上屏当前选中,剩余字母开启新组合。
     pub commit_on_extra_after_four: bool,
+    /// 四码唯一上屏:恰好输入四码且候选唯一时,免空格直接上屏该候选
+    /// (主流五笔的"四码唯一自动上屏"习惯);多候选不触发,保持混打渐进。
+    pub commit_unique_four: bool,
+    /// 词组效率提示:上屏后最近几个字若存在更省键的五笔词组,在候选条
+    /// 提示「词 + 编码」,直到下一次输入才清除(借鉴万能五笔的高效词提示)。
+    pub phrase_hint: bool,
     /// 造词热键(合同 §12):`修饰+键` 串,宿主解析;core 不消费该值,
     /// 收纳于此保证 config.toml 一份 schema 三端(doctor/ibus/xim)共用。
     /// 修饰:ctrl/alt/super/shift;键名:a-z 0-9 f1-f12 equal/minus/space 等。
     pub coin_hotkey: String,
+    /// 截屏快捷键(合同 §13):拉起 `lyyime-shot` 框选截屏;写法同造词热键
+    /// (修饰+键名)。core 不消费该值,仅集中 schema 供各宿主解析匹配。
+    pub shot_hotkey: String,
 }
 
 impl Default for Config {
@@ -60,7 +69,10 @@ impl Default for Config {
             en_freq_top_n: 2000,
             mixed_auto_commit_top_n: 500,
             commit_on_extra_after_four: false,
+            commit_unique_four: true,
+            phrase_hint: true,
             coin_hotkey: "ctrl+equal".to_string(),
+            shot_hotkey: "ctrl+alt+a".to_string(),
         }
     }
 }
@@ -82,7 +94,10 @@ struct ConfigToml {
     en_freq_top_n: usize,
     mixed_auto_commit_top_n: usize,
     commit_on_extra_after_four: bool,
+    commit_unique_four: bool,
+    phrase_hint: bool,
     coin_hotkey: String,
+    shot_hotkey: String,
 }
 
 impl Default for ConfigToml {
@@ -114,7 +129,10 @@ impl From<&Config> for ConfigToml {
             en_freq_top_n: c.en_freq_top_n,
             mixed_auto_commit_top_n: c.mixed_auto_commit_top_n,
             commit_on_extra_after_four: c.commit_on_extra_after_four,
+            commit_unique_four: c.commit_unique_four,
+            phrase_hint: c.phrase_hint,
             coin_hotkey: c.coin_hotkey.clone(),
+            shot_hotkey: c.shot_hotkey.clone(),
         }
     }
 }
@@ -215,6 +233,16 @@ impl Config {
         );
         let _ = writeln!(
             s,
+            "\n# 四码唯一上屏:恰好四码且候选唯一时免空格直接上屏(多候选仍需空格/数字)"
+        );
+        let _ = writeln!(s, "commit_unique_four = {}", d.commit_unique_four);
+        let _ = writeln!(
+            s,
+            "\n# 词组效率提示:上屏后最近几个字有更省键的五笔词组时,候选条提示词组与编码"
+        );
+        let _ = writeln!(s, "phrase_hint = {}", d.phrase_hint);
+        let _ = writeln!(
+            s,
             "\n# 造词快捷键:上屏汉字后按此键进入造词模式(方向键 →/↑ 多选一字、"
         );
         let _ = writeln!(
@@ -222,6 +250,15 @@ impl Config {
             "# ←/↓/退格 少选一字,回车存词、Esc 取消;写法:修饰(ctrl/alt/super/shift)+键名"
         );
         let _ = writeln!(s, "coin_hotkey = \"{}\"", d.coin_hotkey);
+        let _ = writeln!(
+            s,
+            "\n# 截屏快捷键:按下拉起框选截屏(拖拽选区,存图片目录并复制剪贴板;"
+        );
+        let _ = writeln!(
+            s,
+            "# Esc 取消、Enter 确认、双击整屏);写法同造词快捷键,如 ctrl+alt+a、ctrl+shift+x"
+        );
+        let _ = writeln!(s, "shot_hotkey = \"{}\"", d.shot_hotkey);
         s
     }
 
@@ -292,10 +329,20 @@ impl ConfigToml {
             en_freq_top_n: self.en_freq_top_n,
             mixed_auto_commit_top_n: self.mixed_auto_commit_top_n,
             commit_on_extra_after_four: self.commit_on_extra_after_four,
+            commit_unique_four: self.commit_unique_four,
+            phrase_hint: self.phrase_hint,
             coin_hotkey: {
                 let hk = self.coin_hotkey.trim().to_string();
                 if hk.is_empty() {
                     "ctrl+equal".to_string()
+                } else {
+                    hk
+                }
+            },
+            shot_hotkey: {
+                let hk = self.shot_hotkey.trim().to_string();
+                if hk.is_empty() {
+                    "ctrl+alt+a".to_string()
                 } else {
                     hk
                 }
@@ -315,5 +362,27 @@ mod tests {
         let raw: ConfigToml = toml::from_str(&text).unwrap();
         let cfg = raw.into_config(Path::new("x")).unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn shot_hotkey_默认值与空串回退() {
+        assert_eq!(Config::default().shot_hotkey, "ctrl+alt+a");
+        // 缺项与空串都落默认值
+        let cfg: Config = toml::from_str::<ConfigToml>("mode = \"cn\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert_eq!(cfg.shot_hotkey, "ctrl+alt+a");
+        let cfg2: Config = toml::from_str::<ConfigToml>("shot_hotkey = \"\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert_eq!(cfg2.shot_hotkey, "ctrl+alt+a");
+        // 自定义值原样保留
+        let cfg3: Config = toml::from_str::<ConfigToml>("shot_hotkey = \"ctrl+shift+x\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert_eq!(cfg3.shot_hotkey, "ctrl+shift+x");
     }
 }

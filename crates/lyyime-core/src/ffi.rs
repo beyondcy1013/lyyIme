@@ -7,7 +7,8 @@
 //! ```json
 //! [{"t":"commit","s":"你好"},{"t":"preedit","s":"nihao"},
 //!  {"t":"cands","n":5,"page":0,"pages":3},{"t":"pass"},{"t":"consumed"},
-//!  {"t":"notice","s":"已造词:你好(wqvb)"},{"t":"mode","m":1}]
+//!  {"t":"notice","s":"已造词:你好(wqvb)"},{"t":"mode","m":1},
+//!  {"t":"hint","s":"词组提示:「你好」可用 wqvb 打出"}]
 //! ```
 //!
 //! 约定:
@@ -106,6 +107,11 @@ pub fn effects_json(effects: &[Effect], page: usize, pages: usize) -> String {
             Effect::Consumed => out.push_str("{\"t\":\"consumed\"}"),
             Effect::Notice(s) => {
                 out.push_str("{\"t\":\"notice\",\"s\":\"");
+                push_escaped(s, &mut out);
+                out.push_str("\"}");
+            }
+            Effect::Hint(s) => {
+                out.push_str("{\"t\":\"hint\",\"s\":\"");
                 push_escaped(s, &mut out);
                 out.push_str("\"}");
             }
@@ -241,6 +247,47 @@ pub unsafe extern "C" fn lyyime_set_commit_after_four(eng: *mut Engine, enabled:
             cfg.commit_on_extra_after_four = enabled != 0;
             e.set_config(cfg);
             c_int::from(e.config().commit_on_extra_after_four)
+        }
+        None => 0,
+    }
+}
+
+/// 设置“四码唯一自动上屏”(恰好四码且候选唯一时免空格直接上屏)。
+///
+/// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_commit_unique_four(
+    eng: *mut Engine,
+    enabled: c_int,
+) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.commit_unique_four = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().commit_unique_four)
+        }
+        None => 0,
+    }
+}
+
+/// 设置“词组效率提示”(上屏后最近几字有更省键的词组时,候选条提示词与编码)。
+///
+/// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_phrase_hint(eng: *mut Engine, enabled: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.phrase_hint = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().phrase_hint)
         }
         None => 0,
     }

@@ -1,0 +1,18 @@
+[package]
+name = "lyyime-shot"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "lyyIme 截屏助手(GTK3 框选/全屏,存图片目录 + 复制剪贴板 + 桌面通知)"
+
+[[bin]]
+name = "lyyime-shot"
+path = "src/main.rs"
+
+[dependencies]
+gtk = { workspace = true }
+gdk = "0.18"
+gdkx11 = "0.18"
+x11rb = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }

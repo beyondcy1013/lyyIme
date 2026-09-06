@@ -17,7 +17,10 @@ Linux(XFCE + X11)下类似搜狗体验的五笔/拼音混合输入法,采用**�
    - "**输入法管理**":列出本机全部输入法引擎(ibus/fcitx5/lyyime 双模式),**安装(增)、卸载(删)、设为默认**,包级操作走 dnf,全程 dry-run 预览 + 二次确认,绝不误删 lyyime 自身或最后一个可用输入法。
 6. 目标系统=本机(openEuler 24.03 XFCE,root 与 beyondcy 双用户,当前 ibus 在跑)。安装路径以 `/usr/local` 与 `~/.local` 为主,不污染系统包管理。
 7. **AI 助手**:中文态输入 `/AI`+提示词,回车调用用户自定义大模型(OpenAI 兼容接口),回复直接上屏;配置在 `config.toml` 的 `[ai]` 段/设置窗 AI 页,未配置时功能零介入。交互合同见 docs/ARCHITECTURE.md §11。(2026-09-06 新增:共享客户端 ibus-engine/engine/lyyime_ai.py,双模式同合同;改动触发逻辑必须先读该节并同步更新单测/E2E。)
+9. **截屏(2026-09-06 新增)**:快捷键(默认 Ctrl+Alt+A,`shot_hotkey` 可配置)拉起 `lyyime-shot` 框选截屏:拖拽选区(冻结画面、Esc 取消、Enter 确认、双击整屏),PNG 存图片目录 + 复制剪贴板 + 桌面通知;独立 Rust/GTK3 程序,宿主只做热键拦截与拉起。交互合同见 docs/ARCHITECTURE.md §13;双模式同合同,改动必须先读该节并同步更新单测/E2E。
 8. **造词模式(2026-09-06 新增)**:上屏汉字后按造词热键(默认 Ctrl+=,`coin_hotkey` 可配置)把最近上屏的连续汉字组成五笔词组入库;`→`/`↑` 多选一字、`←`/`↓`/退格 少选一字,回车存词、Esc 取消;取码按五笔86 词组规则,存 `~/.local/share/lyyime/user_words.tsv`。交互合同见 docs/ARCHITECTURE.md §12;双模式同合同,改动必须先读该节并同步更新单测/E2E。
+9. **词组效率提示(2026-09-06 新增,`phrase_hint` 默认开)**:上屏后最近 2–6 个汉字若存在更省键的五笔词组(词组编码键数 < 实敲字母数),core 在效果流末尾追加 `Effect::Hint`(词 + 编码),双模式在候选条/辅助区展示,**无定时**,保留到下一次输入才清除;刚用同码词组打过的不重复提示。合同见 ARCHITECTURE.md §3/§6。
+10. **输入统计(2026-09-06 新增)**:上屏字数按日统计(`~/.local/share/lyyime/stats/`,core `stats` 模块;Mode A 与 Mode C 均写入);悬浮窗 lyyime-float 输入停顿 N 秒(默认 10,可设置)后在状态行显示「今日已输入 X 字 · 约 Y 字/分」,重新输入即还原;速度按活跃时长计算,超过 M 秒(默认 30,可设置)的空隙不计入。设置入口:悬浮窗菜单「输入统计设置…」。数据格式与统计口径见 docs/ARCHITECTURE.md §4。
 
 ## 目录结构(文件所有权,并发 Agent 不得越界写)
 
@@ -32,6 +35,7 @@ Cargo.toml                workspace 根(勿动结构)
 crates/lyyime-core/       ★纯逻辑引擎:码表加载、五笔/拼音/英文匹配排序、学习、FFI(cdylib)。无 GUI/无 X11 依赖,必须可 headless 测试。
 crates/lyyime-dicttool/   ★词典管线 CLI:本地海峰86 sqlite → runtime TSV;下载转换拼音词组/英文词频。
 crates/lyyime-doctor/     ★诊断修复:lib(供 GUI 调用)+ bin CLI。检查/修复 IME 环境。
+crates/lyyime-shot/       ★截屏助手(合同 §13):GTK3 框选/整屏截屏,存图片目录+剪贴板+通知;被 Mode A/B 热键与托盘菜单拉起。
 xim/                      ★Mode B 独立外挂 lyyime-xim(C 语言:IMdkit(vendor)+GTK3+dlopen(liblyyime_core.so);候选窗/托盘/设置窗/工具菜单)。入口 spike:xim/spike/ 最小 XIM server 连通验证。
 crates/lyyime-float/      ★Mode C:Rust/GTK3 悬浮窗独立输入(五笔86 码表+自定义短语+动态变量;直输/粘贴双发送;**项目规则:主程序一律 Rust,Python 仅可用于测试**;e2e 见 crates/lyyime-float/e2e_phrases.sh)
 ibus-engine/              ★Mode A:component XML、install.sh/uninstall.sh(引擎实现在 crates/lyyime-ibus,AI 客户端在 crates/lyyime-ai;**主程序一律 Rust,Python 仅可用于测试**)。
@@ -58,9 +62,11 @@ tests/e2e/                Xvfb + xdotool 端到端测试。
 
 ## 键盘行为规范(摘要,细则见 ARCHITECTURE.md)
 
-- 字母 a–z 进缓冲;`;` `'` 为二三重码选择;数字 1–9 选候选;Space 顶屏首选;Enter 上屏原始字母;Esc 清空;`-`/`=` 翻页;候选空时 Space/标点直通输出原始字母(中英混合);造词热键与方向键见 ARCHITECTURE.md §12/核心需求 #8。
+- 字母 a–z 进缓冲;`;` `'` 为二三重码选择;数字 1–9 选候选;Space 顶屏首选;Enter 上屏原始字母;Esc 清空;`-`/`=` 翻页;候选空时 Space/标点直通输出原始字母(中英混合);造词热键与方向键见 ARCHITECTURE.md §12/核心需求 #8。**四码唯一上屏(默认开启,`commit_unique_four` 可关)**:恰好四码且候选唯一时免空格直接上屏(§3/§6);四码顶屏(`commit_on_extra_after_four`)默认关闭。**词组效率提示(默认开启,`phrase_hint` 可关)**:上屏后最近几字有更省键的五笔词组时候选条提示词组与编码,保留到下一次输入(§3/§6)。
+- **CapsLock 大写态字母直通英文,不进组词缓冲**(ARCHITECTURE.md §6):无 Shift 输出大写字母;大写态下 Shift+字母 由应用翻译输出小写字母;数字/标点不受影响。
 - 中文态空缓冲时输出中文标点(可设置);英文态全部直通。
 - Shift 单击(按下后无其它键、随后释放)切换中英;Shift+字母 组合不触发切换。
+- **截屏热键(默认 Ctrl+Alt+A,`shot_hotkey` 可配置)**:命中即吞键拉起 `lyyime-shot`(ARCHITECTURE.md §13),不进组词缓冲;Mode A 中英态同效,Mode B 英文直通态不可见(托盘菜单兜底)。
 
 ## 测试政策(必须遵守)
 

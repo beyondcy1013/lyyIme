@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use lyyime_core::{Effect, Engine, LKey};
+use lyyime_core::{Config, Effect, Engine, LKey};
 use std::path::Path;
 
 /// 依次上屏 一串 wubi 编码(每码后跟空格顶屏),返回全部效果。
@@ -144,9 +144,9 @@ fn 回车存词编码正确并可立即打出() {
     assert!(notices(&fx)
         .iter()
         .any(|s| s.contains("已造词:你好(wqvb)")));
-    // 立即可用编码打出(内存索引已并入)。
-    type_str(&mut eng, "wqvb");
-    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("你好"));
+    // 立即可用编码打出(内存索引已并入;wqvb 唯一四码,免空格直接上屏)。
+    let fx = type_str(&mut eng, "wqvb");
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
     // user_words.tsv 已落盘。
     let content =
         std::fs::read_to_string(td.join("user_words.tsv")).expect("user_words.tsv 应已生成");
@@ -181,8 +181,8 @@ fn 造词跨重启仍可打出() {
     }
     // 新引擎(同数据目录):user_words.tsv 随加载并入词库。
     let mut eng2 = engine_with_user_dict(&td);
-    type_str(&mut eng2, "wqvb");
-    assert_eq!(page_texts(&eng2).first().map(String::as_str), Some("你好"));
+    let fx = type_str(&mut eng2, "wqvb");
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
 }
 
 #[test]
@@ -227,6 +227,12 @@ fn 缺码字造词给失败提示() {
     )
     .unwrap();
     let mut eng = Engine::new(&td.path).unwrap();
+    // 本测验证拼音上屏与造词失败提示:关掉四码唯一上屏——夹具小词库里
+    // zhon(zhong 的前缀)候选唯一,会在第 4 键把「中」提前上屏。
+    eng.set_config(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
     type_str(&mut eng, "zhong");
     assert_eq!(page_texts(&eng).first().map(String::as_str), Some("中"));
     let _ = eng.process_key(LKey::Space);

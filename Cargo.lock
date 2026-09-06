@@ -1045,6 +1045,7 @@ dependencies = [
 name = "lyyime-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "toml",
@@ -1078,6 +1079,7 @@ dependencies = [
  "gdkx11",
  "gtk",
  "libc",
+ "lyyime-core",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1097,6 +1099,18 @@ dependencies = [
  "toml",
  "zbus",
  "zvariant",
+]
+
+[[package]]
+name = "lyyime-shot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gdk",
+ "gdkx11",
+ "gtk",
+ "libc",
+ "x11rb",
 ]
 
 [[package]]

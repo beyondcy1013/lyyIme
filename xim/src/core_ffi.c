@@ -70,6 +70,10 @@ int lyy_core_ffi_load(CoreFfi *ffi)
     ffi->lyyime_toggle_mode = resolve(handle, "lyyime_toggle_mode", &missing);
     ffi->lyyime_set_commit_after_four =
         resolve(handle, "lyyime_set_commit_after_four", &missing);
+    ffi->lyyime_set_commit_unique_four =
+        resolve(handle, "lyyime_set_commit_unique_four", &missing);
+    ffi->lyyime_set_phrase_hint =
+        resolve(handle, "lyyime_set_phrase_hint", &missing);
     ffi->lyyime_process_key = resolve(handle, "lyyime_process_key", &missing);
     ffi->lyyime_cand = resolve(handle, "lyyime_cand", &missing);
     ffi->lyyime_cand_comment = resolve(handle, "lyyime_cand_comment", &missing);

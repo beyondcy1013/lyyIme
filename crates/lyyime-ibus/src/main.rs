@@ -86,26 +86,47 @@ fn resolve_ibus_address() -> Option<String> {
     None
 }
 
-/// 读共用 config.toml 的 page_size(1–9)与 commit_on_extra_after_four。
-fn read_core_config() -> (usize, bool) {
+/// 读共用 config.toml(缺项/损坏一律回退默认,引擎永不因配置启动失败):
+/// page_size(1–9)、commit_on_extra_after_four、commit_unique_four、
+/// phrase_hint、coin_hotkey 与 shot_hotkey(§12/§13,EngineLogic 解析匹配用)。
+fn read_core_config() -> Config {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{home}/.config", home = std::env::var("HOME").unwrap_or_else(|_| "/root".into())));
     let path = PathBuf::from(base).join("lyyime/config.toml");
-    let mut page_size = 5usize;
-    let mut commit_after_four = false;
+    let mut cfg = Config::default();
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Ok(data) = toml::from_str::<toml::Value>(&text) {
             if let Some(v) = data.get("page_size").and_then(|v| v.as_integer()) {
-                page_size = v as usize;
+                cfg.page_size = v.clamp(1, 9) as usize;
             }
             if let Some(v) = data.get("commit_on_extra_after_four").and_then(|v| v.as_bool()) {
-                commit_after_four = v;
+                cfg.commit_on_extra_after_four = v;
+            }
+            if let Some(v) = data.get("commit_unique_four").and_then(|v| v.as_bool()) {
+                cfg.commit_unique_four = v;
+            }
+            if let Some(v) = data.get("phrase_hint").and_then(|v| v.as_bool()) {
+                cfg.phrase_hint = v;
+            }
+            if let Some(v) = data.get("coin_hotkey").and_then(|v| v.as_str()) {
+                if !v.trim().is_empty() {
+                    cfg.coin_hotkey = v.trim().to_string();
+                }
+            }
+            if let Some(v) = data.get("shot_hotkey").and_then(|v| v.as_str()) {
+                if !v.trim().is_empty() {
+                    cfg.shot_hotkey = v.trim().to_string();
+                }
             }
         }
     }
-    (page_size.clamp(1, 9), commit_after_four)
+    // 热键冲突自动升级(合同 §13):加载即自愈,截屏热键让位并留痕日志
+    for note in lyyime_core::hotkey::resolve_config_hotkeys(&mut cfg) {
+        crate::logger::warn(&note);
+    }
+    cfg
 }
 
 /// 图标目录:二进制同级的 ../icons(与 python 版 ../icons 解析一致;装机时

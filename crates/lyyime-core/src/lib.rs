@@ -44,7 +44,9 @@
 pub mod config;
 pub mod error;
 pub mod ffi;
+pub mod hotkey;
 pub mod punct;
+pub mod stats;
 
 mod dict;
 mod engine;

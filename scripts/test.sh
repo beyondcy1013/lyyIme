@@ -23,12 +23,16 @@ case "$SCOPE" in
     run_cargo_test lyyime-dicttool
     run_cargo_test lyyime-doctor
     run_cargo_test lyyime-float
+    run_cargo_test lyyime-ibus
+    run_cargo_test lyyime-shot
     ;;
   all)
     run_cargo_test lyyime-core
     run_cargo_test lyyime-dicttool
     run_cargo_test lyyime-doctor
     run_cargo_test lyyime-float
+    run_cargo_test lyyime-ibus
+    run_cargo_test lyyime-shot
     [ -f crates/lyyime-core/ffi-test.py ] && python3 crates/lyyime-core/ffi-test.py
     make -C xim test
     ;;

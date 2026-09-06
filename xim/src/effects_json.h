@@ -12,7 +12,8 @@
  *   - 字段顺序任意;对象成员只认 t/s/n/page/pages/m;
  *   - 字符串仅支持 \" \\ \/ \b \f \n \r \t 转义,不支持 \uXXXX(我们的 core
  *     JSON 序列化按 UTF-8 原样输出,见合同示例"你好");
- *   - "t" 取值必须是合同六种之一,否则整体判错(宿主降级直通,便于暴露违约)。
+ *   - "t" 取值必须是合同效果类型之一(commit/preedit/cands/pass/consumed/
+ *     notice/hint/mode),否则整体判错(宿主降级直通,便于暴露违约)。
  * 纯 C 无依赖,可 headless 单测(xim/tests/unit_effects_json.c)。
  */
 #ifndef LYY_EFFECTS_JSON_H_
@@ -28,6 +29,7 @@ typedef enum {
     LYY_EFF_PASS,         /* {"t":"pass"} 宿主原样放行该键 */
     LYY_EFF_CONSUMED,     /* {"t":"consumed"} 吞掉无可见效果 */
     LYY_EFF_NOTICE,       /* {"t":"notice","s":...} 辅助区提示(造词结果等) */
+    LYY_EFF_HINT,         /* {"t":"hint","s":...} 词组效率提示(候选条,下一次输入清除) */
     LYY_EFF_MODE,         /* {"t":"mode","m":0|1} 中英指示 */
 } LyyEffKind;
 

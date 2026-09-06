@@ -20,6 +20,7 @@ pkill -x lyyime-xim 2>/dev/null || true
 
 echo "== 删除文件 =="
 rm -f "$PREFIX/bin/lyyime-xim"
+rm -f "$PREFIX/bin/lyyime-shot"
 rm -f "$PREFIX/share/lyyime/icons/zh.svg" "$PREFIX/share/lyyime/icons/en.svg"
 rmdir "$PREFIX/share/lyyime/icons" 2>/dev/null || true
 rm -f "$PREFIX/share/lyyime/res/settings.ui" "$PREFIX/share/lyyime/res/candidate.css"

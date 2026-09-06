@@ -8,6 +8,7 @@
 
 #include "ai_capture.h"
 #include "common.h"
+#include "keysym_map.h"
 
 /* ---- 构建控件状态 ←→ 配置 ---- */
 static void ui_from_config(SettingsUi *ui)
@@ -25,9 +26,14 @@ static void ui_from_config(SettingsUi *ui)
                                  c->learning);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_commit_four),
                                  c->commit_after_four);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_commit_unique_four),
+                                 c->commit_unique_four);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint),
+                                 c->phrase_hint);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_autostart),
                                  c->autostart);
     gtk_entry_set_text(GTK_ENTRY(ui->ent_coin_hotkey), c->coin_hotkey);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_shot_hotkey), c->shot_hotkey);
     /* AI 助手([ai] 段) */
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_ai_enabled),
                                  c->ai_enabled);
@@ -55,11 +61,18 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_learn));
     c->commit_after_four =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_commit_four));
+    c->commit_unique_four = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_commit_unique_four));
+    c->phrase_hint =
+        gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint));
     c->autostart =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_autostart));
     snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s",
              gtk_entry_get_text(GTK_ENTRY(ui->ent_coin_hotkey)));
     g_strstrip(c->coin_hotkey);
+    snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_shot_hotkey)));
+    g_strstrip(c->shot_hotkey);
     /* AI 助手([ai] 段);字段越界由 config 钳制语义兜底 */
     c->ai_enabled =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_ai_enabled));
@@ -78,6 +91,97 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_ai_timeout));
 }
 
+/* ---- 快捷键弹窗提示(写法非法/冲突避让结果,人话) ---- */
+static void hotkey_msg_dialog(SettingsUi *ui, GtkMessageType type,
+                              char *body)
+{
+    GtkWidget *dlg = gtk_message_dialog_new(GTK_WINDOW(ui->window),
+                                            GTK_DIALOG_MODAL, type,
+                                            GTK_BUTTONS_OK, "%s", body);
+    gtk_window_set_title(GTK_WINDOW(dlg), "lyyIme 快捷键设置");
+    gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+    g_free(body);
+}
+
+/* ---- 快捷键校验 + 冲突自动升级(合同 §12.3/§13)----
+ * 返回 TRUE=可保存。两条规则:
+ *  ① 写法非法(缺修饰/未知键)→ 报错并把该输入框还原为保存值,FALSE;
+ *  ② 两键占用同一组合 → 刚改动的一侧按 原组合→+Alt→+Alt+Shift 逐级避让,
+ *     最终值**直接回写输入框**(所见即所得)并弹窗说明;三级全占用 →
+ *     报错还原该侧,FALSE。 */
+static gboolean hotkeys_validate_and_resolve(SettingsUi *ui, LyyConfig *c,
+                                             const LyyConfig *saved)
+{
+    char coin[128], shot[128];
+    if (!lyy_hotkey_canon(c->coin_hotkey, coin, sizeof(coin))) {
+        hotkey_msg_dialog(
+            ui, GTK_MESSAGE_ERROR,
+            g_strdup_printf("造词快捷键「%s」写法不合法:需至少一个修饰"
+                            "(ctrl/alt/super/shift)+ 键名,如 ctrl+equal。"
+                            "已还原为原值。",
+                            c->coin_hotkey));
+        gtk_entry_set_text(GTK_ENTRY(ui->ent_coin_hotkey),
+                           saved->coin_hotkey);
+        snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s",
+                 saved->coin_hotkey);
+        return FALSE;
+    }
+    if (!lyy_hotkey_canon(c->shot_hotkey, shot, sizeof(shot))) {
+        hotkey_msg_dialog(
+            ui, GTK_MESSAGE_ERROR,
+            g_strdup_printf("截屏快捷键「%s」写法不合法:需至少一个修饰"
+                            "(ctrl/alt/super/shift)+ 键名,如 ctrl+alt+a。"
+                            "已还原为原值。",
+                            c->shot_hotkey));
+        gtk_entry_set_text(GTK_ENTRY(ui->ent_shot_hotkey), saved->shot_hotkey);
+        snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s",
+                 saved->shot_hotkey);
+        return FALSE;
+    }
+    if (strcmp(coin, shot) != 0)
+        return TRUE; /* 无冲突,原样保存 */
+
+    /* 谁刚改动谁让位;两侧同改/都未改(手改配置文件后直接保存)则截屏让位 */
+    char coin_saved[128] = "", shot_saved[128] = "";
+    lyy_hotkey_canon(saved->coin_hotkey, coin_saved, sizeof(coin_saved));
+    lyy_hotkey_canon(saved->shot_hotkey, shot_saved, sizeof(shot_saved));
+    int edited_coin = strcmp(coin, coin_saved) != 0;
+    int edited_shot = strcmp(shot, shot_saved) != 0;
+    int coin_yields = edited_coin && !edited_shot;
+
+    const char *target = coin_yields ? c->coin_hotkey : c->shot_hotkey;
+    const char *other = coin_yields ? c->shot_hotkey : c->coin_hotkey;
+    const char *tname = coin_yields ? "造词快捷键" : "截屏快捷键";
+    const char *oname = coin_yields ? "截屏快捷键" : "造词快捷键";
+    GtkWidget *tent = coin_yields ? ui->ent_coin_hotkey : ui->ent_shot_hotkey;
+    const char *tsaved = coin_yields ? saved->coin_hotkey : saved->shot_hotkey;
+    char *tbuf = coin_yields ? c->coin_hotkey : c->shot_hotkey;
+    size_t tcap = sizeof(c->coin_hotkey);
+
+    char next[128];
+    if (lyy_hotkey_escalate(target, other, next, sizeof(next))) {
+        snprintf(tbuf, tcap, "%s", next);
+        gtk_entry_set_text(GTK_ENTRY(tent), next); /* 所见即所得 */
+        hotkey_msg_dialog(
+            ui, GTK_MESSAGE_INFO,
+            g_strdup_printf("「%s」%s 与「%s」冲突,已自动改为 %s"
+                            "(原组合 → +Alt → +Alt+Shift 逐级避让)。",
+                            tname, target, oname, next));
+        lyy_log(&lyy_app()->log, "快捷键冲突自动升级:%s %s → %s", tname,
+                target, next);
+        return TRUE;
+    }
+    hotkey_msg_dialog(
+        ui, GTK_MESSAGE_ERROR,
+        g_strdup_printf("「%s」%s 与「%s」冲突,+Alt/+Shift 逐级避让后仍被"
+                        "占用,已还原为原值;请手动指定其它组合。",
+                        tname, target, oname));
+    gtk_entry_set_text(GTK_ENTRY(tent), tsaved);
+    snprintf(tbuf, tcap, "%s", tsaved);
+    return FALSE;
+}
+
 static void on_ok(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
@@ -86,6 +190,10 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
 
     LyyConfig c = app->config;
     config_from_ui(ui, &c);
+    /* 快捷键校验 + 冲突自动升级(合同 §13):非法/无法避让时已弹窗还原,
+     * 不保存不关窗 */
+    if (!hotkeys_validate_and_resolve(ui, &c, &app->config))
+        return;
     app->config = c;
     if (lyy_config_save(app->config_path, &c) != 0) {
         lyy_log(&app->log, "ERROR 配置保存失败:%s", app->config_path);
@@ -97,14 +205,15 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     /* 保存即生效:core 引擎重建(重读词库与配置)+ 候选窗字体即时刷新;
      * AI 配置由 ai_capture 每键实时读取,同样立即生效 */
     lyy_engine_reload(app);
-    lyy_app_reload_hotkey(app); /* 造词热键即时生效 */
+    lyy_app_reload_hotkey(app); /* 造词/截屏热键即时生效 */
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d font=%d autostart=%d ai=%d base=%s model=%s coin=%s",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d unique4=%d hint=%d font=%d autostart=%d ai=%d base=%s model=%s coin=%s shot=%s",
             c.page_size, c.mixed_english, c.auto_commit_english,
-            c.chinese_punct, c.learning, c.commit_after_four, c.font_size,
-            c.autostart, c.ai_enabled, c.ai_api_base, c.ai_model,
-            c.coin_hotkey);
+            c.chinese_punct, c.learning, c.commit_after_four,
+            c.commit_unique_four, c.phrase_hint, c.font_size, c.autostart,
+            c.ai_enabled,
+            c.ai_api_base, c.ai_model, c.coin_hotkey, c.shot_hotkey);
     gtk_widget_hide(ui->window);
 }
 
@@ -294,10 +403,16 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_learning"));
     ui->chk_commit_four = GTK_WIDGET(
         gtk_builder_get_object(builder, "chk_commit_after_four"));
+    ui->chk_commit_unique_four = GTK_WIDGET(
+        gtk_builder_get_object(builder, "chk_commit_unique_four"));
+    ui->chk_phrase_hint =
+        GTK_WIDGET(gtk_builder_get_object(builder, "chk_phrase_hint"));
     ui->chk_autostart =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_autostart"));
     ui->ent_coin_hotkey =
         GTK_WIDGET(gtk_builder_get_object(builder, "ent_coin_hotkey"));
+    ui->ent_shot_hotkey =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_shot_hotkey"));
     ui->chk_ai_enabled =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_ai_enabled"));
     ui->ent_ai_base =
@@ -315,7 +430,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
 
     if (!ui->window || !ui->spin_page || !ui->spin_font || !ui->chk_mixed ||
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
-        !ui->chk_commit_four || !ui->chk_autostart || !ui->chk_ai_enabled ||
+        !ui->chk_commit_four || !ui->chk_commit_unique_four ||
+        !ui->chk_phrase_hint || !ui->chk_autostart || !ui->chk_ai_enabled ||
         !ui->ent_ai_base || !ui->ent_ai_key || !ui->ent_ai_model ||
         !ui->ent_ai_prompt || !ui->spin_ai_timeout || !ui->btn_ai_test ||
         !ui->ent_coin_hotkey) {

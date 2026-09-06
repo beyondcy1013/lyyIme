@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "common.h"
+#include "shot.h"
 
 #define DOCTOR_BIN "lyyime-doctor"
 
@@ -77,6 +78,14 @@ static void doctor_missing_dialog(GtkWindow *parent)
         DOCTOR_BIN);
     gtk_dialog_run(GTK_DIALOG(dlg));
     gtk_widget_destroy(dlg);
+}
+
+/* ---- 工具:截屏(拉起 lyyime-shot;热键不可达的英文直通态也能用) ---- */
+static void on_screenshot(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    App *app = user_data;
+    lyy_spawn_shot(app);
 }
 
 /* ---- 工具:修复输入法(危险操作,先确认再执行) ---- */
@@ -360,6 +369,7 @@ static void on_status_popup(GtkStatusIcon *icon, guint button, guint activate_ti
         const char *label;
         GCallback cb;
     } tool_items[] = {
+        { "截屏", G_CALLBACK(on_screenshot) },
         { "修复输入法…", G_CALLBACK(on_fix_ime) },
         { "输入法管理…", G_CALLBACK(on_manage_ime) },
         { "重载词库", G_CALLBACK(on_reload_dict) },

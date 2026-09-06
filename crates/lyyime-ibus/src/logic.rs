@@ -8,8 +8,9 @@
 //! 健壮性合同(§7):core 初始化失败进入降级英文直通,绝不卡死按键。
 
 use crate::keysym::{
-    is_shift, map_keyval, BLOCKING_MODS, KSYM_BACKSPACE, KSYM_ESCAPE, KSYM_KP_ENTER,
-    KSYM_RETURN, KSYM_SPACE, MASK_RELEASE, PURPOSE_PASSWORD, PURPOSE_PIN,
+    hotkey_match, is_shift, map_keyval, parse_hotkey, BLOCKING_MODS, KSYM_BACKSPACE,
+    KSYM_ESCAPE, KSYM_KP_ENTER, KSYM_RETURN, KSYM_SPACE, MASK_LOCK, MASK_RELEASE,
+    PURPOSE_PASSWORD, PURPOSE_PIN,
 };
 use lyyime_ai::AiConfig;
 use lyyime_core::{Effect, Engine, LKey};
@@ -27,8 +28,12 @@ pub trait Host {
     fn on_mode_changed(&mut self, mode: u8);
     /// 辅助区临时提示
     fn on_notice(&mut self, text: &str);
+    /// 候选条效率提示(词组提示):展示后不带定时,直到下一次输入才清除
+    fn on_hint(&mut self, text: &str);
     /// /AI 会话回车后提交提示词;宿主负责异步调用与结果上屏
     fn on_ai_submit(&mut self, prompt: String);
+    /// 截屏热键命中(§13):宿主拉起 lyyime-shot 子进程(异步,不阻塞按键流)
+    fn on_shot(&mut self);
 }
 
 /// /AI 触发会话状态:idle=未触发;slash/slash_a=已吞触发前缀;
@@ -56,6 +61,12 @@ pub struct EngineLogic {
     ai_prompt: String,
     ai_prompt_full: bool,
     ai_cfg: Option<AiConfig>,
+    /// 截屏热键解析结果((修饰,键值);None=配置非法不拦截,§13)
+    hotkey_shot: Option<(u32, u32)>,
+    /// 造词热键解析结果(§12;Mode A 与 Mode B 同合同)
+    hotkey_coin: Option<(u32, u32)>,
+    /// 输入统计目录(None=不记录,单测用;生产为 ~/.local/share/lyyime/stats)
+    pub stats_dir: Option<PathBuf>,
 }
 
 impl EngineLogic {
@@ -65,6 +76,8 @@ impl EngineLogic {
             e.set_config(core_cfg.clone());
         }
         let mode = engine.as_ref().map(|e| e.mode()).unwrap_or(lyyime_core::Mode::Chinese);
+        let hotkey_shot = parse_hotkey(&core_cfg.shot_hotkey);
+        let hotkey_coin = parse_hotkey(&core_cfg.coin_hotkey);
         EngineLogic {
             engine,
             core_cfg,
@@ -77,11 +90,19 @@ impl EngineLogic {
             ai_prompt: String::new(),
             ai_prompt_full: false,
             ai_cfg,
+            hotkey_shot,
+            hotkey_coin,
+            stats_dir: lyyime_core::stats::default_dir(),
         }
     }
 
     pub fn degraded(&self) -> bool {
         self.engine.is_none()
+    }
+
+    /// 截屏热键配置原文(解析非法返回 None;菜单 tooltip 展示用,§13)
+    pub fn shot_hotkey_text(&self) -> Option<String> {
+        parse_hotkey(&self.core_cfg.shot_hotkey).map(|_| self.core_cfg.shot_hotkey.clone())
     }
 
     pub fn set_ai_cfg(&mut self, cfg: Option<AiConfig>) {
@@ -122,6 +143,24 @@ impl EngineLogic {
         }
         // 其它键按下:无论成败都取消未决的 Shift 单击
         self.pending_shift = None;
+        // ---- 截屏热键(合同 §13):纯工具组合键,中英文态同效。
+        // ibus 激活期间按键必经引擎,故不区分 core 模式;命中即拉起
+        // lyyime-shot 子进程并吞键,不进组词缓冲、不经 core。 ----
+        if let Some((mods, sym)) = self.hotkey_shot {
+            if hotkey_match(state, keyval, mods, sym) {
+                self.ai_reset_state();
+                host.on_shot();
+                return true;
+            }
+        }
+        // ---- 造词热键(合同 §12,默认 Ctrl+=):组合键先放弃 AI 会话再进造词 ----
+        if let Some((mods, sym)) = self.hotkey_coin {
+            if hotkey_match(state, keyval, mods, sym) {
+                self.ai_reset_state();
+                let effects = self.core_mut().process_key(LKey::Coin);
+                return self.dispatch(host, effects);
+            }
+        }
         if state & BLOCKING_MODS != 0 {
             // 应用快捷键(如 Ctrl+C):先放弃 AI 会话并复位缓冲,再放行
             self.ai_reset_state();
@@ -130,6 +169,13 @@ impl EngineLogic {
         }
         if let Some(taken) = self.ai_take(host, keyval) {
             return taken;
+        }
+        // CapsLock 大写态(合同 §6):字母键一律直通英文,不进组词缓冲。
+        // 无 Shift 时键值即大写,应用输出大写字母;Shift+字母 键值为小写,
+        // 应用按 Caps+Shift 翻译输出小写字母。非字母键不受影响走常态。
+        if state & MASK_LOCK != 0 && matches!(keyval, 0x41..=0x5a | 0x61..=0x7a) {
+            let effects = self.core_mut().process_key(LKey::Other);
+            return self.dispatch(host, effects);
         }
         let (lkey, ch) = map_keyval(keyval);
         let effects = self.core_mut().process_key(lkey);
@@ -351,6 +397,7 @@ impl EngineLogic {
                 Effect::Pass => consumed = false,
                 Effect::Consumed => {}
                 Effect::Notice(t) => host.on_notice(&t),
+                Effect::Hint(t) => host.on_hint(&t),
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
@@ -363,13 +410,29 @@ impl EngineLogic {
     // ------------------------------------------------------------------
     // 效果流分发(合同 §3:顺序即宿主处理顺序)
     // ------------------------------------------------------------------
+
+    /// 输入统计(悬浮窗"停顿显示今日输入"的数据层):上屏即记一次
+    /// 非空白字符数;任何错误静默,绝不影响输入主链路。
+    fn record_stats(&self, text: &str) {
+        let Some(dir) = self.stats_dir.as_ref() else {
+            return;
+        };
+        let chars = text.chars().filter(|c| !c.is_whitespace()).count() as u64;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        lyyime_core::stats::record(dir, chars, now_ms);
+    }
+
     fn dispatch(&mut self, host: &mut dyn Host, effects: Vec<Effect>) -> bool {
-        /// 逐条执行效果;返回 false 仅当出现 pass(宿主必须放行该键)。
+        // 逐条执行效果;返回 false 仅当出现 pass(宿主必须放行该键)
         let mut consumed = true;
         for eff in effects {
             match eff {
                 Effect::Commit(text) => {
                     if !text.is_empty() {
+                        self.record_stats(&text);
                         host.on_commit(&text);
                     }
                 }
@@ -393,8 +456,9 @@ impl EngineLogic {
                     host.on_candidates(&list, page, pages, &aux);
                 }
                 Effect::Pass => consumed = false,
-                Effect::Consumed => {} // 吞键但无可见效果
+                Effect::Consumed => {}
                 Effect::Notice(t) => host.on_notice(&t),
+                Effect::Hint(t) => host.on_hint(&t),
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
@@ -405,7 +469,7 @@ impl EngineLogic {
     }
 
     // ------------------------------------------------------------------
-    // 对外操作(属性菜单/焦点切换调用)
+    // 效果流分发(合同 §3:顺序即宿主处理顺序)
     // ------------------------------------------------------------------
     pub fn switch_mode(&mut self, host: &mut dyn Host) {
         // 切换中英模式并清空会话状态(与 Shift 单击、托盘菜单共用)
@@ -487,9 +551,15 @@ mod tests {
         fn on_notice(&mut self, text: &str) {
             self.log(format!("notice:{text}"));
         }
+        fn on_hint(&mut self, text: &str) {
+            self.log(format!("hint:{text}"));
+        }
         fn on_ai_submit(&mut self, prompt: String) {
             self.ai_prompts.borrow_mut().push(prompt.clone());
             self.log(format!("ai-submit:{prompt}"));
+        }
+        fn on_shot(&mut self) {
+            self.log("shot".to_string());
         }
     }
 
@@ -522,7 +592,15 @@ mod tests {
 
     fn logic_with_ai(cfg: Option<AiConfig>) -> (PathBuf, EngineLogic) {
         let dir = fixtures_dir();
-        let logic = EngineLogic::new(dir.clone(), cfg, lyyime_core::Config::default());
+        let mut logic = EngineLogic::new(dir.clone(), cfg, lyyime_core::Config::default());
+        logic.stats_dir = None; // 单测不写真实 HOME 的统计目录
+        (dir, logic)
+    }
+
+    fn logic_with_core_cfg(core_cfg: lyyime_core::Config) -> (PathBuf, EngineLogic) {
+        let dir = fixtures_dir();
+        let mut logic = EngineLogic::new(dir.clone(), None, core_cfg);
+        logic.stats_dir = None;
         (dir, logic)
     }
 
@@ -532,13 +610,24 @@ mod tests {
     fn type_wqvb_and_space_commits_nihao() {
         let (_d, mut l) = logic_with_ai(None);
         let mut h = Mock::default();
+        // 四码唯一上屏(默认开启):第 4 键 b 直接上屏「你好」,免空格。
+        let mut consumed = true;
         for k in ['w', 'q', 'v', 'b'] {
-            assert!(l.process_key_event(&mut h, k as u32, 0));
+            consumed = l.process_key_event(&mut h, k as u32, 0);
         }
-        assert!(l.process_key_event(&mut h, 0x20, 0)); // space
-        let ev = h.events.borrow();
-        assert!(ev.iter().any(|e| e == "commit:你好"), "events={ev:?}");
-        assert!(ev.iter().any(|e| e.starts_with("cands:["))); // 出过候选
+        assert!(consumed);
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e == "commit:你好"), "events={:?}", h.events.borrow());
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e.starts_with("cands:["))); // 出过候选
+        // 自动上屏后缓冲已空:空格放行(consumed=false)。
+        assert!(!l.process_key_event(&mut h, 0x20, 0));
     }
 
     #[test]
@@ -562,11 +651,65 @@ mod tests {
     fn uppercase_keyval_lowercased() {
         let (_d, mut l) = logic_with_ai(None);
         let mut h = Mock::default();
-        l.process_key_event(&mut h, 0x41, 0); // 'A'(CapsLock 大写)
+        l.process_key_event(&mut h, 0x41, 0); // 'A'(Shift 大写,无 CapsLock)
         let ev = h.events.borrow().clone();
         let evs: Vec<&String> = ev.iter().filter(|e| e.starts_with("aux:")).collect();
         // 辅助区输入串应为小写 'a'
         assert!(evs.iter().any(|e| e.contains("a")), "events={ev:?}");
+    }
+
+    #[test]
+    fn capslock_letter_passes_through_uppercase() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        // 大写态无 Shift:'A' 键值原样放行,不进组词缓冲
+        assert!(!l.process_key_event(&mut h, 0x41, MASK_LOCK));
+        let ev = h.events.borrow();
+        assert!(
+            !ev.iter().any(|e| e.starts_with("cands:[") || e.starts_with("aux:")),
+            "不应出现组词 UI: {ev:?}"
+        );
+    }
+
+    #[test]
+    fn capslock_shift_letter_passes_through_lowercase() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        // 大写态 Shift+字母:键值为小写 'a',放行由应用输出小写
+        assert!(!l.process_key_event(&mut h, 0x61, MASK_LOCK | crate::keysym::MASK_SHIFT));
+        let ev = h.events.borrow();
+        assert!(
+            !ev.iter().any(|e| e.starts_with("cands:[") || e.starts_with("aux:")),
+            "不应出现组词 UI: {ev:?}"
+        );
+    }
+
+    #[test]
+    fn capslock_letter_after_composition_resets_buffer() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, 'n' as u32, 0); // 组词中
+        // 大写态字母直通:先复位缓冲(Preedit 清空)再放行
+        assert!(!l.process_key_event(&mut h, 0x41, MASK_LOCK));
+        assert!(h.events.borrow().iter().any(|e| e == "preedit:∅"));
+        // 缓冲确已清空:普通字母重新从头组词而非拼接
+        let mut h2 = Mock::default();
+        l.process_key_event(&mut h2, 'i' as u32, 0);
+        assert!(h2
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e == "aux:i"), "应从头组词 'i'");
+    }
+
+    #[test]
+    fn capslock_non_letter_keys_keep_normal_behavior() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        // 大写态数字/标点仍走常态:无候选数字 Pass、空缓冲标点上中文标点
+        assert!(!l.process_key_event(&mut h, 0x31, MASK_LOCK)); // '1' 无候选放行
+        assert!(l.process_key_event(&mut h, 0x2c, MASK_LOCK)); // ',' 吞键上屏中文逗号
+        assert!(h.events.borrow().iter().any(|e| e.starts_with("commit:")));
     }
 
     #[test]
@@ -645,11 +788,88 @@ mod tests {
     }
 
     #[test]
+    fn shot_hotkey_中英态命中并吞键() {
+        use crate::keysym::{MASK_ALT, MASK_CTRL};
+        let mut cfg = lyyime_core::Config::default();
+        cfg.shot_hotkey = "ctrl+alt+a".into();
+        let (_d, mut l) = logic_with_core_cfg(cfg);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h); // → 英文
+        // 英文态命中:吞键 + on_shot
+        assert!(l.process_key_event(&mut h, 0x61, MASK_CTRL | MASK_ALT));
+        assert!(h.events.borrow().iter().any(|e| e == "shot"));
+        // 中文态同样命中(切回)
+        l.switch_mode(&mut h);
+        assert!(l.process_key_event(&mut h, 0x61, MASK_CTRL | MASK_ALT));
+        assert_eq!(h.events.borrow().iter().filter(|e| *e == "shot").count(), 2);
+        // 非目标组合不命中:ctrl+b 放行(应用快捷键路径)
+        assert!(!l.process_key_event(&mut h, 0x62, MASK_CTRL));
+        // 键不对不命中:ctrl+alt+b 放行
+        assert!(!l.process_key_event(&mut h, 0x62, MASK_CTRL | MASK_ALT));
+    }
+
+    #[test]
+    fn shot_hotkey_配置非法时不拦截() {
+        use crate::keysym::{MASK_ALT, MASK_CTRL};
+        let mut cfg = lyyime_core::Config::default();
+        cfg.shot_hotkey = "a".into(); // 无修饰 → 解析失败 → 不拦截
+        let (_d, mut l) = logic_with_core_cfg(cfg);
+        let mut h = Mock::default();
+        assert!(!l.process_key_event(&mut h, 0x61, MASK_CTRL | MASK_ALT));
+        assert!(!h.events.borrow().iter().any(|e| e == "shot"));
+    }
+
+    #[test]
+    fn coin_hotkey_命中进入造词态() {
+        use crate::keysym::MASK_CTRL;
+        let (_d, mut l) = logic_with_core_cfg(lyyime_core::Config::default()); // 默认 ctrl+equal
+        let mut h = Mock::default();
+        // 先上屏候选,建立最近上屏历史
+        for k in ['w', 'q', 'v', 'b'] {
+            l.process_key_event(&mut h, k as u32, 0);
+        }
+        l.process_key_event(&mut h, 0x20, 0); // 空格顶屏「你好」
+        // Ctrl+= 触发造词:预编辑出现「造词:」前缀
+        assert!(l.process_key_event(&mut h, 0x3d, MASK_CTRL));
+        assert!(
+            h.events.borrow().iter().any(|e| e.starts_with("preedit:造词:")),
+            "events={:?}",
+            h.events.borrow()
+        );
+        // Esc 取消造词
+        l.process_key_event(&mut h, KSYM_ESCAPE, 0);
+    }
+
+    #[test]
     fn ctrl_combo_releases_buffer_and_passes() {
         let (_d, mut l) = logic_with_ai(None);
         let mut h = Mock::default();
         l.process_key_event(&mut h, 'n' as u32, 0);
         // Ctrl+C:缓冲复位(有缓冲 Shift 语义不触发),按键放行
         assert!(!l.process_key_event(&mut h, 0x63, 1 << 2));
+    }
+
+    #[test]
+    fn 词组提示_逐字上屏后经宿主回调展示() {
+        // 夹具:拼音 ni→你、hao→好;wqvb→你好。逐字上屏 你(2 键)+好(3 键)
+        // 后,应给出「你好」可用 wqvb 打出的效率提示。
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        for k in ['n', 'i'] {
+            assert!(l.process_key_event(&mut h, k as u32, 0));
+        }
+        assert!(l.process_key_event(&mut h, 0x20, 0)); // space → 你
+        for k in ['h', 'a', 'o'] {
+            assert!(l.process_key_event(&mut h, k as u32, 0));
+        }
+        assert!(l.process_key_event(&mut h, 0x20, 0)); // space → 好
+        let ev = h.events.borrow();
+        assert!(ev.iter().any(|e| e == "commit:你"), "events={ev:?}");
+        assert!(ev.iter().any(|e| e == "commit:好"), "events={ev:?}");
+        assert!(
+            ev.iter()
+                .any(|e| e.contains("hint:") && e.contains("你好") && e.contains("wqvb")),
+            "应有词组提示: {ev:?}"
+        );
     }
 }

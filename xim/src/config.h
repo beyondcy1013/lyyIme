@@ -15,6 +15,8 @@
 #ifndef LYY_CONFIG_H_
 #define LYY_CONFIG_H_
 
+#include <stddef.h>
+
 /* 字符串配置容量(字节,含 \0);system_prompt 用 1024 容纳中文长句 */
 #define LYY_CFG_STR_BASE 256
 #define LYY_CFG_STR_KEY 512
@@ -28,6 +30,8 @@ typedef struct {
     int chinese_punct;       /* 中文态使用中文标点 */
     int learning;            /* 用户词学习开关 */
     int commit_after_four;   /* 满足四码后,继续输入字母先顶屏当前选中 */
+    int commit_unique_four;  /* 恰好四码且候选唯一时,免空格直接上屏 */
+    int phrase_hint;         /* 词组效率提示(上屏后提示更省键的词组与编码) */
     int font_size;           /* 候选窗字体大小(10..28) */
     int autostart;           /* 开机自启(写 ~/.config/autostart) */
     /* AI 助手([ai] 段;触发/调用实现见 ibus-engine/engine/lyyime_ai.py,
@@ -41,12 +45,22 @@ typedef struct {
     /* 造词热键(合同 §12):写法 "ctrl+equal",修饰至少一个;
      * 解析见 keysym_map.c lyy_hotkey_parse(与 Mode A 同规格) */
     char coin_hotkey[LYY_CFG_STR_BASE];
+    /* 截屏快捷键(合同 §13):按下拉起 lyyime-shot 框选截屏(存图片目录 +
+     * 剪贴板);写法同造词热键,默认 ctrl+alt+a */
+    char shot_hotkey[LYY_CFG_STR_BASE];
 } LyyConfig;
 
 void lyy_config_defaults(LyyConfig *c);
 
 /* 返回 0=读到 1=文件不存在已用默认 -1=读失败已用默认 */
 int lyy_config_load(const char *path, LyyConfig *out);
+
+/* 热键冲突自动升级(合同 §13;加载后/保存前调用,规格同 core hotkey.rs):
+ * 造词与截屏快捷键占用同一组合时,截屏热键按 原组合→+Alt→+Alt+Shift
+ * 逐级让位(工具键让位打字键)并就地改写 *c,人话说明写入 note。
+ * 返回 1=已自动升级 0=无冲突(或任一写法非法,不参与冲突) -1=冲突且
+ * 阶梯用尽(配置未改,请人工修改)。 */
+int lyy_config_resolve_hotkey_conflicts(LyyConfig *c, char *note, size_t cap);
 
 /* 保存;返回 0 成功。保留未知行与注释(见文件头) */
 int lyy_config_save(const char *path, const LyyConfig *c);

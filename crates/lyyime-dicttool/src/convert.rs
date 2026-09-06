@@ -10,7 +10,8 @@
 //! 实现要点:
 //! - 全程流式:排序/去重下推到 SQLite(GROUP BY MAX + ORDER BY),Rust 侧 O(1) 额外内存;
 //! - 幂等:输出先写 .tmp 再原子改名,同输入重跑产物字节一致(meta.built_at 除外);
-//! - 脏数据容错:NULL/空值/不可见控制字符行被跳过或剥离,统计后打印。
+//! - 脏数据容错:NULL/空值/不可见控制字符行被跳过或剥离,统计后打印;
+//! - 海峰隐藏词条(词尾「.」标记的生僻字,见 convert_wubi)不进入 wubi.tsv。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -100,6 +101,8 @@ pub fn convert_all(
 ///
 /// 表结构实测(id, tabkeys, phrase, freq, user_freq):tabkeys 只有纯字母,无分隔符;
 /// 存在少量全大写 tabkeys(1228 行,海峰“直接上屏”记法,如 'AAWI'),统一 lower 归一。
+/// 海峰源库用「词尾加 .」标记隐藏词条(CJK 扩展区生僻字/兼容字,freq≤100,约 4.7 万行,
+/// ibus-table 不在正常候选展示),此类字多数无字体可渲染,保留会破坏四码唯一等判定,过滤。
 /// 同 (code, word) 重复行取 MAX(freq);排序下推 SQLite,流式写出。
 fn convert_wubi(conn: &Connection, out: &Path) -> Result<u64> {
     let mut stmt = conn.prepare(
@@ -125,6 +128,11 @@ fn convert_wubi(conn: &Connection, out: &Path) -> Result<u64> {
         // 排除不可见控制字符(保留原词,不做全半角规范化);剥离后为空或含制表符则跳过
         let word = strip_control(&word_raw);
         if word.is_empty() || word.contains('\t') || word.contains('\n') {
+            skipped += 1;
+            continue;
+        }
+        // 海峰「词尾加 .」隐藏词条(生僻字标记),见函数头注释
+        if word.ends_with('.') {
             skipped += 1;
             continue;
         }

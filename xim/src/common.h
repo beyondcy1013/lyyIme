@@ -77,6 +77,11 @@ struct _App {
         uint32_t sym;              /* 目标 keysym */
         int ok;                    /* 1=解析成功(否则不拦截) */
     } hotkey_coin;
+    struct {                       /* 截屏热键(合同 §13,shot_hotkey 解析结果) */
+        uint32_t mods;
+        uint32_t sym;
+        int ok;
+    } hotkey_shot;
     int settings_requested;        /* SIGUSR1 唤起 → 主循环里弹设置窗 */
     int quit_requested;            /* SIGTERM/SIGINT → 优雅退出 */
 };

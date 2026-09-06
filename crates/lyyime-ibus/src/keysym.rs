@@ -24,7 +24,7 @@ pub const SHIFT_KEYVALS: (u32, u32) = (KSYM_SHIFT_L, KSYM_SHIFT_R);
 
 // 修饰位掩码(X/ibus 通用;数值与 IBus.ModifierType 一致)
 pub const MASK_SHIFT: u32 = 1 << 0;
-pub const MASK_LOCK: u32 = 1 << 1; // CapsLock:仍算普通输入,不拦截
+pub const MASK_LOCK: u32 = 1 << 1; // CapsLock:大写态字母直通英文(合同 §6)
 pub const MASK_CTRL: u32 = 1 << 2;
 pub const MASK_ALT: u32 = 1 << 3; // MOD1
 pub const MASK_SUPER: u32 = (1 << 6) | (1 << 26); // MOD4 | SUPER
@@ -41,6 +41,23 @@ pub fn is_shift(keyval: u32) -> bool {
     keyval == SHIFT_KEYVALS.0 || keyval == SHIFT_KEYVALS.1
 }
 
+// ---------------------------------------------------------------------
+// IM 托管组合热键(合同 §12 造词 / §13 截屏)
+// 解析/规范化/冲突升级规格单源在 lyyime-core::hotkey(本模块 re-export),
+// 与 Mode B keysym_map.c lyy_hotkey_parse 同规格,两端单测各自覆盖。
+// ---------------------------------------------------------------------
+
+/// 热键匹配用修饰位(只比这四位;CapsLock/NumLock 等不影响热键)
+pub const HOTKEY_CLEAN_MODS: u32 = MASK_SHIFT | MASK_CTRL | MASK_ALT | MASK_SUPER;
+
+pub use lyyime_core::hotkey::parse_hotkey;
+
+/// 精确匹配:修饰位只比 HOTKEY_CLEAN_MODS 四位 + 键值相等。
+#[inline]
+pub fn hotkey_match(state: u32, keyval: u32, mods: u32, sym: u32) -> bool {
+    (state & HOTKEY_CLEAN_MODS) == mods && keyval == sym
+}
+
 /// keysym → (LKey, 码点);无法识别时回 (LKey::Other, 0)。
 ///
 /// 注:Digit 的数值经 char 参数按码点传递('1'=0x31),core 取 chr-0x30
@@ -49,7 +66,7 @@ pub fn map_keyval(keyval: u32) -> (LKey, u32) {
     if (KSYM_A..=KSYM_Z).contains(&keyval) {
         return (LKey::Char(keyval as u8 as char), keyval);
     }
-    // CapsLock/Shift 产生的大写键值:小写化入缓冲
+    // Shift 产生的大写键值:小写化入缓冲(CapsLock 大写态在 logic 层直通,不会到这里)
     if (0x41..=0x5a).contains(&keyval) {
         return (LKey::Char((keyval + 0x20) as u8 as char), keyval + 0x20);
     }
@@ -118,6 +135,41 @@ mod tests {
         assert_eq!(map_keyval(KSYM_ESCAPE), (LKey::Esc, 0));
         assert_eq!(map_keyval(KSYM_PAGE_UP), (LKey::PageUp, 0));
         assert_eq!(map_keyval(KSYM_PAGE_DOWN), (LKey::PageDown, 0));
+    }
+
+    #[test]
+    fn hotkey_parse_常用写法() {
+        assert_eq!(parse_hotkey("ctrl+alt+a"), Some((MASK_CTRL | MASK_ALT, 0x61)));
+        assert_eq!(parse_hotkey("ctrl+equal"), Some((MASK_CTRL, 0x3d)));
+        assert_eq!(parse_hotkey("Ctrl + Shift + F5"), Some((MASK_CTRL | MASK_SHIFT, 0xffc2)));
+        assert_eq!(parse_hotkey("alt+`"), Some((MASK_ALT, 0x60)));
+        assert_eq!(parse_hotkey("super+0x31"), Some((MASK_SUPER, 0x31)));
+        assert_eq!(parse_hotkey("ctrl+pagedown"), Some((MASK_CTRL, 0xff56)));
+        // f13 跨段
+        assert_eq!(parse_hotkey("ctrl+f13"), Some((MASK_CTRL, 0xffcc)));
+    }
+
+    #[test]
+    fn hotkey_parse_非法拒绝() {
+        // 无修饰(纯键与打字冲突一律拒绝)
+        assert_eq!(parse_hotkey("a"), None);
+        assert_eq!(parse_hotkey("equal"), None);
+        assert_eq!(parse_hotkey("ctrl+"), None);
+        assert_eq!(parse_hotkey("ctrl+ctrl"), None); // 键名不是修饰/键表成员
+        assert_eq!(parse_hotkey(""), None);
+        assert_eq!(parse_hotkey("mod1+"), None);
+    }
+
+    #[test]
+    fn hotkey_match_只比四修饰位() {
+        let (mods, sym) = parse_hotkey("ctrl+alt+a").unwrap();
+        assert!(hotkey_match(MASK_CTRL | MASK_ALT, 0x61, mods, sym));
+        // CapsLock/NumLock 等杂位不影响
+        assert!(hotkey_match(MASK_CTRL | MASK_ALT | MASK_LOCK | (1 << 4), 0x61, mods, sym));
+        assert!(!hotkey_match(MASK_CTRL, 0x61, mods, sym));
+        assert!(!hotkey_match(MASK_CTRL | MASK_ALT, 0x62, mods, sym));
+        // release 位被忽略
+        assert!(hotkey_match(MASK_CTRL | MASK_ALT | MASK_RELEASE, 0x61, mods, sym));
     }
 
     #[test]

@@ -183,7 +183,14 @@ int main(int argc, char *argv[])
     /* 配置(共享 config.toml,保留未知行与注释) */
     if (lyy_config_load(app->config_path, &app->config) != 0)
         lyy_log(&app->log, "WARN 配置读取失败,使用默认值:%s", app->config_path);
-    /* 造词热键解析(设置保存后由 settings.c 再次刷新) */
+    /* 热键冲突自动升级(合同 §13):加载即自愈,截屏热键让位并留痕日志 */
+    {
+        char hk_note[512];
+        if (lyy_config_resolve_hotkey_conflicts(&app->config, hk_note,
+                                                sizeof(hk_note)) != 0)
+            lyy_log(&app->log, "%s", hk_note);
+    }
+    /* 造词/截屏热键解析(设置保存后由 settings.c 再次刷新) */
     lyy_app_reload_hotkey(app);
 
     /* GTK 初始化(候选窗/托盘/设置窗依赖) */

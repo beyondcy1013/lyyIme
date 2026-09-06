@@ -46,7 +46,7 @@ VENDOR_LIB  := $(VENDOR_DIR)/libxcb-imdkit.a
 SRC_DIR := $(ROOT_DIR)/src
 APP_SRCS := main.c common.c log.c config.c core_ffi.c effects_json.c \
             keysym_map.c xim_server.c ai_capture.c candidate_window.c \
-            tray.c settings.c
+            tray.c settings.c shot.c
 APP_OBJS := $(addprefix $(BUILD_DIR)/app/,$(APP_SRCS:.c=.o))
 APP_HDRS := $(wildcard $(SRC_DIR)/*.h)
 
@@ -132,8 +132,8 @@ $(BUILD_DIR)/tests/e2e_client: $(ROOT_DIR)/tests/e2e_client.c
 	@mkdir -p $(BUILD_DIR)/tests
 	$(CC) $(CFLAGS) -o $@ $< $(PKG_GTK)
 
-$(BUILD_DIR)/tests/unit_config: $(SRC_DIR)/config.c $(ROOT_DIR)/tests/unit_config.c | $(BUILD_DIR)/tests
-	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_GTK) -o $@ $(SRC_DIR)/config.c $(ROOT_DIR)/tests/unit_config.c
+$(BUILD_DIR)/tests/unit_config: $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_config.c | $(BUILD_DIR)/tests
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_GTK) $(PKG_COMMON) -o $@ $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_config.c
 
 # 造词热键解析(合同 §12;headless,仅链接 keysym_map.c)
 $(BUILD_DIR)/tests/unit_hotkey: $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c | $(BUILD_DIR)/tests

@@ -20,6 +20,7 @@
 #ifndef LYY_KEYSYM_MAP_H_
 #define LYY_KEYSYM_MAP_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* 输出参数:*key = LKEY_*(core_ffi.h),*chr = CHAR/DIGIT/PUNCT 码点(其余 0) */
@@ -40,5 +41,20 @@ int lyy_hotkey_parse(const char *spec, uint32_t *mods, uint32_t *keysym);
  * (Lock/NumLock 等无关位由调用方在 mods 里先行剔除)。 */
 int lyy_hotkey_match(uint32_t mods, uint32_t keysym, uint32_t hotkey_mods,
                      uint32_t hotkey_keysym);
+
+/* ---- 规范化与冲突升级(合同 §12.3/§13;与 lyyime-core src/hotkey.rs
+ * 同规格,两端单测各自覆盖)---- */
+
+/* 规范化热键串:别名归一(control≡ctrl、"="≡equal 等)+ 修饰定序
+ * (ctrl+alt+super+shift)+ 键名标准形,写入 out(失败返回 0)。
+ * "Ctrl + =" 与 "ctrl+equal" 同归 "ctrl+equal",用于冲突比较与设置窗回显。 */
+int lyy_hotkey_canon(const char *spec, char *out, size_t cap);
+
+/* 冲突自动升级(用户语:"自动滑向下一级"):spec 与 occupied 组合相同时,
+ * 按 原组合 → +Alt → +Alt+Shift 逐级尝试空闲组合,把首个空闲候选(规范化
+ * 形)写入 out 返回 1;spec 空闲则原样返回规范化形;三级全占用或 spec 非法
+ * 返回 0。occupied 写法非法不构成占用。 */
+int lyy_hotkey_escalate(const char *spec, const char *occupied, char *out,
+                        size_t cap);
 
 #endif /* LYY_KEYSYM_MAP_H_ */

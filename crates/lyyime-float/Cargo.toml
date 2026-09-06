@@ -10,6 +10,7 @@ name = "lyyime-float"
 path = "src/main.rs"
 
 [dependencies]
+lyyime-core = { path = "../lyyime-core" }
 gtk = { workspace = true }
 gdkx11 = "0.18"
 x11rb = { workspace = true }

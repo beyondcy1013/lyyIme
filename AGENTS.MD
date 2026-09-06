@@ -2,7 +2,8 @@
 
 Linux(XFCE + X11)下类似搜狗体验的五笔/拼音混合输入法,采用**双模式**设计:
 
-- **Mode A · ibus 引擎模式**:注册为标准 ibus 输入法引擎(Python + Rust FFI),与本机现有 ibus 1.5.29 集成。
+- **Mode A · ibus 引擎模式**:注册为标准 ibus 输入法引擎(Rust/zbus 直连 lyyime-core),与本机现有 ibus 1.5.29 集成。
+- **Mode C · 悬浮窗独立输入(lyyime-float)**:Rust/GTK3 悬浮窗,不依赖 ibus/fcitx,双发送模式(直输/粘贴),支持自定义短语(精确码→任意长度文本,动态变量)。
 - **Mode B · 独立外挂模式**:`lyyime-xim` 独立可执行程序(类 Windows 万能五笔外挂),最小 XIM server(IMdkit)+ GTK3 候选窗,**完全不依赖 ibus/fcitx 框架**——框架"底层总是出问题"时的兜底。架构决策与实证记录见 docs/RESEARCH.md §2(结论:被动 grab 回放在本机不可靠,弃用;XIM 为正统路线)。
 
 ## 核心需求(验收基准)
@@ -15,6 +16,8 @@ Linux(XFCE + X11)下类似搜狗体验的五笔/拼音混合输入法,采用**�
    - "**修复 Linux 中文输入法**"(诊断/修复环境变量、autostart、ibus 注册与重启、缓存清理);
    - "**输入法管理**":列出本机全部输入法引擎(ibus/fcitx5/lyyime 双模式),**安装(增)、卸载(删)、设为默认**,包级操作走 dnf,全程 dry-run 预览 + 二次确认,绝不误删 lyyime 自身或最后一个可用输入法。
 6. 目标系统=本机(openEuler 24.03 XFCE,root 与 beyondcy 双用户,当前 ibus 在跑)。安装路径以 `/usr/local` 与 `~/.local` 为主,不污染系统包管理。
+7. **AI 助手**:中文态输入 `/AI`+提示词,回车调用用户自定义大模型(OpenAI 兼容接口),回复直接上屏;配置在 `config.toml` 的 `[ai]` 段/设置窗 AI 页,未配置时功能零介入。交互合同见 docs/ARCHITECTURE.md §11。(2026-09-06 新增:共享客户端 ibus-engine/engine/lyyime_ai.py,双模式同合同;改动触发逻辑必须先读该节并同步更新单测/E2E。)
+8. **造词模式(2026-09-06 新增)**:上屏汉字后按造词热键(默认 Ctrl+=,`coin_hotkey` 可配置)把最近上屏的连续汉字组成五笔词组入库;`→`/`↑` 多选一字、`←`/`↓`/退格 少选一字,回车存词、Esc 取消;取码按五笔86 词组规则,存 `~/.local/share/lyyime/user_words.tsv`。交互合同见 docs/ARCHITECTURE.md §12;双模式同合同,改动必须先读该节并同步更新单测/E2E。
 
 ## 目录结构(文件所有权,并发 Agent 不得越界写)
 
@@ -30,8 +33,8 @@ crates/lyyime-core/       ★纯逻辑引擎:码表加载、五笔/拼音/英文
 crates/lyyime-dicttool/   ★词典管线 CLI:本地海峰86 sqlite → runtime TSV;下载转换拼音词组/英文词频。
 crates/lyyime-doctor/     ★诊断修复:lib(供 GUI 调用)+ bin CLI。检查/修复 IME 环境。
 xim/                      ★Mode B 独立外挂 lyyime-xim(C 语言:IMdkit(vendor)+GTK3+dlopen(liblyyime_core.so);候选窗/托盘/设置窗/工具菜单)。入口 spike:xim/spike/ 最小 XIM server 连通验证。
-floatapp/                 ★悬浮窗模式参考实现(Python+GTK3,零依赖即用,双发送模式直输/粘贴,已真机验证;经验文档见 docs/EXPERIENCE-INPUT-METHOD.md)
-ibus-engine/              ★Mode A:python 引擎(engine/lyyime.py)、component XML、install.sh/uninstall.sh。
+crates/lyyime-float/      ★Mode C:Rust/GTK3 悬浮窗独立输入(五笔86 码表+自定义短语+动态变量;直输/粘贴双发送;**项目规则:主程序一律 Rust,Python 仅可用于测试**;e2e 见 crates/lyyime-float/e2e_phrases.sh)
+ibus-engine/              ★Mode A:component XML、install.sh/uninstall.sh(引擎实现在 crates/lyyime-ibus,AI 客户端在 crates/lyyime-ai;**主程序一律 Rust,Python 仅可用于测试**)。
 dicts/                    原始词典缓存(大文件不入 git)与下载脚本 tools/。
 data/runtime/             dicttool 产物(wubi.tsv 等),构建时生成,不入 git。
 scripts/                  build.sh / test.sh / e2e.sh / install-all.sh
@@ -55,7 +58,7 @@ tests/e2e/                Xvfb + xdotool 端到端测试。
 
 ## 键盘行为规范(摘要,细则见 ARCHITECTURE.md)
 
-- 字母 a–z 进缓冲;`;` `'` 为二三重码选择;数字 1–9 选候选;Space 顶屏首选;Enter 上屏原始字母;Esc 清空;`-`/`=` 翻页;候选空时 Space/标点直通输出原始字母(中英混合)。
+- 字母 a–z 进缓冲;`;` `'` 为二三重码选择;数字 1–9 选候选;Space 顶屏首选;Enter 上屏原始字母;Esc 清空;`-`/`=` 翻页;候选空时 Space/标点直通输出原始字母(中英混合);造词热键与方向键见 ARCHITECTURE.md §12/核心需求 #8。
 - 中文态空缓冲时输出中文标点(可设置);英文态全部直通。
 - Shift 单击(按下后无其它键、随后释放)切换中英;Shift+字母 组合不触发切换。
 

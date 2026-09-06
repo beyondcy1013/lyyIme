@@ -22,13 +22,15 @@ case "$SCOPE" in
     run_cargo_test lyyime-core
     run_cargo_test lyyime-dicttool
     run_cargo_test lyyime-doctor
+    run_cargo_test lyyime-float
     ;;
   all)
     run_cargo_test lyyime-core
     run_cargo_test lyyime-dicttool
     run_cargo_test lyyime-doctor
+    run_cargo_test lyyime-float
     [ -f crates/lyyime-core/ffi-test.py ] && python3 crates/lyyime-core/ffi-test.py
-    [ -f tests/unit_ibus_engine.py ] && python3 tests/unit_ibus_engine.py
+    make -C xim test
     ;;
   *) echo "用法: $0 [core|unit|all]"; exit 1 ;;
 esac

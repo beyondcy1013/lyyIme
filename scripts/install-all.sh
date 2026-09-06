@@ -53,6 +53,11 @@ if [ "$DO_XIM" = 1 ]; then
   bash xim/install.sh
 fi
 
+if [ "${DO_FLOAT:-1}" = 1 ]; then
+  step "5.5/6 Mode C:安装 lyyime-float 悬浮窗(Rust)"
+  bash crates/lyyime-float/install.sh
+fi
+
 step "6/6 体检"
 "$PREFIX/bin/lyyime-doctor" check || true
 cat <<EOF
@@ -60,5 +65,6 @@ cat <<EOF
 安装完成。
   Mode A:ibus 托盘选择 "lyyIme 五笔拼音"(如未出现:ibus restart)
   Mode B:运行 lyyime-xim,并让应用使用 XMODIFIERS=@im=lyyime GTK_IM_MODULE=xim(lyyime-doctor 可写入会话环境)
+  Mode C:应用菜单 "lyyIme 悬浮窗输入"(lyyime-float, 兜底/免框架悬浮输入,支持自定义短语)
   修复/管理:lyyime-doctor check | fix --all | ime-list | ime-add <id>
 EOF

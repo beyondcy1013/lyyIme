@@ -125,6 +125,125 @@ int main(void)
           "数字写法保持且值更新");
     g_free(body);
 
+    /* 9. [ai] 段:带转义字符串读写回环 + ai_active 判定 */
+    fp = fopen(path, "w");
+    fprintf(fp,
+            "[ai]\n"
+            "enabled = true\n"
+            "api_base = \"https://api.deepseek.com/v1\"\n"
+            "api_key = \"sk-\\\"x\\\"\"\n"
+            "model = \"deepseek-chat\"\n"
+            "timeout = 45\n");
+    fclose(fp);
+    LyyConfig c4;
+    CHECK(lyy_config_load(path, &c4) == 0, "加载 [ai] 段");
+    CHECK(c4.ai_enabled == 1 &&
+              strcmp(c4.ai_api_base, "https://api.deepseek.com/v1") == 0 &&
+              strcmp(c4.ai_api_key, "sk-\"x\"") == 0 &&
+              strcmp(c4.ai_model, "deepseek-chat") == 0 &&
+              c4.ai_timeout == 45,
+          "[ai] 段字符串反转义与布尔/整数读取");
+    CHECK(lyy_config_ai_active(&c4) == 1, "启用+地址+模型配齐后 ai_active");
+    snprintf(c4.ai_model, sizeof(c4.ai_model), "glm-4.7");
+    CHECK(lyy_config_save(path, &c4) == 0, "[ai] 保存");
+    body = read_all(path);
+    CHECK(body && strstr(body, "model = \"glm-4.7\"") &&
+              strstr(body, "api_key = \"sk-\\\"x\\\"\"") &&
+              strstr(body, "[ai]"),
+          "[ai] 键在位更新且字符串值转义写回");
+    g_free(body);
+    LyyConfig c5;
+    lyy_config_load(path, &c5);
+    CHECK(strcmp(c5.ai_model, "glm-4.7") == 0, "[ai] 回读一致");
+
+    /* 10. 其它段内的同名键不得误配,原样保留 */
+    fp = fopen(path, "a");
+    fprintf(fp, "[other]\nenabled = 7\napi_base = \"x\"\n");
+    fclose(fp);
+    c4.ai_enabled = 0;
+    CHECK(lyy_config_save(path, &c4) == 0, "含 [other] 段保存");
+    body = read_all(path);
+    CHECK(body && strstr(body, "enabled = 7\n") &&
+              strstr(body, "api_base = \"x\"\n") &&
+              strstr(body, "enabled = false"),
+          "[other] 段同名键保留,[ai] 段在位更新");
+    g_free(body);
+
+    /* 11. 缺失 [ai] 键自动建段补齐(追加在已有内容之后,不插队文件头) */
+    fp = fopen(path, "w");
+    fprintf(fp, "page_size = 6 # 手写注释\n");
+    fclose(fp);
+    LyyConfig c6;
+    lyy_config_defaults(&c6);
+    /* 模拟真实流程:先 load(填行尾注释缓存)再改 AI 字段保存 */
+    CHECK(lyy_config_load(path, &c6) == 0 && c6.page_size == 6,
+          "建段用例先读原文件");
+    c6.ai_enabled = 1;
+    snprintf(c6.ai_api_base, sizeof(c6.ai_api_base), "http://127.0.0.1:9/v1");
+    snprintf(c6.ai_model, sizeof(c6.ai_model), "m1");
+    CHECK(lyy_config_save(path, &c6) == 0, "无 [ai] 段保存");
+    body = read_all(path);
+    char *ai_hdr = body ? strstr(body, "[ai]") : NULL;
+    CHECK(ai_hdr != NULL && strstr(ai_hdr, "enabled = true") &&
+              strstr(ai_hdr, "api_base = \"http://127.0.0.1:9/v1\"") &&
+              strstr(ai_hdr, "model = \"m1\"") &&
+              ai_hdr > strstr(body, "page_size = 6"),
+          "[ai] 段自动创建且位于文件尾、键齐全");
+    CHECK(body && strstr(body, "page_size = 6 # 手写注释"),
+          "已有行与注释原样保留");
+    g_free(body);
+    LyyConfig c7;
+    lyy_config_load(path, &c7);
+    CHECK(c7.ai_enabled == 1 && strcmp(c7.ai_model, "m1") == 0 &&
+              c7.page_size == 6,
+          "自动建段后回读一致");
+
+    /* 12. 保存产物为合法 TOML 形态(行尾注释带 #,历史缺陷归一) */
+    fp = fopen(path, "w");
+    fprintf(fp, "page_size = 5 候选数 1..9\n"); /* 历史无 # 写法 */
+    fclose(fp);
+    LyyConfig c8;
+    CHECK(lyy_config_load(path, &c8) == 0 && c8.page_size == 5,
+          "历史无#注释行可读");
+    CHECK(lyy_config_save(path, &c8) == 0, "归一保存");
+    body = read_all(path);
+    CHECK(body && strstr(body, "page_size = 5 # 候选数 1..9"),
+          "写回行尾注释带 #(tomllib 兼容)");
+    g_free(body);
+
+    /* 13. 造词热键(coin_hotkey):默认值 / 加载 / 保存回读 / 段前插入 */
+    CHECK(strcmp(c.coin_hotkey, "ctrl+equal") == 0, "coin_hotkey 默认 ctrl+equal");
+    fp = fopen(path, "w");
+    fprintf(fp, "[ai]\nmodel = \"m2\"\n"); /* 只有 [ai] 段的文件 */
+    fclose(fp);
+    LyyConfig c9;
+    CHECK(lyy_config_load(path, &c9) == 0 &&
+              strcmp(c9.coin_hotkey, "ctrl+equal") == 0,
+          "缺 coin_hotkey 时用默认");
+    snprintf(c9.coin_hotkey, sizeof(c9.coin_hotkey), "%s", "alt+comma");
+    CHECK(lyy_config_save(path, &c9) == 0, "保存自定义造词热键");
+    body = read_all(path);
+    CHECK(body != NULL, "保存产物可读");
+    /* 顶层键必须插到 [ai] 段头之前,否则下次读取会被当成段内键 */
+    CHECK(body && strstr(body, "coin_hotkey = \"alt+comma\"") &&
+              body < strstr(body, "coin_hotkey") &&
+              strstr(body, "[ai]") > strstr(body, "coin_hotkey") &&
+              strstr(body, "model = \"m2\""),
+          "coin_hotkey 插到 [ai] 段头之前且段内容保留");
+    g_free(body);
+    LyyConfig c10;
+    lyy_config_load(path, &c10);
+    CHECK(strcmp(c10.coin_hotkey, "alt+comma") == 0 &&
+              strcmp(c10.ai_model, "m2") == 0,
+          "造词热键回读一致(不落段内)");
+    /* 空字符串在钳制后回退默认 */
+    snprintf(c10.coin_hotkey, sizeof(c10.coin_hotkey), "%s", "");
+    CHECK(lyy_config_save(path, &c10) == 0, "保存空热键");
+    LyyConfig c11;
+    lyy_config_load(path, &c11);
+    CHECK(strcmp(c11.coin_hotkey, "ctrl+equal") == 0,
+          "空热键回退默认 ctrl+equal");
+
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);
 

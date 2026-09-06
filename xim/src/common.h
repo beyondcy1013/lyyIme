@@ -7,6 +7,7 @@
  *   core_ffi.c        dlopen liblyyime_core.so(FFI 合同 §3 全符号)
  *   effects_json.c    §3 JSON 效果流迷你解析器(固定 schema)
  *   keysym_map.c      keysym → LKey 映射(§6 按键行为)
+ *   ai_capture.c      /AI 触发会话(采集提示词,子进程调 lyyime_ai.py 上屏)
  *   candidate_window.c GTK3 override-redirect 候选窗
  *   tray.c            托盘与工具菜单
  *   settings.c        设置对话框(GtkBuilder)
@@ -15,6 +16,7 @@
 #ifndef LYY_COMMON_H_
 #define LYY_COMMON_H_
 
+#include "ai_capture.h"
 #include "candidate_window.h"
 #include "config.h"
 #include "core_ffi.h"
@@ -26,7 +28,7 @@
 #include <limits.h>
 
 #define LYY_APP_NAME "lyyime-xim"
-#define LYY_APP_VERSION "0.1.0"
+#define LYY_APP_VERSION "0.3.0"
 #define LYY_XIM_SERVER_NAME "lyyime"
 
 /* 前向声明:xim_server.h 等头文件引用 App 指针,定义在文件尾 */
@@ -65,9 +67,16 @@ struct _App {
     CandidateWindow candwin;
     Tray tray;
     SettingsUi settings;
+    AiCapture ai;                  /* /AI 触发会话(见 ai_capture.h) */
     GMainLoop *loop;               /* GLib 主循环 */
     guint shift_timer_id;          /* Shift 单击判定时间窗(280ms) */
     int shift_pending;             /* Shift 已按下待判定(与焦点 IC 同步) */
+    guint notice_timer_id;         /* notice 提示自动清除定时器(4s) */
+    struct {                       /* 造词热键(合同 §12,coin_hotkey 解析结果) */
+        uint32_t mods;             /* XCB_MOD_MASK_* 组合 */
+        uint32_t sym;              /* 目标 keysym */
+        int ok;                    /* 1=解析成功(否则不拦截) */
+    } hotkey_coin;
     int settings_requested;        /* SIGUSR1 唤起 → 主循环里弹设置窗 */
     int quit_requested;            /* SIGTERM/SIGINT → 优雅退出 */
 };

@@ -25,6 +25,15 @@ install -D -m 0644 "$XIM_DIR/res/zh.svg" \
 install -D -m 0644 "$XIM_DIR/res/settings.ui" "$PREFIX/share/lyyime/res/settings.ui"
 install -D -m 0644 "$XIM_DIR/res/candidate.css" "$PREFIX/share/lyyime/res/candidate.css"
 
+# AI 助手客户端(Rust 二进制 lyyime-ai,Mode B 以子进程调用)
+AI_HELPER_SRC="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-ai"
+if [ -f "$AI_HELPER_SRC" ]; then
+    install -D -m 0755 "$AI_HELPER_SRC" "$PREFIX/bin/lyyime-ai"
+    echo "== 已安装 AI 助手:$PREFIX/bin/lyyime-ai =="
+else
+    echo "== 警告:未找到 $AI_HELPER_SRC(先 scripts/build.sh),/AI 功能不可用 ==" >&2
+fi
+
 # 主启动器(应用菜单/桌面;重复点击=唤起已运行实例的设置窗)
 install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim.desktop" <<DESKTOP
 [Desktop Entry]

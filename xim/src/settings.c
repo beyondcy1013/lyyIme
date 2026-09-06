@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ai_capture.h"
 #include "common.h"
 
 /* ---- 构建控件状态 ←→ 配置 ---- */
@@ -26,6 +27,16 @@ static void ui_from_config(SettingsUi *ui)
                                  c->commit_after_four);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_autostart),
                                  c->autostart);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_coin_hotkey), c->coin_hotkey);
+    /* AI 助手([ai] 段) */
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_ai_enabled),
+                                 c->ai_enabled);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_ai_base), c->ai_api_base);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_ai_key), c->ai_api_key);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_ai_model), c->ai_model);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_ai_prompt), c->ai_system_prompt);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_ai_timeout),
+                              c->ai_timeout);
 }
 
 static void config_from_ui(SettingsUi *ui, LyyConfig *c)
@@ -46,6 +57,25 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_commit_four));
     c->autostart =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_autostart));
+    snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_coin_hotkey)));
+    g_strstrip(c->coin_hotkey);
+    /* AI 助手([ai] 段);字段越界由 config 钳制语义兜底 */
+    c->ai_enabled =
+        gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_ai_enabled));
+    snprintf(c->ai_api_base, sizeof(c->ai_api_base), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_ai_base)));
+    g_strstrip(c->ai_api_base);
+    snprintf(c->ai_api_key, sizeof(c->ai_api_key), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_ai_key)));
+    g_strstrip(c->ai_api_key);
+    snprintf(c->ai_model, sizeof(c->ai_model), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_ai_model)));
+    g_strstrip(c->ai_model);
+    snprintf(c->ai_system_prompt, sizeof(c->ai_system_prompt), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_ai_prompt)));
+    c->ai_timeout =
+        (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_ai_timeout));
 }
 
 static void on_ok(GtkWidget *widget, gpointer user_data)
@@ -64,14 +94,17 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     if (lyy_config_apply_autostart(c.autostart) != 0)
         lyy_log(&app->log, "WARN 开机自启项写入失败");
 
-    /* 保存即生效:core 引擎重建(重读词库与配置)+ 候选窗字体即时刷新 */
+    /* 保存即生效:core 引擎重建(重读词库与配置)+ 候选窗字体即时刷新;
+     * AI 配置由 ai_capture 每键实时读取,同样立即生效 */
     lyy_engine_reload(app);
+    lyy_app_reload_hotkey(app); /* 造词热键即时生效 */
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d font=%d autostart=%d",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d font=%d autostart=%d ai=%d base=%s model=%s coin=%s",
             c.page_size, c.mixed_english, c.auto_commit_english,
             c.chinese_punct, c.learning, c.commit_after_four, c.font_size,
-            c.autostart);
+            c.autostart, c.ai_enabled, c.ai_api_base, c.ai_model,
+            c.coin_hotkey);
     gtk_widget_hide(ui->window);
 }
 
@@ -81,6 +114,134 @@ static void on_cancel(GtkWidget *widget, gpointer user_data)
     SettingsUi *ui = user_data;
     ui_from_config(ui); /* 还原显示 */
     gtk_widget_hide(ui->window);
+}
+
+/* ---- AI "测试连接":子进程执行 lyyime_ai.py --check,完成后弹窗汇报 ---- */
+typedef struct {
+    SettingsUi *ui;
+    GString *out;
+    guint io_id;
+    GIOChannel *ch;
+} AiCheck;
+
+static void ai_check_drain(AiCheck *ck)
+{
+    gchar tmp[4096];
+    gsize n = 0;
+    for (;;) {
+        GIOStatus st =
+            g_io_channel_read_chars(ck->ch, tmp, sizeof(tmp), &n, NULL);
+        if (st != G_IO_STATUS_NORMAL || n == 0)
+            break;
+        g_string_append_len(ck->out, tmp, (gssize)n);
+    }
+}
+
+static void ai_check_finish(AiCheck *ck, gboolean ok)
+{
+    SettingsUi *ui = ck->ui;
+    ui->ai_test_busy = 0;
+    if (ck->io_id) {
+        g_source_remove(ck->io_id);
+        ck->io_id = 0;
+    }
+    ai_check_drain(ck);
+    if (ck->ch) {
+        g_io_channel_unref(ck->ch);
+        ck->ch = NULL;
+    }
+    gchar *msg = g_strstrip(g_strdup(ck->out->str));
+    gchar *body = ok
+                      ? g_strdup_printf("AI 连接成功\n\n%s",
+                                        msg[0] ? msg : "(无输出)")
+                      : g_strdup_printf(
+                            "AI 连接失败\n\n%s",
+                            msg[0] ? msg
+                                   : "(无输出,详见 ~/.local/share/lyyime/"
+                                     "logs/xim.log)");
+    GtkWidget *dlg = gtk_message_dialog_new(
+        GTK_WINDOW(ui->window), GTK_DIALOG_MODAL,
+        ok ? GTK_MESSAGE_INFO : GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s",
+        body);
+    gtk_window_set_title(GTK_WINDOW(dlg), "lyyIme AI 连接测试");
+    gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+    g_free(body);
+    g_free(msg);
+    g_string_free(ck->out, TRUE);
+    g_free(ck);
+}
+
+static void on_ai_check_exit(GPid pid, gint status, gpointer user_data)
+{
+    AiCheck *ck = user_data;
+    g_spawn_close_pid(pid);
+    ai_check_finish(ck, g_spawn_check_wait_status(status, NULL));
+}
+
+static gboolean on_ai_check_output(GIOChannel *ch, GIOCondition cond,
+                                   gpointer user_data)
+{
+    (void)cond;
+    AiCheck *ck = user_data;
+    gchar tmp[4096];
+    gsize n = 0;
+    for (;;) {
+        GIOStatus st =
+            g_io_channel_read_chars(ch, tmp, sizeof(tmp), &n, NULL);
+        if (st != G_IO_STATUS_NORMAL || n == 0)
+            break;
+        g_string_append_len(ck->out, tmp, (gssize)n);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void on_ai_test(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    SettingsUi *ui = user_data;
+    if (ui->ai_test_busy)
+        return;
+    const char *helper = lyy_ai_find_helper();
+    if (!helper) {
+        GtkWidget *dlg = gtk_message_dialog_new(
+            GTK_WINDOW(ui->window), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+            GTK_BUTTONS_OK,
+            "未找到 AI 助手程序 lyyime-ai。\n"
+            "请升级 lyyIme 组件(xim/install.sh 或 scripts/install-all.sh)。");
+        gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
+        return;
+    }
+    /* 测试读取的是"已保存"的配置(按钮文案已注明先保存);--check 会
+     * 打印配置摘要并做一次最小连通请求,失败原因原样展示。 */
+    /* 助手须可直接执行(Rust 二进制 lyyime-ai;与 ai_capture.c 同规则) */
+    gchar *argv[] = {(gchar *)helper, (gchar *)"--check", NULL};
+    GPid pid = 0;
+    gint outfd = -1;
+    GError *err = NULL;
+    AiCheck *ck = g_new0(AiCheck, 1);
+    ck->ui = ui;
+    ck->out = g_string_new("");
+    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL,
+                                  NULL, &pid, NULL, &outfd, NULL, &err)) {
+        GtkWidget *dlg = gtk_message_dialog_new(
+            GTK_WINDOW(ui->window), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+            GTK_BUTTONS_OK, "启动测试失败:%s",
+            err ? err->message : "未知错误");
+        gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
+        g_clear_error(&err);
+        g_string_free(ck->out, TRUE);
+        g_free(ck);
+        return;
+    }
+    ui->ai_test_busy = 1;
+    ck->ch = g_io_channel_unix_new(outfd);
+    g_io_channel_set_flags(ck->ch, G_IO_FLAG_NONBLOCK, NULL);
+    ck->io_id = g_io_add_watch(ck->ch, G_IO_IN | G_IO_HUP | G_IO_ERR,
+                               on_ai_check_output, ck);
+    g_child_watch_add(pid, on_ai_check_exit, ck);
 }
 
 void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
@@ -135,11 +296,29 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         gtk_builder_get_object(builder, "chk_commit_after_four"));
     ui->chk_autostart =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_autostart"));
+    ui->ent_coin_hotkey =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_coin_hotkey"));
+    ui->chk_ai_enabled =
+        GTK_WIDGET(gtk_builder_get_object(builder, "chk_ai_enabled"));
+    ui->ent_ai_base =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_ai_base"));
+    ui->ent_ai_key =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_ai_key"));
+    ui->ent_ai_model =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_ai_model"));
+    ui->ent_ai_prompt =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_ai_prompt"));
+    ui->spin_ai_timeout =
+        GTK_WIDGET(gtk_builder_get_object(builder, "spin_ai_timeout"));
+    ui->btn_ai_test =
+        GTK_WIDGET(gtk_builder_get_object(builder, "btn_ai_test"));
 
     if (!ui->window || !ui->spin_page || !ui->spin_font || !ui->chk_mixed ||
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
-        !ui->chk_commit_four ||
-        !ui->chk_autostart) {
+        !ui->chk_commit_four || !ui->chk_autostart || !ui->chk_ai_enabled ||
+        !ui->ent_ai_base || !ui->ent_ai_key || !ui->ent_ai_model ||
+        !ui->ent_ai_prompt || !ui->spin_ai_timeout || !ui->btn_ai_test ||
+        !ui->ent_coin_hotkey) {
         lyy_log(&lyy_app()->log, "ERROR 设置界面缺少控件(%s)", file);
         g_object_unref(builder);
         return;
@@ -153,6 +332,7 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         g_signal_connect(ok, "clicked", G_CALLBACK(on_ok), ui);
     if (cancel)
         g_signal_connect(cancel, "clicked", G_CALLBACK(on_cancel), ui);
+    g_signal_connect(ui->btn_ai_test, "clicked", G_CALLBACK(on_ai_test), ui);
 
     ui->built = 1;
     ui_from_config(ui);

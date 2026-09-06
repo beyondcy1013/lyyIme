@@ -13,7 +13,7 @@
 <component>
 	<name>org.freedesktop.IBus.Lyyime</name>
 	<description>lyyIme Component</description>
-	<exec>@ENGINE_DIR@/lyyime.py --ibus</exec>
+	<exec>@ENGINE_EXEC@ --ibus</exec>
 	<version>0.1.0</version>
 	<author>lyyIme contributors</author>
 	<license>GPLv3</license>

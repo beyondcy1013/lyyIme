@@ -51,4 +51,11 @@ void lyy_xim_set_enabled(App *app, int enabled);
 /* 应用模式指示刷新(托盘图标 文 中/EN) */
 void lyy_app_update_mode_ui(App *app);
 
+/* 造词热键(合同 §12):从 app->config.coin_hotkey 重新解析
+ * (启动与设置保存后调用;解析失败回退默认 Ctrl+= 并写日志) */
+void lyy_app_reload_hotkey(App *app);
+
+/* 辅助区临时提示(notice 效果:造词结果等),约 4 秒后自动清除 */
+void lyy_show_notice(App *app, const char *text);
+
 #endif /* LYY_XIM_SERVER_H_ */

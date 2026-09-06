@@ -27,6 +27,7 @@ typedef enum {
     LYY_EFF_CANDS,        /* {"t":"cands","n":..,"page":..,"pages":..} */
     LYY_EFF_PASS,         /* {"t":"pass"} 宿主原样放行该键 */
     LYY_EFF_CONSUMED,     /* {"t":"consumed"} 吞掉无可见效果 */
+    LYY_EFF_NOTICE,       /* {"t":"notice","s":...} 辅助区提示(造词结果等) */
     LYY_EFF_MODE,         /* {"t":"mode","m":0|1} 中英指示 */
 } LyyEffKind;
 

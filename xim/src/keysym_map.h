@@ -28,4 +28,17 @@ void lyy_keysym_map(uint32_t keysym, int *key, uint32_t *chr);
 /* Shift_L / Shift_R(触发键,两个 Shift,任务书 §8) */
 int lyy_keysym_is_shift(uint32_t keysym);
 
+/* ---- 造词热键(合同 §12;与 Mode A ibus-engine/engine/lyyime.py 的
+ * parse_hotkey 同一规格,两端保持一致)----
+ * 写法:`ctrl+equal` —— 修饰(ctrl/alt/super/shift,至少一个)+ 键名
+ * (单字符字面量、字母/数字、f1-f24、常用名、0x 十六进制 keysym)。
+ * 解析失败返回 0(调用方回退默认 ctrl+equal);成功返回 1 并把修饰位组合
+ * (XCB_MOD_MASK_*,至少一位置位)与 keysym 分别写入出参。 */
+int lyy_hotkey_parse(const char *spec, uint32_t *mods, uint32_t *keysym);
+
+/* 事件修饰态(mods)与 keysym 是否精确命中热键:要求修饰位完全一致
+ * (Lock/NumLock 等无关位由调用方在 mods 里先行剔除)。 */
+int lyy_hotkey_match(uint32_t mods, uint32_t keysym, uint32_t hotkey_mods,
+                     uint32_t hotkey_keysym);
+
 #endif /* LYY_KEYSYM_MAP_H_ */

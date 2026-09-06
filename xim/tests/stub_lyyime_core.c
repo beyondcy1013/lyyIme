@@ -37,7 +37,17 @@ typedef struct {
     int mode;     /* 0=中文 1=英文 */
     int page;     /* 当前页(0 基) */
     int pages;
+    int coin;     /* 造词模式(合同 §12):0=未进入;2..4=选长(演示串"你好好吗") */
+    int commits;  /* 已发生上屏次数(造词历史非空判定) */
 } StubEng;
+
+/* 造词演示串(每字 3 字节 UTF-8):选长 n 的选区 = 前 n 字 */
+static const char *STUB_COIN_DEMO = "\xE4\xBD\xA0\xE5\xA5\xBD\xE5\xA5\xBD\xE5\x90\x97";
+
+static int coin_bytes(int n)
+{
+    return n * 3;
+}
 
 static const char *g_nihao_cands[5] = { "你好", "你号", "拟好", "泥嚎", "倪豪" };
 
@@ -110,6 +120,7 @@ void lyyime_reset(void *eng)
     e->buf[0] = '\0';
     e->page = 0;
     e->pages = 0;
+    e->coin = 0; /* 焦点切换/清缓冲均取消造词模式 */
 }
 
 int lyyime_mode(void *eng)
@@ -122,6 +133,12 @@ int lyyime_toggle_mode(void *eng)
     StubEng *e = eng;
     e->mode = !e->mode;
     return e->mode;
+}
+
+int lyyime_set_commit_after_four(void *eng, int enabled)
+{
+    (void)eng;
+    return enabled ? 1 : 0;
 }
 
 /* 效果 JSON 追加小工具:返回写入后总长(不含 \0),截断返回 -1 */
@@ -185,7 +202,56 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
     jb_init(&t, tmp, (int)sizeof(tmp));
     jb_append(&t, "[");
 
+    /* ---- 造词模式(合同 §12):桩库演示语义,优先于普通路径 ----
+     * 选区固定取演示串前 n 字(2..4);效果形态与真核心一致。 */
+    if (e->coin > 0) {
+        int grow = (key_id == 13 || key_id == 14); /* →/↑ 多选一字 */
+        int shrink = (key_id == 12 || key_id == 15 || key_id == 4);
+        if (key_id == 11) { /* 热键重按:重置选长 */
+            e->coin = 2;
+        } else if (grow) {
+            if (e->coin < 4)
+                e->coin++;
+        } else if (shrink) {
+            if (e->coin > 2)
+                e->coin--;
+        } else if (key_id == 3 || key_id == 2) { /* Enter/Space 存词 */
+            e->coin = 0;
+            jb_printf(&t, "{\"t\":\"notice\",\"s\":\"已造词:你好(wqvb),可直接用该编码打出\"},");
+            jb_append(&t, "{\"t\":\"preedit\"}");
+            goto finish;
+        } else if (key_id == 5) { /* Esc 取消 */
+            e->coin = 0;
+            jb_append(&t, "{\"t\":\"consumed\"},{\"t\":\"preedit\"}");
+            goto finish;
+        } else { /* 其余键:退出造词,继续普通路径 */
+            e->coin = 0;
+        }
+        if (e->coin > 0) {
+            jb_printf(&t, "{\"t\":\"preedit\",\"s\":\"造词:%.*s\"},",
+                      coin_bytes(e->coin), STUB_COIN_DEMO);
+            jb_printf(&t,
+                      "{\"t\":\"cands\",\"n\":1,\"page\":0,\"pages\":1},");
+            goto finish;
+        }
+    }
+
     switch (key_id) {
+    case 11: { /* COIN:进入造词(需有上屏历史;英文态直通) */
+        if (e->mode != 0) {
+            jb_append(&t, "{\"t\":\"pass\"}");
+        } else if (e->commits == 0) {
+            jb_printf(&t, "{\"t\":\"notice\",\"s\":\"造词:还没有可造词的上屏汉字,请先输入中文\"},");
+            jb_append(&t, "{\"t\":\"consumed\"}");
+        } else {
+            e->coin = 2;
+            jb_printf(&t, "{\"t\":\"preedit\",\"s\":\"造词:%.*s\"},",
+                      coin_bytes(e->coin), STUB_COIN_DEMO);
+            jb_printf(&t,
+                      "{\"t\":\"cands\",\"n\":1,\"page\":0,\"pages\":1},");
+        }
+        break;
+    }
     case 0: { /* CHAR */
         if (e->len < 12 && chr >= 'a' && chr <= 'z') {
             e->buf[e->len++] = (char)chr;
@@ -211,6 +277,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
             e->len = 0;
             e->buf[0] = '\0';
             e->page = 0;
+            e->commits++;
         } else {
             jb_append(&t, "{\"t\":\"pass\"}");
         }
@@ -225,6 +292,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
             e->len = 0;
             e->buf[0] = '\0';
             e->page = 0;
+            e->commits++;
         } else {
             jb_append(&t, "{\"t\":\"pass\"}");
         }
@@ -237,6 +305,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
             e->len = 0;
             e->buf[0] = '\0';
             e->page = 0;
+            e->commits++;
         } else {
             jb_append(&t, "{\"t\":\"pass\"}");
         }
@@ -314,6 +383,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
         break;
     }
 
+finish:
     /* 去掉末尾悬挂逗号(各分支按需追加逗号,统一在收口前清理) */
     if (t.len > 0 && tmp[t.len - 1] == ',') {
         tmp[t.len - 1] = '\0';
@@ -335,7 +405,19 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
 int lyyime_cand(void *eng, int i, char *buf, int cap)
 {
     StubEng *e = eng;
-    if (i < 0 || i >= 5 || e->len == 0)
+    if (i < 0)
+        return -1;
+    if (e->coin > 0) { /* 造词:单候选 = 选区文本 */
+        if (i >= 1)
+            return -1;
+        int need = coin_bytes(e->coin) + 1;
+        if (cap < need)
+            return -need;
+        snprintf(buf, (size_t)cap, "%.*s", coin_bytes(e->coin),
+                 STUB_COIN_DEMO);
+        return need;
+    }
+    if (i >= 5 || e->len == 0)
         return -1;
     char word[64];
     cand_text(e, i, word, (int)sizeof(word));
@@ -349,7 +431,19 @@ int lyyime_cand(void *eng, int i, char *buf, int cap)
 int lyyime_cand_comment(void *eng, int i, char *buf, int cap)
 {
     StubEng *e = eng;
-    if (i < 0 || i >= 5 || e->len == 0)
+    if (i < 0)
+        return -1;
+    if (e->coin > 0) { /* 造词:注释 = 演示编码 */
+        if (i >= 1)
+            return -1;
+        const char *code = "wqvb";
+        int need = (int)strlen(code) + 1;
+        if (cap < need)
+            return -need;
+        memcpy(buf, code, (size_t)need);
+        return need;
+    }
+    if (i >= 5 || e->len == 0)
         return -1;
     char c[128];
     cand_comment_of(e, i, c, (int)sizeof(c));

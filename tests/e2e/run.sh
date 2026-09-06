@@ -18,7 +18,9 @@ fail() { KEEP=1; echo "RUN-FAIL: $*"; exit 1; }
 
 echo "== [0/6] 构建 =="
 ( cd "$ROOT" && export CARGO_TARGET_DIR=/data/cargo-target/local/lyyIme \
-  && cargo build -p lyyime-core --release >/dev/null 2>&1 )
+  && cargo build -p lyyime-core --release >/dev/null 2>&1 \
+  && cargo build -p lyyime-ibus --release >/dev/null 2>&1 \
+  && cargo build -p lyyime-ai --release >/dev/null 2>&1 )
 [[ -f "$CORE_LIB" ]] || fail "真库不存在:$CORE_LIB(先 cargo build -p lyyime-core --release)"
 [[ -f "$DATA_DIR/meta.json" ]] || fail "词库不存在:$DATA_DIR(先 dicttool convert/fetch)"
 make -C "$ROOT/xim" all >/dev/null
@@ -37,8 +39,21 @@ cleanup_work() {
     done
     # 注意:绝不全局 pkill ibus-daemon(会误杀真实会话)。
     # 隔离会话的 ibus 进程随 dbus-run-session 的 session bus 退出而自然消亡。
-    wait 2>/dev/null || true
+    # 只 wait 已知 pid:裸 wait 会等住常驻的 mock AI 服务(见 stop_ai_mock)。
+    local wpids=()
+    for p in "${CLIENT_PID:-}" "${XIM_PID:-}" "${IBUS_PID:-}" "${XVFB_PID:-}"; do
+        [[ -n "$p" ]] && wpids+=("$p")
+    done
+    ((${#wpids[@]})) && wait "${wpids[@]}" 2>/dev/null || true
     [[ $KEEP = 1 && -n "${WORK:-}" ]] && echo "[run] 现场保留:$WORK" || rm -rf "${WORK:-/nonexistent}"
+}
+stop_ai_mock() { # mock 跨两个 Part 复用,只在最终退出回收(由 trap 调)
+    [[ -n "${AI_MOCK_PID:-}" ]] && kill "$AI_MOCK_PID" 2>/dev/null || true
+    rm -rf "${AI_WORK:-/nonexistent}"
+}
+cleanup_all() {
+    cleanup_work
+    stop_ai_mock
 }
 start_xvfb() { # $1=display
     local d="$1"
@@ -47,6 +62,24 @@ start_xvfb() { # $1=display
     Xvfb ":$d" -screen 0 1024x768x24 -nolisten tcp & XVFB_PID=$!
     for _ in $(seq 1 50); do [[ -S /tmp/.X11-unix/X$d ]] && return 0; sleep 0.1; done
     fail "Xvfb :$d 启动失败"
+}
+# ---- /AI 功能公共件:mock OpenAI 服务 + 隔离 HOME 的 [ai] 配置 ----
+AI_WORK="$(mktemp -d /tmp/lyyime-ai.XXXXXX)"
+AI_DUMP="$AI_WORK/dump.jsonl"; AI_PORT_FILE="$AI_WORK/port"
+MOCK_AI_DUMP="$AI_DUMP" python3 "$ROOT/tests/e2e/mock_ai_server.py" \
+    --port-file "$AI_PORT_FILE" >"$AI_WORK/mock.log" 2>&1 & AI_MOCK_PID=$!
+for _ in $(seq 1 50); do [[ -s "$AI_PORT_FILE" ]] && break; sleep 0.1; done
+[[ -s "$AI_PORT_FILE" ]] || fail "mock AI 服务未就绪"
+AI_PORT="$(cat "$AI_PORT_FILE")"
+write_ai_config() { # $1=HOME(隔离);开启 AI 指向 mock 服务
+    mkdir -p "$1/.config/lyyime"
+    cat > "$1/.config/lyyime/config.toml" <<EOF
+[ai]
+enabled = true
+api_base = "http://127.0.0.1:$AI_PORT/v1"
+api_key = "sk-e2e"
+model = "e2e-model"
+EOF
 }
 wait_buffer() { # $1=期望 $2=超时秒
     local want="$1" timeout="${2:-10}" i
@@ -64,13 +97,17 @@ focus_client() {
     xdotool windowfocus "$wid"; sleep 0.4
 }
 
-trap cleanup_work EXIT
+trap cleanup_all EXIT
 
 ############################################
 echo "== [1/6] Mode B:真库 + 真实词库(Xvfb :97) =="
 new_work
 export DISPLAY=:97 XMODIFIERS=@im=lyyime GTK_IM_MODULE=xim
 export LANG=zh_CN.utf8 LC_ALL=zh_CN.utf8
+export LYYIME_DATA_DIR="$DATA_DIR" LYYIME_CORE_LIB="$CORE_LIB"
+export LYYIME_AI_HELPER="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-ai"
+export LYYIME_RES_DIR="$ROOT/xim/res"   # e2e 测仓库自带设置界面/样式
+write_ai_config "$HOME"
 start_xvfb 97
 
 LYYIME_CORE_LIB="$CORE_LIB" LYYIME_DATA_DIR="$DATA_DIR" "$XIM_BIN" >"$WORK/xim.stdout" 2>&1 &
@@ -101,15 +138,38 @@ xdotool key Shift_L; sleep 0.6
 xdotool type --delay 80 "zhongguo"; sleep 0.4; xdotool key space
 wait_buffer "你好theabc中国" 8
 echo "PASS B4:Shift 回中文,zhongguo 顶屏 中国"
+
+# ---- /AI:触发 → 提示词采集(拉丁) → 回车 → mock 服务回复上屏 ----
+xdotool type --delay 80 "/ai"; sleep 0.4
+xdotool type --delay 80 "hi"; sleep 0.4
+xdotool key Return
+wait_buffer "AI回复OK" 20
+grep -q '"path": "/v1/chat/completions"' "$AI_DUMP" || fail "mock 未收到请求"
+grep -q '"content": "hi"' "$AI_DUMP" || fail "提示词内容不符:$(cat "$AI_DUMP")"
+grep -q 'Bearer sk-e2e' "$AI_DUMP" || fail "鉴权头未携带"
+echo "PASS B5:/AI hi → mock 回复 AI回复OK 已上屏"
 echo "Mode B 最终缓冲: $(cat "$BUFFER")"
 kill "$CLIENT_PID" "$XIM_PID" 2>/dev/null || true
-cleanup_work; trap cleanup_work EXIT
+cleanup_work; trap cleanup_all EXIT
 
 ############################################
 echo "== [2/6] Mode A:ibus 引擎(隔离会话,Xvfb :96) =="
 new_work
 export DISPLAY=:96 GTK_IM_MODULE=ibus XMODIFIERS=@im=ibus
 export LYYIME_DATA_DIR="$DATA_DIR" LYYIME_CORE_LIB="$CORE_LIB"
+write_ai_config "$HOME"
+# 把仓库引擎同步进隔离 HOME 并注册组件:否则 ibus 会拉起系统安装位的旧引擎,
+# e2e 就测不到本次代码(含 /AI)。ibus 1.5.29 只认 IBUS_COMPONENT_PATH 覆盖。
+ENGINE_HOME="$HOME/.local/share/lyyime/ibus/engine"
+ICON_HOME="$HOME/.local/share/lyyime/ibus/icons"
+mkdir -p "$ENGINE_HOME" "$ICON_HOME" "$HOME/.local/share/ibus/component"
+install -m 755 "${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/ibus-engine-lyyime" "$ENGINE_HOME/"
+install -m 644 "$ROOT"/ibus-engine/icons/*.svg "$ICON_HOME/"
+sed -e "s|@ENGINE_EXEC@|$ENGINE_HOME/ibus-engine-lyyime|g" -e "s|@ICON_DIR@|$ICON_HOME|g" \
+    -e "s|@SETUP@|/nonexistent|g" "$ROOT/ibus-engine/lyyime.xml" \
+    > "$HOME/.local/share/ibus/component/lyyime.xml"
+export IBUS_COMPONENT_PATH="$HOME/.local/share/ibus/component:/usr/share/ibus/component"
+export LYYIME_DEBUG=1   # 引擎 DEBUG 日志(e2e 排障用)
 start_xvfb 96
 
 # 注意:VAR=x bash -c '...' 形式传的是位置参数而非环境变量,内层 set -u 会炸;
@@ -133,10 +193,13 @@ dbus-run-session -- bash -c '
     ibus list-engine 2>/dev/null | grep -q "lyyime - " || { echo "RUN-FAIL: 引擎未注册"; exit 1; }
     gsettings set org.freedesktop.ibus.general preload-engines "['\''lyyime'\'']" 2>/dev/null || \
         dconf write /desktop/ibus/general/preload-engines "['\''lyyime'\'']" || true
-    # 注:ibus engine <name> 的返回码存在竞态误报(设置应答先于引擎工厂完成),
-    # 以其后轮询 ibus engine 查询结果为准。
-    ibus engine lyyime 2>/dev/null || true
-    for _ in $(seq 1 50); do [[ "$(ibus engine 2>/dev/null)" == "lyyime" ]] && break; sleep 0.2; done
+    # 注:ibus engine <name> 的返回码存在竞态误报(设置应答先于引擎工厂完成,
+    # 预载与切换并发时还会瞬时取消);带重试切换,以查询结果为准。
+    for _ in $(seq 1 10); do
+        ibus engine lyyime 2>/dev/null || true
+        [[ "$(ibus engine 2>/dev/null)" == "lyyime" ]] && break
+        sleep 1
+    done
     [[ "$(ibus engine 2>/dev/null)" == "lyyime" ]] || { echo "RUN-FAIL: 引擎状态未同步"; exit 1; }
     echo "[run] Mode A 引擎已激活"
     "$CLIENT" "$BUFFER" 60 >"$WORK/client.log" 2>&1 &
@@ -151,11 +214,20 @@ dbus-run-session -- bash -c '
     xdotool key Shift_L; sleep 0.6
     xdotool type --delay 90 "ok"
     sleep 1
+    # ---- /AI:先单击 Shift 回中文,再触发 AI(须在内层会话存活时输入) ----
+    xdotool key Shift_L; sleep 0.8
+    xdotool type --delay 90 "/ai"; sleep 0.4
+    xdotool type --delay 90 "hi"; sleep 0.4
+    xdotool key Return
+    sleep 1
 '
 wait_buffer "你好ok" 10
 echo "PASS A1:ibus 引擎 nihao+space → 你好,Shift 后 ok 直通"
+wait_buffer "AI回复OK" 20
+grep -q '"content": "hi"' "$AI_DUMP" || fail "Mode A 提示词内容不符:$(cat "$AI_DUMP")"
+echo "PASS A2:/AI hi → mock 回复 AI回复OK 已上屏"
 echo "Mode A 最终缓冲: $(cat "$BUFFER")"
 
 ############################################
 echo "== [3/6] 汇总 =="
-echo "E2E-ALL-PASS: Mode B(真库 4 断言)+ Mode A(ibus 真会话)全链路通过 ✅"
+echo "E2E-ALL-PASS: Mode B(5 断言)+ Mode A(2 断言)+ /AI 全链路通过 ✅"

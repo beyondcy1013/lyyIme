@@ -26,6 +26,12 @@ enum {
     LKEY_PUNCT = 8,  /* 标点原字符(chr=半角字符) */
     LKEY_SHIFTPRESS = 9,
     LKEY_OTHER = 10,
+    /* 造词(合同 §12):热键与方向键 */
+    LKEY_COIN = 11,  /* 造词热键(默认 Ctrl+=,coin_hotkey 可配置) */
+    LKEY_LEFT = 12,  /* 方向键 ←:造词少选一字(非造词模式同 OTHER) */
+    LKEY_RIGHT = 13, /* 方向键 →:造词多选一字 */
+    LKEY_UP = 14,    /* 方向键 ↑:造词多选一字 */
+    LKEY_DOWN = 15,  /* 方向键 ↓:造词少选一字 */
 };
 
 typedef struct CoreFfi {
@@ -37,6 +43,7 @@ typedef struct CoreFfi {
     void (*lyyime_reset)(void *eng);
     int (*lyyime_mode)(void *eng);                    /* 0=中文 1=英文 */
     int (*lyyime_toggle_mode)(void *eng);             /* 返回新 mode */
+    int (*lyyime_set_commit_after_four)(void *eng, int enabled); /* 返回生效值 */
     int64_t (*lyyime_process_key)(void *eng, int key_id, uint32_t chr,
                                   char *buf, int64_t buf_cap);
     int (*lyyime_cand)(void *eng, int i, char *buf, int cap);

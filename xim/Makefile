@@ -45,7 +45,8 @@ VENDOR_LIB  := $(VENDOR_DIR)/libxcb-imdkit.a
 
 SRC_DIR := $(ROOT_DIR)/src
 APP_SRCS := main.c common.c log.c config.c core_ffi.c effects_json.c \
-            keysym_map.c xim_server.c candidate_window.c tray.c settings.c
+            keysym_map.c xim_server.c ai_capture.c candidate_window.c \
+            tray.c settings.c
 APP_OBJS := $(addprefix $(BUILD_DIR)/app/,$(APP_SRCS:.c=.o))
 APP_HDRS := $(wildcard $(SRC_DIR)/*.h)
 
@@ -93,7 +94,9 @@ xcbimdkit_export.h: $(VENDOR_DIR)/src/xcbimdkit_export.h
 $(BUILD_DIR)/app/%.o: $(SRC_DIR)/%.c $(APP_HDRS) | xcbimdkit_export.h
 	@mkdir -p $(BUILD_DIR)/app
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(VENDOR_SRC) $(PKG_COMMON) $(PKG_GTK) \
-		-DLYY_SRC_RES_DIR='"$(ROOT_DIR)/res"' -c $< -o $@
+		-DLYY_SRC_RES_DIR='"$(ROOT_DIR)/res"' \
+		-DLYY_SRC_AI_HELPER='"$(ROOT_DIR)/../ibus-engine/engine/lyyime_ai.py"' \
+		-c $< -o $@
 
 $(BIN_DIR)/lyyime-xim: $(APP_OBJS) $(VENDOR_LIB)
 	@mkdir -p $(BIN_DIR)
@@ -132,11 +135,16 @@ $(BUILD_DIR)/tests/e2e_client: $(ROOT_DIR)/tests/e2e_client.c
 $(BUILD_DIR)/tests/unit_config: $(SRC_DIR)/config.c $(ROOT_DIR)/tests/unit_config.c | $(BUILD_DIR)/tests
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_GTK) -o $@ $(SRC_DIR)/config.c $(ROOT_DIR)/tests/unit_config.c
 
-test: $(BUILD_DIR)/tests/unit_effects_json $(BUILD_DIR)/tests/unit_config \
+# 造词热键解析(合同 §12;headless,仅链接 keysym_map.c)
+$(BUILD_DIR)/tests/unit_hotkey: $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c | $(BUILD_DIR)/tests
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_COMMON) -o $@ $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c $(PKG_XIM)
+
+test: $(BUILD_DIR)/tests/unit_effects_json $(BUILD_DIR)/tests/unit_config $(BUILD_DIR)/tests/unit_hotkey \
       $(BUILD_DIR)/tests/liblyyime_core_stub.so $(BUILD_DIR)/tests/e2e_client
 	$(BUILD_DIR)/tests/unit_effects_json
 	$(BUILD_DIR)/tests/unit_config
-	@echo "单测全绿:effects_json + config + 桩库/e2e 客户端构建通过"
+	$(BUILD_DIR)/tests/unit_hotkey
+	@echo "单测全绿:effects_json + config + hotkey + 桩库/e2e 客户端构建通过"
 
 # ---- E2E(Xvfb :98 全自动断言)----
 e2e: all test

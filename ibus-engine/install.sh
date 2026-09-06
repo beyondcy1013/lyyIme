@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
-# -*- coding: utf-8 -*-
-# install.sh —— lyyIme ibus 引擎(Mode A)注册安装脚本。
+# install.sh —— lyyIme ibus 引擎(Mode A,Rust)注册安装脚本。
 #
 # 用法:
 #   ./install.sh                 # 用户级安装(免 root,推荐)
 #   ./install.sh --system        # 系统级安装(需 root)
 #   ./install.sh --enable        # 安装并追加到 ibus 预载列表(preload-engines)
 #   ./install.sh --no-restart    # 不重启 ibus(只 write-cache)
-#   ./install.sh --core-lib <路径> [--no-core-lib]   # 指定/跳过 FFI 核心库安装
 #
 # 设计要点:
-#   - 幂等:全部 mkdir -p / 覆盖安装 / 追加前判重,可重复执行;
-#   - 组件注册走静态 engine XML(参考本机 libpinyin.xml,RESEARCH §1.1),
-#     占位符在安装时替换为真实路径;
+#   - 引擎为 Rust 二进制(ibus-engine-lyyime,zbus 直连 lyyime-core,
+#     不再依赖 liblyyime_core.so 的 ctypes FFI);
+#   - AI 助手为 Rust 二进制 lyyime-ai(Mode B xim 以子进程共用);
+#   - 组件注册走静态 engine XML(占位符在安装时替换为真实路径);
 #   - 注册后执行 `ibus write-cache` 并重启 ibus 使托盘出现 "lyyIme 五笔拼音"。
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+TARGET_DIR="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}"
 
 MODE="user"
 DO_ENABLE=0
 DO_RESTART=1
-CORE_LIB_SRC=""           # 显式指定的核心库源路径
-SKIP_CORE_LIB=0
 ENGINE_NAME="lyyime"
 
 log()  { printf '[install] %s\n' "$*"; }
@@ -43,8 +41,6 @@ while [ $# -gt 0 ]; do
         --user)   MODE="user" ;;
         --enable) DO_ENABLE=1 ;;
         --no-restart) DO_RESTART=0 ;;
-        --core-lib) [ $# -ge 2 ] || die "--core-lib 需要一个路径参数"; CORE_LIB_SRC="$2"; shift ;;
-        --no-core-lib) SKIP_CORE_LIB=1 ;;
         -h|--help) usage ;;
         *) die "未知参数:$1(用 --help 查看用法)" ;;
     esac
@@ -56,69 +52,45 @@ if [ "$MODE" = "system" ]; then
     [ "$(id -u)" -eq 0 ] || die "系统级安装需要 root:请 sudo 执行,或去掉 --system 用用户级安装"
     DATA_ROOT="/usr/local/share/lyyime"
     COMPONENT_DIR="/usr/local/share/ibus/component"
-    CORE_LIB_DIR="/usr/local/lib/lyyime"
 else
     DATA_ROOT="${HOME}/.local/share/lyyime"
     COMPONENT_DIR="${HOME}/.local/share/ibus/component"
-    CORE_LIB_DIR="${DATA_ROOT}/lib"
 fi
 ENGINE_DIR="${DATA_ROOT}/ibus/engine"
 ICON_DIR="${DATA_ROOT}/ibus/icons"
 BIN_DIR="${DATA_ROOT}/ibus/bin"
+TOOLS_DIR="${DATA_ROOT}/tools"
 
 log "模式=${MODE}  引擎目录=${ENGINE_DIR}"
 
-# ---------------------------------------------------------------- 核心库(.so)
-# FFI 搜索顺序见 engine/lyyime_ffi.py:$LYYIME_CORE_LIB → /usr/local/lib/lyyime
-# → /usr/local/lib → /usr/lib64 → cargo-target → 仓库 target/release。
-# 默认源=项目约定构建产物(集成通报给出的路径),找不到时自动降级探测。
-install_core_lib() {
-    local src
-    if [ -n "$CORE_LIB_SRC" ]; then
-        src="$CORE_LIB_SRC"
-    else
-        for cand in \
-            "/data/cargo-target/local/lyyIme/release/liblyyime_core.so" \
-            "${CARGO_TARGET_DIR:-/nonexistent}/release/liblyyime_core.so" \
-            "$PROJECT_DIR/target/release/liblyyime_core.so"; do
-            if [ -f "$cand" ]; then src="$cand"; break; fi
-        done
-    fi
-    if [ "${SKIP_CORE_LIB}" -eq 1 ]; then
-        log "按参数跳过核心库安装(--no-core-lib)"
-        return 0
-    fi
-    if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
-        warn "未找到 liblyyime_core.so(已探测约定构建路径)。"
-        warn "引擎可安装但暂无法输入;请先 scripts/build.sh 构建,或"
-        warn "重跑:./install.sh --core-lib /路径/liblyyime_core.so"
-        return 0
-    fi
-    mkdir -p "$CORE_LIB_DIR"
-    install -m 755 "$src" "$CORE_LIB_DIR/liblyyime_core.so"
-    log "已安装核心库:$CORE_LIB_DIR/liblyyime_core.so(源:$src)"
-    if [ "$MODE" = "system" ]; then
-        # 刷新动态库缓存;失败不致命(该目录通常已在 ld 搜索路径)
-        ldconfig || warn "ldconfig 失败,请手动执行 sudo ldconfig"
-    else
-        log "用户级核心库不在默认搜索路径,请在会话环境(如 ~/.xprofile)加入:"
-        log "  export LYYIME_CORE_LIB=${CORE_LIB_DIR}/liblyyime_core.so"
-    fi
+# ---------------------------------------------------------------- 二进制
+pick_bin() { # $1=名字
+    for c in "$TARGET_DIR/release/$1" "$TARGET_DIR/debug/$1"; do
+        [ -x "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
 }
-install_core_lib
 
-# ---------------------------------------------------------------- 引擎与图标
-install -d -m 755 "$ENGINE_DIR" "$ICON_DIR" "$BIN_DIR" "$COMPONENT_DIR"
-install -m 755 "$SCRIPT_DIR/engine/lyyime.py"     "$ENGINE_DIR/lyyime.py"
-install -m 644 "$SCRIPT_DIR/engine/lyyime_ffi.py" "$ENGINE_DIR/lyyime_ffi.py"
-install -m 755 "$SCRIPT_DIR/lyyime-setup"         "$BIN_DIR/lyyime-setup"
+ENGINE_SRC="$(pick_bin ibus-engine-lyyime)" || true
+[ -n "${ENGINE_SRC:-}" ] || die "未找到 ibus-engine-lyyime 二进制:先执行 scripts/build.sh(或设 CARGO_TARGET_DIR)"
+AI_SRC="$(pick_bin lyyime-ai)" || true
+[ -n "${AI_SRC:-}" ] || warn "未找到 lyyime-ai 二进制(/AI 功能不可用,其余正常;先 scripts/build.sh)"
+
+install -d -m 755 "$ENGINE_DIR" "$ICON_DIR" "$BIN_DIR" "$TOOLS_DIR" "$COMPONENT_DIR"
+install -m 755 "$ENGINE_SRC" "$ENGINE_DIR/ibus-engine-lyyime"
+log "已安装引擎:$ENGINE_DIR/ibus-engine-lyyime"
+if [ -n "${AI_SRC:-}" ]; then
+    install -m 755 "$AI_SRC" "$ENGINE_DIR/lyyime-ai"
+    install -m 755 "$AI_SRC" "$TOOLS_DIR/lyyime-ai"
+    log "已安装 AI 助手:$TOOLS_DIR/lyyime-ai(xim 的 /AI 亦复用)"
+fi
 for svg in "$SCRIPT_DIR"/icons/*.svg; do
     install -m 644 "$svg" "$ICON_DIR/$(basename "$svg")"
 done
-log "引擎脚本与图标已就位(重复安装为覆盖,幂等)"
+log "图标已就位(重复安装为覆盖,幂等)"
 
 # ---------------------------------------------------------------- 组件 XML(占位符替换)
-sed -e "s|@ENGINE_DIR@|${ENGINE_DIR}|g" \
+sed -e "s|@ENGINE_EXEC@|${ENGINE_DIR}/ibus-engine-lyyime|g" \
     -e "s|@ICON_DIR@|${ICON_DIR}|g" \
     -e "s|@SETUP@|${BIN_DIR}/lyyime-setup|g" \
     "$SCRIPT_DIR/lyyime.xml" > "$COMPONENT_DIR/lyyime.xml"
@@ -205,22 +177,14 @@ append_preload() {
     else
         READER="gsettings"
     fi
-    new="$(python3 - "$cur" "$ENGINE_NAME" <<'PY'
-import ast, sys
-cur, name = sys.argv[1], sys.argv[2]
-if cur.startswith('@as'):
-    cur = cur[3:].strip() or '[]'
-try:
-    items = ast.literal_eval(cur)
-except (ValueError, SyntaxError):
-    items = []
-if not isinstance(items, list):
-    items = []
-if name not in items:
-    items.append(name)
-print(repr(items))
-PY
-)"
+    # 纯 shell 追加(避免依赖 python):cur 形如 "@as []" 或 "['a','b']"
+    if [[ "$cur" == *"'"$ENGINE_NAME"'""* || "$cur" == *"$ENGINE_NAME"* ]]; then
+        new="$cur"
+    elif [ "$cur" = "@as []" ]; then
+        new="@as ['$ENGINE_NAME']"
+    else
+        new="\${cur%]}, '$ENGINE_NAME']"
+    fi
     if [ "$READER" = "gsettings" ]; then
         if gsettings set org.freedesktop.ibus.general preload-engines "$new" 2>/dev/null; then
             log "已把 ${ENGINE_NAME} 追加进预载列表(gsettings):$new"

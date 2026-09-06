@@ -116,6 +116,7 @@ static void resolve_dict_dir(char *out, size_t cap, const char *user_data_dir)
 int main(int argc, char *argv[])
 {
     App *app = lyy_app();
+    lyy_ai_init(&app->ai); /* /AI 触发会话资源(任何路径退出统一 clear) */
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -182,6 +183,8 @@ int main(int argc, char *argv[])
     /* 配置(共享 config.toml,保留未知行与注释) */
     if (lyy_config_load(app->config_path, &app->config) != 0)
         lyy_log(&app->log, "WARN 配置读取失败,使用默认值:%s", app->config_path);
+    /* 造词热键解析(设置保存后由 settings.c 再次刷新) */
+    lyy_app_reload_hotkey(app);
 
     /* GTK 初始化(候选窗/托盘/设置窗依赖) */
     gtk_init(&argc, &argv);
@@ -264,6 +267,7 @@ int main(int argc, char *argv[])
     lyy_xim_shutdown(&app->xim);
     if (app->engine && app->core.loaded)
         app->core.lyyime_free(app->engine);
+    lyy_ai_clear(&app->ai);
     g_unlink(pidfile);
     lyy_log(&app->log, "==== 退出完成 ====");
     lyy_log_close(&app->log);

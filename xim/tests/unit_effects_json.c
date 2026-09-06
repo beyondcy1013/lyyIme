@@ -137,6 +137,14 @@ int main(void)
               n == 1,
           "空白容错");
 
+    /* 17. notice 效果(合同 §12:造词结果提示) */
+    n = -1;
+    CHECK(parse_ok("[{\"t\":\"notice\",\"s\":\"已造词:你好(wqvb)\"}]",
+                   eff, 16, &n) == 0 &&
+              n == 1 && eff[0].kind == LYY_EFF_NOTICE &&
+              !strcmp(eff[0].s, "已造词:你好(wqvb)"),
+          "notice 效果解析");
+
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);
     return g_failed ? 1 : 0;

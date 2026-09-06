@@ -28,6 +28,7 @@ int lyy_engine_ensure(App *app)
         lyy_core_mark_degraded(app, "lyyime_new 返回 NULL(数据目录不可用?)");
         return -1;
     }
+    app->core.lyyime_set_commit_after_four(app->engine, app->config.commit_after_four);
     lyy_log(&app->log, "core 引擎已创建:data_dir=%s", app->data_dir);
     return 0;
 }

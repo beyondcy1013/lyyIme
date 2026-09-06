@@ -24,6 +24,11 @@ rm -f "$PREFIX/share/lyyime/icons/zh.svg" "$PREFIX/share/lyyime/icons/en.svg"
 rmdir "$PREFIX/share/lyyime/icons" 2>/dev/null || true
 rm -f "$PREFIX/share/lyyime/res/settings.ui" "$PREFIX/share/lyyime/res/candidate.css"
 rmdir "$PREFIX/share/lyyime/res" 2>/dev/null || true
+# AI 助手脚本:仅当 ibus 引擎安装位不存在时才删(避免误删 Mode A 在用的副本)
+if [ ! -f "$PREFIX/share/lyyime/ibus/engine/lyyime_ai.py" ]; then
+    rm -f "$PREFIX/share/lyyime/tools/lyyime_ai.py"
+    rmdir "$PREFIX/share/lyyime/tools" 2>/dev/null || true
+fi
 rmdir "$PREFIX/share/lyyime" 2>/dev/null || true
 rm -f "$PREFIX/share/applications/lyyime-xim-settings.desktop"
 

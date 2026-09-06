@@ -52,6 +52,7 @@ static int kind_of(const char *t)
     if (!strcmp(t, "cands")) return LYY_EFF_CANDS;
     if (!strcmp(t, "pass")) return LYY_EFF_PASS;
     if (!strcmp(t, "consumed")) return LYY_EFF_CONSUMED;
+    if (!strcmp(t, "notice")) return LYY_EFF_NOTICE;
     if (!strcmp(t, "mode")) return LYY_EFF_MODE;
     return -1;
 }
@@ -172,6 +173,7 @@ const char *lyy_effect_kind_name(int kind)
     case LYY_EFF_CANDS: return "cands";
     case LYY_EFF_PASS: return "pass";
     case LYY_EFF_CONSUMED: return "consumed";
+    case LYY_EFF_NOTICE: return "notice";
     case LYY_EFF_MODE: return "mode";
     default: return "?";
     }

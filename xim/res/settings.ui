@@ -18,6 +18,12 @@
     <property name="step_increment">1</property>
     <property name="page_increment">2</property>
   </object>
+  <object class="GtkAdjustment" id="adj_ai_timeout">
+    <property name="lower">5</property>
+    <property name="upper">300</property>
+    <property name="step_increment">5</property>
+    <property name="page_increment">30</property>
+  </object>
   <object class="GtkWindow" id="settings_window">
     <property name="title">lyyIme 输入法设置</property>
     <property name="resizable">False</property>
@@ -150,7 +156,198 @@
                 <property name="width">2</property>
               </packing>
             </child>
+            <child>
+              <object class="GtkLabel" id="lbl_coin_hotkey">
+                <property name="visible">True</property>
+                <property name="label">造词快捷键:</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">8</property>
+              </packing>
+            </child>
+            <child>
+              <object class="GtkEntry" id="ent_coin_hotkey">
+                <property name="visible">True</property>
+                <property name="tooltip-text">上屏汉字后按此键进入造词:方向键 →/↑ 多选一字、←/↓ 少选一字,回车存词,Esc 取消。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+equal、alt+comma、ctrl+f2</property>
+                <property name="halign">start</property>
+                <property name="width-chars">18</property>
+              </object>
+              <packing>
+                <property name="left-attach">1</property>
+                <property name="top-attach">8</property>
+              </packing>
+            </child>
           </object>
+        </child>
+        <child>
+          <object class="GtkSeparator" id="sep_ai">
+            <property name="visible">True</property>
+          </object>
+          <packing>
+            <property name="expand">False</property>
+            <property name="fill">True</property>
+            <property name="position">1</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkFrame" id="frame_ai">
+            <property name="visible">True</property>
+            <property name="label">AI 助手(中文态输入 /AI+提示词,回车调用自定义大模型)</property>
+            <property name="label-xalign">0</property>
+            <child>
+              <object class="GtkGrid" id="grid_ai">
+                <property name="visible">True</property>
+                <property name="margin">6</property>
+                <property name="row-spacing">6</property>
+                <property name="column-spacing">10</property>
+                <child>
+                  <object class="GtkCheckButton" id="chk_ai_enabled">
+                    <property name="visible">True</property>
+                    <property name="label">启用 AI 助手(需兼容 OpenAI 接口的服务:DeepSeek/千问/智谱/Ollama 等)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">0</property>
+                    <property name="width">3</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_ai_base">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">API 地址</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_ai_base">
+                    <property name="visible">True</property>
+                    <property name="width-chars">34</property>
+                    <property name="placeholder-text">https://api.deepseek.com/v1</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">1</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_ai_key">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">API 密钥</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_ai_key">
+                    <property name="visible">True</property>
+                    <property name="width-chars">34</property>
+                    <property name="placeholder-text">sk-…(本地服务如 Ollama 可留空)</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">2</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_ai_model">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">模型名</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">3</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_ai_model">
+                    <property name="visible">True</property>
+                    <property name="width-chars">34</property>
+                    <property name="placeholder-text">如 deepseek-chat / qwen-plus / glm-4 / llama3</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">3</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_ai_prompt">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">系统提示</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">4</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_ai_prompt">
+                    <property name="visible">True</property>
+                    <property name="width-chars">34</property>
+                    <property name="placeholder-text">可选;留空使用内置"直接输出结果本体"</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">4</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_ai_timeout">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">超时(秒)</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">5</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="spin_ai_timeout">
+                    <property name="visible">True</property>
+                    <property name="adjustment">adj_ai_timeout</property>
+                    <property name="numeric">True</property>
+                    <property name="width-chars">4</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">5</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkButton" id="btn_ai_test">
+                    <property name="visible">True</property>
+                    <property name="label">测试连接(先保存再测试)</property>
+                    <property name="halign">end</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">2</property>
+                    <property name="top-attach">5</property>
+                  </packing>
+                </child>
+              </object>
+            </child>
+          </object>
+          <packing>
+            <property name="expand">False</property>
+            <property name="fill">True</property>
+            <property name="position">2</property>
+          </packing>
         </child>
         <child>
           <object class="GtkButtonBox" id="btnbox">
@@ -184,7 +381,7 @@
           <packing>
             <property name="expand">False</property>
             <property name="fill">False</property>
-            <property name="position">1</property>
+            <property name="position">3</property>
           </packing>
         </child>
       </object>

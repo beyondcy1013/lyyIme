@@ -87,6 +87,83 @@ static void do_commit(xcb_im_t *im, xcb_im_input_context_t *ic,
     free(ct);
 }
 
+/* ai_capture 用:AI 回复提交到当前焦点输入上下文(无焦点返回 -1) */
+int lyy_xim_commit_utf8(App *app, const char *utf8)
+{
+    if (!app->xim.focused_ic)
+        return -1;
+    do_commit(app->xim.im, app->xim.focused_ic, utf8);
+    xcb_flush(app->xim.conn);
+    return 0;
+}
+
+static void hide_preedit(App *app); /* 定义在效果流消费段(此处前置声明) */
+
+/* ---- notice 辅助提示(合同 §12:造词结果等),4 秒自动清除 ---- */
+static gboolean notice_timeout(gpointer user_data)
+{
+    App *app = user_data;
+    app->notice_timer_id = 0;
+    hide_preedit(app);
+    return G_SOURCE_REMOVE;
+}
+
+void lyy_show_notice(App *app, const char *text)
+{
+    if (app->notice_timer_id) {
+        g_source_remove(app->notice_timer_id);
+        app->notice_timer_id = 0;
+    }
+    lyy_candwin_begin_rows(&app->candwin);
+    lyy_candwin_set_preedit(&app->candwin, text);
+    lyy_candwin_set_page(&app->candwin, 0, 0);
+    lyy_candwin_commit_layout(&app->candwin);
+    app->notice_timer_id = g_timeout_add_seconds(4, notice_timeout, app);
+}
+
+/* ---- 造词热键解析(启动/设置保存后调用;失败回退默认 Ctrl+=) ---- */
+void lyy_app_reload_hotkey(App *app)
+{
+    uint32_t mods = 0, sym = 0;
+    if (lyy_hotkey_parse(app->config.coin_hotkey, &mods, &sym)) {
+        app->hotkey_coin.mods = mods;
+        app->hotkey_coin.sym = sym;
+        app->hotkey_coin.ok = 1;
+        lyy_log(&app->log, "造词热键:%s(mods=0x%x keysym=0x%x)",
+                app->config.coin_hotkey, mods, sym);
+    } else {
+        /* 解析失败回退默认,保证造词功能始终可用 */
+        if (lyy_hotkey_parse("ctrl+equal", &mods, &sym)) {
+            app->hotkey_coin.mods = mods;
+            app->hotkey_coin.sym = sym;
+            app->hotkey_coin.ok = 1;
+        }
+        lyy_log(&app->log,
+                "WARN 造词热键配置不合法(%s),回退默认 ctrl+equal",
+                app->config.coin_hotkey);
+    }
+}
+
+/* ai_capture 用:喂 core 一个键并按当前语义应用效果流
+ * 返回 1=已消费 0=core 放行(pass) -1=core 异常(已标记降级) */
+static void apply_effects(App *app, xcb_im_input_context_t *ic,
+                          xcb_key_press_event_t *ev, uint32_t sym,
+                          const char *json, int *had_content_out,
+                          int *pass_out);
+int lyy_ai_feed_core(App *app, xcb_key_press_event_t *ev, uint32_t sym,
+                     int key, uint32_t chr)
+{
+    char json[4096];
+    if (lyy_core_process_key_json(&app->core, app->engine, key, chr, json,
+                                  (int)sizeof(json)) != 0) {
+        lyy_core_mark_degraded(app, "process_key 调用失败");
+        return -1;
+    }
+    int had = 0, passed = 0;
+    apply_effects(app, app->xim.focused_ic, ev, sym, json, &had, &passed);
+    return passed ? 0 : 1;
+}
+
 /* ---- 效果流消费:JSON → commit/候选窗/回放 ---- */
 static void hide_preedit(App *app)
 {
@@ -97,11 +174,15 @@ static void hide_preedit(App *app)
 }
 
 static void apply_effects(App *app, xcb_im_input_context_t *ic,
-                          xcb_key_press_event_t *ev, const char *json,
-                          int *had_content_out)
+                          xcb_key_press_event_t *ev, uint32_t sym,
+                          const char *json, int *had_content_out,
+                          int *pass_out)
 {
     xcb_im_t *im = app->xim.im;
     int had_content = 0;
+    int passed = 0;
+    /* /AI 采集态:commit 进提示词、pass 进原字符,不再直达应用 */
+    int ai_capture = lyy_ai_capturing(app);
     LyyEffect effects[16];
     int count = 0;
     if (lyy_effects_parse(json, effects, 16, &count) != 0) {
@@ -117,13 +198,22 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         case LYY_EFF_COMMIT:
             if (e->s[0]) {
                 had_content = 1;
-                do_commit(im, ic, e->s);
-                lyy_log(&app->log, "commit: %s", e->s);
+                if (ai_capture) {
+                    lyy_ai_on_commit(app, e->s);
+                    lyy_log(&app->log, "AI 采集←组词上屏: %s", e->s);
+                } else {
+                    do_commit(im, ic, e->s);
+                    lyy_log(&app->log, "commit: %s", e->s);
+                }
             }
             break;
         case LYY_EFF_PREEDIT:
             /* 无 "s" 字段=清空预编辑(主控通报形态),set 空串即清除 */
-            lyy_candwin_set_preedit(&app->candwin, e->s);
+            lyy_ai_mirror_preedit(app, e->s); /* 组词码镜像(触发门控用) */
+            if (ai_capture)
+                lyy_ai_show_preedit(app);
+            else
+                lyy_candwin_set_preedit(&app->candwin, e->s);
             if (e->s[0])
                 had_content = 1;
             break;
@@ -147,9 +237,21 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
             break;
         }
         case LYY_EFF_PASS:
-            xcb_im_forward_event(im, ic, ev);
+            if (ai_capture) {
+                /* 采集态不回放:字母/数字/标点按原字符归入提示词 */
+                lyy_ai_on_pass_key(app, sym);
+            } else {
+                xcb_im_forward_event(im, ic, ev);
+            }
+            passed = 1;
             break;
         case LYY_EFF_CONSUMED:
+            break;
+        case LYY_EFF_NOTICE:
+            if (e->s[0]) {
+                lyy_show_notice(app, e->s);
+                lyy_log(&app->log, "notice: %s", e->s);
+            }
             break;
         case LYY_EFF_MODE:
             lyy_app_update_mode_ui(app);
@@ -159,8 +261,15 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         }
     }
     lyy_candwin_commit_layout(&app->candwin);
+    /* 新内容上屏时撤销未到的 notice 清除定时,避免误清组合显示 */
+    if (had_content && app->notice_timer_id) {
+        g_source_remove(app->notice_timer_id);
+        app->notice_timer_id = 0;
+    }
     if (had_content_out)
         *had_content_out = had_content;
+    if (pass_out)
+        *pass_out = passed;
 }
 
 /* ---- forward event 主处理(§6 按键行为 + Shift 单击/组合判定) ---- */
@@ -273,6 +382,29 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         }
     }
 
+    /* ---- 造词热键(合同 §12;默认 Ctrl+=,coin_hotkey 可配置) ----
+     * 位置在 AI 触发之前:与 Mode A 一致,组合键先放弃 AI 会话再进造词。 */
+    int coin_key = 0;
+    if (is_press && app->hotkey_coin.ok &&
+        lyy_hotkey_match(ev->state & LYY_CLEAN_MOD_MASK, (uint32_t)sym,
+                         app->hotkey_coin.mods, app->hotkey_coin.sym)) {
+        coin_key = 1;
+        lyy_ai_reset(app);
+        lyy_log(&app->log, "造词热键命中 keysym=0x%lx", (unsigned long)sym);
+    }
+
+    /* ---- /AI 触发会话(中文态 + [ai] 配置齐备才介入;ai_capture.h) ----
+     * 位置在 Shift+字母直通之前:采集态须把大写字母也一并收进提示词。 */
+    if (!coin_key && is_press) {
+        int ai_rc = lyy_ai_take(app, ev, (uint32_t)sym);
+        if (ai_rc == 1)
+            return;
+        if (ai_rc == 2) {
+            xcb_im_forward_event(xs->im, ic, ev);
+            return;
+        }
+    }
+
     /* 中文态 Shift+字母:大写字母无组词语义,原样直通(主流输入法行为) */
     if (is_press && (ev->state & XCB_MOD_MASK_SHIFT) &&
         (((sym >= (uint32_t)'A') && (sym <= (uint32_t)'Z')) ||
@@ -289,10 +421,15 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         return;
     }
 
-    lyy_keysym_map(sym, &key, &chr);
-    if (is_press && lyy_keysym_is_shift(base_sym)) {
-        key = LKEY_SHIFTPRESS;
+    if (coin_key) {
+        key = LKEY_COIN;
         chr = 0;
+    } else {
+        lyy_keysym_map(sym, &key, &chr);
+        if (is_press && lyy_keysym_is_shift(base_sym)) {
+            key = LKEY_SHIFTPRESS;
+            chr = 0;
+        }
     }
     lyy_log(&app->log, "forward keysym=0x%lx → LKey=%d chr=%u",
             (unsigned long)sym, key, chr);
@@ -306,11 +443,12 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         return;
     }
     int had_content = 0;
-    apply_effects(app, ic, ev, json, &had_content);
+    apply_effects(app, ic, ev, (uint32_t)sym, json, &had_content, NULL);
 
-    /* Shift:core 已按"有缓冲上屏英文;空缓冲吞键"处理后,
-     * 空缓冲才作为 Shift 单击挂起,交给释放/时间窗确认。 */
-    if (key == LKEY_SHIFTPRESS && !had_content && !st->shift_pending) {
+    /* Shift:core 已按合同处理(有缓冲上屏英文原串;空缓冲吞键)。
+     * 无论有无缓冲都进入 Shift 单击挂起(对齐 Mode A 引擎与合同 §6
+     * "随后单击确认切英文"):释放/时间窗确认单击 → 切英文直通。 */
+    if (key == LKEY_SHIFTPRESS && !st->shift_pending) {
         st->shift_pending = 1;
         app->shift_pending = 1;
         if (app->shift_timer_id)
@@ -347,6 +485,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         break;
     case XCB_XIM_DISCONNECT:
         lyy_log(&app->log, "XIM client 断开");
+        lyy_ai_reset(app);
         if (app->xim.focused_ic == ic)
             app->xim.focused_ic = NULL;
         hide_preedit(app);
@@ -356,6 +495,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         lyy_log(&app->log, "创建输入上下文");
         break;
     case XCB_XIM_DESTROY_IC:
+        lyy_ai_reset(app);
         if (app->xim.focused_ic == ic)
             app->xim.focused_ic = NULL;
         hide_preedit(app);
@@ -363,6 +503,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
     case XCB_XIM_SET_IC_FOCUS: {
         app->xim.focused_ic = ic;
         cancel_shift_pending(app);
+        lyy_ai_reset(app); /* 新焦点:AI 会话不跨上下文延续 */
         if (lyy_core_ready(app)) {
             IcState *st = ic_state(ic);
             if (st) {
@@ -381,6 +522,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
     }
     case XCB_XIM_UNSET_IC_FOCUS:
         cancel_shift_pending(app);
+        lyy_ai_reset(app);
         if (app->xim.focused_ic == ic)
             app->xim.focused_ic = NULL;
         if (lyy_core_ready(app))
@@ -390,6 +532,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
     case XCB_XIM_TRIGGER_NOTIFY: {
         xcb_im_trigger_notify_fr_t *nf = frame;
         IcState *st = ic_state(ic);
+        lyy_ai_reset(app); /* 中英切换:AI 会话随之放弃 */
         if (nf->flag == 0) {
             /* on:off(英文)态收到 Shift 按下 → 中文态 + 组合键防护窗 */
             if (lyy_core_ready(app)) {
@@ -520,6 +663,7 @@ void lyy_xim_shutdown(XimServer *xs)
 void lyy_xim_set_trigger(App *app, int to_chinese)
 {
     xcb_im_input_context_t *ic = app->xim.focused_ic;
+    lyy_ai_reset(app); /* 模式切换:AI 会话随之放弃 */
     /* 同步 core 模式(降级时只改协议态) */
     if (app->core.loaded && !app->degraded && app->engine) {
         int want = to_chinese ? 0 : 1;
@@ -542,6 +686,7 @@ void lyy_xim_set_enabled(App *app, int enabled)
     if (app->enabled == enabled)
         return;
     app->enabled = enabled;
+    lyy_ai_reset(app);
     if (enabled) {
         /* 恢复即回中文态(与获得焦点语义一致) */
         lyy_xim_set_trigger(app, 1);

@@ -178,12 +178,12 @@ append_preload() {
         READER="gsettings"
     fi
     # 纯 shell 追加(避免依赖 python):cur 形如 "@as []" 或 "['a','b']"
-    if [[ "$cur" == *"'"$ENGINE_NAME"'""* || "$cur" == *"$ENGINE_NAME"* ]]; then
+    if [[ "$cur" == *"$ENGINE_NAME"* ]]; then
         new="$cur"
     elif [ "$cur" = "@as []" ]; then
         new="@as ['$ENGINE_NAME']"
     else
-        new="\${cur%]}, '$ENGINE_NAME']"
+        new="${cur%]}, '$ENGINE_NAME']"
     fi
     if [ "$READER" = "gsettings" ]; then
         if gsettings set org.freedesktop.ibus.general preload-engines "$new" 2>/dev/null; then

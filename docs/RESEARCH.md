@@ -82,3 +82,61 @@ XIM(The X Input Method Protocol)是框架无关中文输入的 30 年正统路�
 6. **真实词库(跨源 4 个数量级频差)会击穿加性排序公式**:排序必须层级主导(见 ARCHITECTURE §5 v1.1),fixture 小数据测不出来,只有真库验收能暴露。
 
 ## 3. 码表词库资源与排序(调研 Agent 限流牺牲;由 dicttool 实现者自行验证来源,结论回流此处)
+
+## 5. AI 助手(/AI 触发)实现决策(2026-09-06)
+
+1. **协议选型**:不做私有协议,直接实现 OpenAI Chat Completions 兼容
+   (`POST {base}/chat/completions`)。DeepSeek/千问(dashscope 兼容模式)/
+   智谱/SiliconFlow/Ollama/LM Studio/vLLM 全部兼容,"自定义大模型"因此
+   等价于填 base_url + key + model 三个字段。
+2. **单实现双宿主**:HTTP 调用只写一份(python 标准库 urllib,
+   `ibus-engine/engine/lyyime_ai.py`);Mode A 进程内 import + 线程调用,
+   Mode B(C)以 `python3` 子进程调用同一文件——避免 C 里引 HTTP/TLS 依赖
+   (AGENTS.MD"不引第三方"),也杜绝两份协议代码漂移。
+3. **触发键吞字问题**:`/` 在 core 无中文映射(空缓冲 Pass),触发键必须
+   吞下才能拦截 `/ai`;打歪时 Mode B 可协议级补发原事件(xcb_im_forward_event),
+   Mode A 的 `return False` 只能放行"当前键",无法补发历史键,故退化为
+   **文本上屏 `/`**。普通文本框两者输出一致;仅"以 `/` 为快捷键"的应用
+   (如 Firefox 快速查找)在"中文态+AI 已启用+单按 `/`"场景受影响——
+   该组合极少见,且未配置 AI 时功能零介入,可接受。
+4. **GLib 子进程陷阱**:`g_child_watch_add` 必须配 `G_SPAWN_DO_NOT_REAP_CHILD`,
+   否则 wait status 恒为 -1,成功的调用也被判失败(Xvfb e2e 实测踩中)。
+5. **配置文件历史缺陷归一**:旧版 xim `config.c` 写行尾注释不带 `#`
+   (如 `page_size = 5 候选数 1..9`),不是合法 TOML,python tomllib 直接解析
+   失败。新版 split_value 兼容读旧格式,保存时统一写为 ` # 注释`;字符串值
+   带引号+转义,并支持 `[ai]` 段(其它段字节级保留)。
+6. **Mode B Shift 单击与合同偏差修复**:contract v1.2 是"Shift 按下时有缓冲
+   上屏英文原串,随后单击确认切英文"(Mode A 引擎即如此实现);xim 旧代码
+   只在空缓冲时挂起单击判定,导致 e2e B3(英文态直通)本来就挂。已修齐:
+   无论有无缓冲都挂起,释放/时间窗确认单击 → 切英文。
+
+## 6. 造词模式(Ctrl+=)实现决策(2026-09-06)
+
+- **交互出处**:借鉴极点五笔/万能五笔的「Ctrl+= 自造词」——上屏后按热键把
+  刚输入的汉字组成词组入库;方向键增减选字是 lyyIme 的简化(极点用
+  Backspace/词长调整,双方向键更直观,两者都保留:←/↓/退格 等效)。
+- **取码规则**:五笔86 标准词组编码(2 字词各取前 2 码、3 字词 1+1+2、
+  4 字词各 1 码、>4 字取 1/2/3/末 各 1 码),与海峰86 码表自洽——fixture
+  中 你(wqiy)+好(vbg)→wqvb 与码表自带「你好=wqvb」一致,真库验证
+  「好你→vbwq」造出即可打出且 User 层置顶。
+- **存储选择**:user.tsv(learner)只做频次加成、无码位;造词需要
+  「词→码」可打,单独落 `user_words.tsv`(word\tcode\tcount),启动并入
+  五笔内存索引,与 learner 双轨互不影响。排序词频取码表最大值保证同码
+  首位,再叠加 learner ×1.5。
+- **两段式纪律的坑**:造词"存词写盘"不能发生在 plan(纯读取)阶段——
+  -needed 重试会二次计数。定式:plan 做**幂等可写性预检**(建目录+写模式
+  探测打开,不创建文件),效果流里的 Notice 文案在 plan 期定死,apply 才
+  真正 add+落盘;落盘竞态失败保 dirty 下次重试。
+- **历史只记汉字**:commit 不含汉字(标点/字母直通)时不清 last_run——
+  「你好,」的逗号不该让造词起点归零。
+- **热键解析双端同规格**:coin_hotkey 写法 `ctrl+equal`(修饰至少一个,
+  纯键热键与打字冲突一律拒绝),Mode A `lyyime.py parse_hotkey` 与
+  Mode B `keysym_map.c lyy_hotkey_parse` 各自实现、单测对齐;忽略
+  CapsLock/NumLock 位。
+- **装机链路坑(2026-09-06 实测)**:ibus 组件模板 lyyime.xml 的 exec 占位
+  符从 @ENGINE_DIR@ 换成 @ENGINE_EXEC@ 后(Rust 引擎迁移 WIP),
+  install.sh 未跟上,装出带字面 `@ENGINE_EXEC@` 的 XML → daemon 拉起
+  失败、窗口静默复用旧引擎实例——真机造词探测两次"看似失效"即此因;
+  另:ibus-engine/install.sh 只装引擎不装核心库,新键值(LKEY_COIN=11)
+  在旧 liblyyime_core.so 里按 Other 放行, symptoms 相同。装机必须
+  scripts/install-all.sh 全链,或引擎+核心库一起更新后 `ibus restart`。

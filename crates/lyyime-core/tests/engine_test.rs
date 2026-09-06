@@ -191,7 +191,10 @@ fn 反查_拼音候选注释为五笔编码() {
     let mut eng = engine();
     type_str(&mut eng, "nihao");
     let page = eng.flush_page();
-    let ni_hao = page.iter().find(|c| c.text == "你好").expect("你好 应在候选");
+    let ni_hao = page
+        .iter()
+        .find(|c| c.text == "你好")
+        .expect("你好 应在候选");
     assert_eq!(ni_hao.comment, "wqvb", "拼音词组应反查五笔编码");
     let hao = page.iter().find(|c| c.text == "好").expect("好 应在候选");
     assert_eq!(hao.comment, "vbg", "拼音单字应反查五笔编码");
@@ -202,7 +205,10 @@ fn 反查_末音节不完整与简拼注释同样为五笔码() {
     let mut eng = engine();
     type_str(&mut eng, "niha");
     let page = eng.flush_page();
-    let ni_hao = page.iter().find(|c| c.text == "你好").expect("你好 应在候选");
+    let ni_hao = page
+        .iter()
+        .find(|c| c.text == "你好")
+        .expect("你好 应在候选");
     assert_eq!(ni_hao.comment, "wqvb", "缺尾词组注释也应反查五笔编码");
 
     let mut eng = engine();

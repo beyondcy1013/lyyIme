@@ -52,6 +52,7 @@ mod learner;
 mod pinyin;
 mod rank;
 mod types;
+mod user_words;
 
 pub use config::Config;
 pub use engine::Engine;

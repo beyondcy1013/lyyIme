@@ -6,7 +6,8 @@
 //!
 //! ```json
 //! [{"t":"commit","s":"你好"},{"t":"preedit","s":"nihao"},
-//!  {"t":"cands","n":5,"page":0,"pages":3},{"t":"pass"},{"t":"consumed"},{"t":"mode","m":1}]
+//!  {"t":"cands","n":5,"page":0,"pages":3},{"t":"pass"},{"t":"consumed"},
+//!  {"t":"notice","s":"已造词:你好(wqvb)"},{"t":"mode","m":1}]
 //! ```
 //!
 //! 约定:
@@ -33,6 +34,12 @@ pub const LKEY_PAGEDOWN: c_int = 7;
 pub const LKEY_PUNCT: c_int = 8;
 pub const LKEY_SHIFTPRESS: c_int = 9;
 pub const LKEY_OTHER: c_int = 10;
+// ---- 造词(合同 §12):热键与方向键 ----
+pub const LKEY_COIN: c_int = 11;
+pub const LKEY_LEFT: c_int = 12;
+pub const LKEY_RIGHT: c_int = 13;
+pub const LKEY_UP: c_int = 14;
+pub const LKEY_DOWN: c_int = 15;
 
 /// 模式 → FFI 整数:0 = 中文,1 = 英文。
 pub fn mode_int(mode: Mode) -> c_int {
@@ -97,6 +104,11 @@ pub fn effects_json(effects: &[Effect], page: usize, pages: usize) -> String {
             }
             Effect::Pass => out.push_str("{\"t\":\"pass\"}"),
             Effect::Consumed => out.push_str("{\"t\":\"consumed\"}"),
+            Effect::Notice(s) => {
+                out.push_str("{\"t\":\"notice\",\"s\":\"");
+                push_escaped(s, &mut out);
+                out.push_str("\"}");
+            }
             Effect::ModeChanged(m) => {
                 out.push_str(&format!("{{\"t\":\"mode\",\"m\":{}}}", mode_int(*m)));
             }
@@ -127,6 +139,11 @@ fn key_from(key_id: c_int, chr: u32) -> LKey {
         LKEY_PAGEDOWN => LKey::PageDown,
         LKEY_PUNCT => char::from_u32(chr).map_or(LKey::Other, LKey::Punct),
         LKEY_SHIFTPRESS => LKey::ShiftPress,
+        LKEY_COIN => LKey::Coin,
+        LKEY_LEFT => LKey::ArrowLeft,
+        LKEY_RIGHT => LKey::ArrowRight,
+        LKEY_UP => LKey::ArrowUp,
+        LKEY_DOWN => LKey::ArrowDown,
         _ => LKey::Other,
     }
 }
@@ -206,6 +223,25 @@ pub unsafe extern "C" fn lyyime_mode(eng: *mut Engine) -> c_int {
 pub unsafe extern "C" fn lyyime_toggle_mode(eng: *mut Engine) -> c_int {
     match eng.as_mut() {
         Some(e) => mode_int(e.toggle_mode()),
+        None => 0,
+    }
+}
+
+/// 设置“四码后继续输入字母先顶屏当前选中”。
+///
+/// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_commit_after_four(eng: *mut Engine, enabled: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.commit_on_extra_after_four = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().commit_on_extra_after_four)
+        }
         None => 0,
     }
 }

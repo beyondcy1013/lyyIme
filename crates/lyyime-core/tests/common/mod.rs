@@ -142,3 +142,22 @@ pub fn last_preedit(effects: &[Effect]) -> Option<String> {
         _ => None,
     })
 }
+
+/// 取效果流里的全部 Notice 文本。
+pub fn notices(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Notice(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 造词模式下当前展示的单条候选(文本, 注释)。
+pub fn coin_candidate(eng: &Engine) -> Option<(String, String)> {
+    let page = eng.flush_page();
+    page.first()
+        .filter(|_| eng.page() == 0)
+        .map(|c| (c.text.clone(), c.comment.clone()))
+}

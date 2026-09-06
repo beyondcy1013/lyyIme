@@ -40,6 +40,10 @@ pub struct Config {
     pub mixed_auto_commit_top_n: usize,
     /// 满足四码后,再输入字母先上屏当前选中,剩余字母开启新组合。
     pub commit_on_extra_after_four: bool,
+    /// 造词热键(合同 §12):`修饰+键` 串,宿主解析;core 不消费该值,
+    /// 收纳于此保证 config.toml 一份 schema 三端(doctor/ibus/xim)共用。
+    /// 修饰:ctrl/alt/super/shift;键名:a-z 0-9 f1-f12 equal/minus/space 等。
+    pub coin_hotkey: String,
 }
 
 impl Default for Config {
@@ -56,6 +60,7 @@ impl Default for Config {
             en_freq_top_n: 2000,
             mixed_auto_commit_top_n: 500,
             commit_on_extra_after_four: false,
+            coin_hotkey: "ctrl+equal".to_string(),
         }
     }
 }
@@ -77,6 +82,7 @@ struct ConfigToml {
     en_freq_top_n: usize,
     mixed_auto_commit_top_n: usize,
     commit_on_extra_after_four: bool,
+    coin_hotkey: String,
 }
 
 impl Default for ConfigToml {
@@ -108,6 +114,7 @@ impl From<&Config> for ConfigToml {
             en_freq_top_n: c.en_freq_top_n,
             mixed_auto_commit_top_n: c.mixed_auto_commit_top_n,
             commit_on_extra_after_four: c.commit_on_extra_after_four,
+            coin_hotkey: c.coin_hotkey.clone(),
         }
     }
 }
@@ -206,6 +213,15 @@ impl Config {
             "commit_on_extra_after_four = {}",
             d.commit_on_extra_after_four
         );
+        let _ = writeln!(
+            s,
+            "\n# 造词快捷键:上屏汉字后按此键进入造词模式(方向键 →/↑ 多选一字、"
+        );
+        let _ = writeln!(
+            s,
+            "# ←/↓/退格 少选一字,回车存词、Esc 取消;写法:修饰(ctrl/alt/super/shift)+键名"
+        );
+        let _ = writeln!(s, "coin_hotkey = \"{}\"", d.coin_hotkey);
         s
     }
 
@@ -276,6 +292,14 @@ impl ConfigToml {
             en_freq_top_n: self.en_freq_top_n,
             mixed_auto_commit_top_n: self.mixed_auto_commit_top_n,
             commit_on_extra_after_four: self.commit_on_extra_after_four,
+            coin_hotkey: {
+                let hk = self.coin_hotkey.trim().to_string();
+                if hk.is_empty() {
+                    "ctrl+equal".to_string()
+                } else {
+                    hk
+                }
+            },
         })
     }
 }

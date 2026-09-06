@@ -51,6 +51,9 @@ pub enum LKey {
     Space, Enter, Backspace, Esc, PageUp, PageDown,
     Punct(char),         // 标点原字符(半角)
     ShiftPress,          // Shift 按下(宿主用于单击检测,见 §6)
+    Coin,                // 造词热键(默认 Ctrl+=,coin_hotkey 可配置,§12)
+    ArrowLeft, ArrowRight, ArrowUp, ArrowDown,
+                         // 方向键:造词模式增减选字,非造词模式同 Other
     Other,               // 其余:core 恒回 Effect::Pass
 }
 
@@ -61,6 +64,7 @@ pub enum Effect {
     Candidates(Arc<Vec<Candidate>>), // 当前候选页更新(含总页数信息)
     Pass,                         // 宿主原样放行该键(英文态字母、未识别键)
     Consumed,                     // 吞掉但不产生可见效果
+    Notice(String),               // 辅助区临时提示(造词结果等,宿主数秒后清除)
     ModeChanged(Mode),            // 宿主更新 UI 指示
 }
 
@@ -85,7 +89,7 @@ int   lyyime_toggle_mode(void* eng);               /* 返回新 mode */
 /* 喂键:key_id 见下表, chr 为 Char/Punct 的码点(其余填 0)。
    返回 effects JSON 写入 buf 所需字节数(含\0);若 buf_cap 不够,不写入并返回 -needed。
    effects JSON: [{"t":"commit","s":"你好"},{"t":"preedit","s":"nihao"},{"t":"cands","n":5,"page":0,"pages":3},
-                  {"t":"pass"},{"t":"consumed"},{"t":"mode","m":1}]
+                  {"t":"pass"},{"t":"consumed"},{"t":"notice","s":"已造词:你好(wqvb)"},{"t":"mode","m":1}]
    cands 的具体候选另取:lyyime_cand(eng, i, buf, cap) 返回候选文本,-needed 表示不足;
    lyyime_cand_comment 同理。 */
 int64_t lyyime_process_key(void* eng, int key_id, uint32_t chr, char* buf, int64_t buf_cap);
@@ -93,7 +97,7 @@ int   lyyime_cand(void* eng, int i, char* buf, int cap);
 int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 ```
 
-`key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10`。
+`key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10, LKEY_COIN=11, LKEY_LEFT=12, LKEY_RIGHT=13, LKEY_UP=14, LKEY_DOWN=15`(11–15 见 §12)。
 
 `LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。
 
@@ -111,6 +115,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 | `meta.json` | `{"version":1,"source":...,"rows":...,"built_at":...}` | 校验信息 |
 
 用户数据:`~/.local/share/lyyime/user.tsv`,格式 `word\tfreq_extra\tlast_used_epoch`;core 定期(每 64 次 commit/退出时)批量落盘。
+用户造词:`~/.local/share/lyyime/user_words.tsv`,格式 `word\tcode\tcount`(与 user.tsv 同目录,随 user_dict 覆盖迁移);启动时整表并入五笔索引,造词即时落盘(临时文件 + rename 原子替换),见 §12。
 
 配置:`~/.config/lyyime/config.toml`(doctor/app/ibus 共用;字段见 core `Config` 默认值,注释中文)。
 
@@ -150,6 +155,8 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 | Shift 按下 | 有缓冲:**Commit(原字母)**(英文原串);空缓冲:Consumed 并进入单击检测 |
 | Shift 单击(空缓冲) | toggle_mode + ModeChanged(单击=按下后未产生其它键即释放,且无其它修饰) |
 | 其它键 | Pass(有缓冲时先 reset) |
+| 造词热键(Ctrl+=) | 进入造词模式(§12);组合中先按普通流程上屏再进入;英文态直通 |
+| 方向键 ←→↑↓ | 造词模式:→/↑ 多选一字、←/↓ 少选一字;非造词模式同"其它键" |
 
 中文标点映射(可配置):`,.?!;:'"()[]{}` → `,.?!;:''""()【】{}` 等,默认集在 core `punct.rs`。
 
@@ -202,3 +209,104 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
 | ibus 引擎 | 不经 daemon 直接实例化喢单元键 | tests/unit_ibus_engine.py |
 | Mode B 全链路 | Xvfb :99 + xdotool key/send,断言 gedit/简单 GTK 文本域内容 | tests/e2e/run.sh |
 | doctor | 破坏环境→check 发现→fix 恢复 | tests/e2e/doctor_test.sh |
+
+## 11. AI 助手(/AI 触发调用自定义大模型)
+
+中文态输入 `/AI`(大小写均可)+ 提示词,回车调用 **OpenAI Chat Completions
+兼容**服务(DeepSeek/千问/智谱/SiliconFlow/Ollama/LM Studio 等),回复直接
+上屏。未配置 `[ai]` 或 `enabled=false` 时功能完全不介入按键(行为与历史
+版本逐键一致)。
+
+### 11.1 交互合同(Mode A / Mode B 宿主必须一致实现)
+
+| 输入 | 行为 |
+|---|---|
+| `/` `A|a` `I|i`(中文态、core 空缓冲) | 依次吞下,进入采集态;预编辑显示 `/AI ` |
+| 触发中途打歪(如 `/x`) | 补发已吞按键后按普通路径处理(Mode A 补发为文本上屏 `/`;Mode B 协议级原样补发事件) |
+| 采集态字母 | 照常进 core 组词;**组词上屏结果进入提示词**(可写中文提示词) |
+| 采集态空格/数字/标点 | 有候选/映射:确认结果进提示词;否则原字符进提示词 |
+| Backspace | 有组词删组词;否则删提示词尾字符;删穿 `/AI` 前缀=取消(前缀不回放) |
+| Esc | 先清组词;空缓冲再按=取消会话 |
+| Enter | 发送:core 有缓冲先按合同"上屏原始字母"并入提示词;空提示词取消并提示 |
+| 方向键/功能键/Ctrl/Alt/Super 组合、焦点切换 | 放弃会话(组合键/不可归档键原样放行) |
+
+回复上屏 = 一次普通 Commit;失败经候选窗/辅助区给"人话"提示。提示词上限
+2000 字(Mode B 6000 字节),请求超时 `timeout`(5..300 秒)。
+
+### 11.2 分层与实现
+
+- **共享客户端** `ibus-engine/engine/lyyime_ai.py`(仅标准库):读取
+  `config.toml` 的 `[ai]` 段(tomllib,损坏时逐行兜底——兼容历史 C 端写入的
+  无 `#` 注释行)、`chat(prompt, cfg)` 调用 `/chat/completions`、CLI
+  (`--prompt`/`--check`)。接口形态借鉴 OpenAI API Reference(platform
+  .openai.com/docs/api-reference/chat)。
+- **Mode A**:`lyyime.py` 的 `EngineLogic` 触发状态机(`_ai_take`)在按键
+  映射前拦截;`on_ai_submit` 由 `LyyimeEngine` 在 daemon 线程调用
+  `lyyime_ai.chat`,结果经 `GLib.idle_add` 回主循环 commit(单线程 FFI 纪律)。
+- **Mode B**:`ai_capture.c` 状态机(挂在 xcb_im 回调内,Shift 处理之后、
+  Shift+字母直通之前);HTTP 由 `python3 lyyime_ai.py --prompt ...`
+  **子进程**完成(C 端零网络依赖),`g_spawn_async_with_pipes +
+  G_SPAWN_DO_NOT_REAP_CHILD` + 管道回读,完成后 commit 到当前焦点 IC;
+  脚本解析顺序:`$LYYIME_AI_HELPER` → `/usr/local/share/lyyime/ibus/engine/`
+  → `/usr/local/share/lyyime/tools/` → 源码树。
+- **配置**:`~/.config/lyyime/config.toml` 的 `[ai]` 段:`enabled`(默认
+  false)、`api_base`、`api_key`(本地服务可空)、`model`、`system_prompt`
+  (可选)、`timeout`。两模式读同一份;Mode B 设置窗(xim/res/settings.ui)
+  提供 AI 页与"测试连接"(`--check`),保存即生效(Mode A 每次焦点进入、
+  Mode B 每键实时读取)。
+
+### 11.3 测试
+
+单测:`tests/unit_lyyime_ai.py`(本地 mock HTTP,零外网)、
+`tests/unit_ibus_engine.py::AiTriggerTestCase`(逻辑层桩)。E2E:
+`tests/e2e/run.sh` 起 `tests/e2e/mock_ai_server.py`,双模式各断言一条
+`/AI hi` → 回复上屏 → mock 收到正确 path/鉴权/提示词的全链路。
+
+## 12. 造词模式(自定义快捷键,Ctrl+= 默认)
+
+上屏过的汉字即时组成五笔词组入库(自造词),交互习惯借鉴极点五笔/万能
+五笔的 Ctrl+= 造词;词组取码规则为五笔86 标准词组编码(与海峰86 码表一致)。
+
+### 12.1 交互合同(Mode A / Mode B 宿主必须一致实现)
+
+| 输入 | 行为 |
+|---|---|
+| 造词热键(中文态) | 进入造词模式:选取最近上屏的连续汉字(初始=最近一次 commit 的汉字串,仅 1 字时自动带上前一字凑二字);预编辑显示 `造词:<选区>`,候选窗单条展示选区+自动编码注释;组合中按下则先按普通流程上屏再进入;无历史时提示「还没有可造词的上屏汉字」;英文态直通 |
+| `→` / `↑` | 多选一个字(向前扩);已达历史上限(≤32 字)吞键 |
+| `←` / `↓` / Backspace | 少选一个字;二字下限吞键 |
+| Enter / Space | 确认造词:按取码规则自动编码,写入 `user_words.tsv` 并即时并入词库,辅助区提示「已造词:xxx(yyyy),可直接用该编码打出」;**不向应用输出任何文本** |
+| Esc | 取消造词模式 |
+| 字母/数字/标点/翻页/Shift | 退出造词模式并按普通路径处理本键(继续正常输入);焦点切换 reset 一并取消 |
+
+### 12.2 取码规则(五笔86 词组编码)
+
+按 `wubi.tsv` 反查索引(wubi_rev,同词多码取最长全码)取单字全码后:
+
+| 词长 | 取码 |
+|---|---|
+| 1 字 | 全码(等同学习加成) |
+| 2 字 | 第 1、2 字各取前 2 码(你好 = wqiy+ vbg → wqvb) |
+| 3 字 | 第 1、2 字各第 1 码 + 第 3 字前 2 码 |
+| 4 字 | 每字第 1 码 |
+| ≥5 字 | 第 1、2、3 字与末字各第 1 码 |
+
+任一参与取码的字不在五笔码表 → 造词失败,提示「『x』不在五笔码表」,不入库。
+
+### 12.3 配置与实现
+
+- **配置**:`config.toml` 顶层 `coin_hotkey = "ctrl+equal"`(三端共用;
+  写法=修饰(`ctrl/alt/super/shift`,**至少一个**,纯键热键与打字冲突一律拒绝)
+  + 键名(单字符字面量/字母数字/f1–f24/常用名/0x keysym)。两宿主各自解析,
+  规格一致:Mode A `lyyime.py parse_hotkey`,Mode B `keysym_map.c
+  lyy_hotkey_parse`(均有单测);Mode B 设置窗提供输入框,保存即生效。
+- **core**:`LKey::Coin` + `LKey::Arrow*` 进入/驱动造词状态机(Engine 持有
+  最近 64 字上屏 CJK 历史);`Effect::Notice` 承载提示;两段式 plan/apply
+  纪律不变(可写性预检在 plan 阶段,落盘在 apply 阶段)。
+- **存储**:`user_words.tsv`(§4);造词同时计入学习加成(×1.5),排序词频
+  取当前码表最大词频,保证同码首位。
+- **宿主渲染**:预编辑 `造词:<选区>` + 单候选(注释=编码预览);Notice 走
+  各自辅助区(Mode A auxiliary text 4 秒,Mode B 候选窗预编辑行 4 秒)。
+- **测试**:core `tests/coin_test.rs`(15 例)+ FFI `ffi_造词_*`;
+  Mode A `tests/unit_ibus_engine.py::CoinHotkeyTestCase`(桩库演示串
+  "你好好吗");Mode B `xim/tests/unit_hotkey.c` + `unit_config.c` §13 +
+  `xim_e2e.sh` 场景 D(ctrl+equal→Right→Return 全链路)。

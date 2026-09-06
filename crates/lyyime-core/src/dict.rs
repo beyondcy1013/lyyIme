@@ -137,6 +137,77 @@ impl DictIndex {
         self.loaded_channels == 0
     }
 
+    /// 单字是否在五笔码表(造词编码前置校验用)。
+    pub(crate) fn has_wubi_code(&self, ch: char) -> bool {
+        self.wubi_rev.contains_key(&ch.to_string())
+    }
+
+    /// 按五笔86 词组取码规则推算 `word` 的词组编码(合同 §12;取码规则为
+    /// 五笔86 标准词组编码,与极点五笔/海峰86 码表一致):
+    /// - 单字:全码;
+    /// - 二字词:各取全码前 2 码(如 你好 = wqiy+ vbg → wqvb);
+    /// - 三字词:前两字各第 1 码 + 末字前 2 码;
+    /// - 四字词:每字第 1 码;
+    /// - ≥5 字:第 1、2、3 字与末字各第 1 码。
+    /// 任一参与取码的字不在码表 → None(造词给出人话失败提示)。
+    pub(crate) fn wubi_word_code(&self, word: &str) -> Option<String> {
+        let chars: Vec<char> = word.chars().collect();
+        let code_of = |ch: char| -> Option<String> { self.wubi_rev.get(&ch.to_string()).cloned() };
+        let full: Vec<String> = chars.iter().map(|c| code_of(*c)).collect::<Option<Vec<_>>>()?;
+        let take = |i: usize, n: usize| -> Option<String> {
+            full.get(i)?.get(..n).map(|s| s.to_string())
+        };
+        let out = match chars.len() {
+            0 => return None,
+            1 => full[0].clone(),
+            2 => format!("{}{}", take(0, 2)?, take(1, 2)?),
+            3 => format!("{}{}{}", take(0, 1)?, take(1, 1)?, take(2, 2)?),
+            4 => format!("{}{}{}{}", take(0, 1)?, take(1, 1)?, take(2, 1)?, take(3, 1)?),
+            n => format!(
+                "{}{}{}{}",
+                take(0, 1)?,
+                take(1, 1)?,
+                take(2, 1)?,
+                take(n - 1, 1)?
+            ),
+        };
+        (0 < out.len() && out.len() <= 4).then_some(out)
+    }
+
+    /// 把用户造词并入内存五笔索引(词可被其编码直接打出):
+    /// 追加词条 → 精确码桶置顶 → 前缀桶按频重排 → 反查表。
+    /// `freq` 为排序用词频(用户词取当前码表最大词频,保证同码首位)。
+    pub(crate) fn insert_user_word(&mut self, word: &str, code: &str, freq: u64) {
+        if word.is_empty() || code.is_empty() || freq == 0 {
+            return;
+        }
+        let idx = self.wubi.len() as u32;
+        self.wubi.push(WubiEntry {
+            code: code.to_string(),
+            word: word.to_string(),
+            freq,
+        });
+        self.wubi_exact.entry(code.to_string()).or_default().insert(0, idx);
+        for plen in 1..=code.len() {
+            self.wubi_prefix
+                .entry(code[..plen].to_string())
+                .or_default()
+                .push(idx);
+        }
+        if let Some(bucket) = self.wubi_prefix.get_mut(code) {
+            bucket.sort_by(|&a, &b| {
+                self.wubi[b as usize]
+                    .freq
+                    .cmp(&self.wubi[a as usize].freq)
+                    .then_with(|| self.wubi[a as usize].word.cmp(&self.wubi[b as usize].word))
+            });
+        }
+        if freq > self.wubi_max {
+            self.wubi_max = freq;
+        }
+        self.wubi_rev.insert(word.to_string(), code.to_string());
+    }
+
     fn load_wubi(&mut self, path: &Path) {
         let mut by_code: HashMap<String, Vec<(String, u64)>> = HashMap::new();
         // 反查暂存:word → (最优码, 该码词频)。
@@ -150,7 +221,10 @@ impl DictIndex {
             if code.is_empty() || word.is_empty() || !code.is_ascii() {
                 continue;
             }
-            by_code.entry(code.clone()).or_default().push((word.clone(), freq));
+            by_code
+                .entry(code.clone())
+                .or_default()
+                .push((word.clone(), freq));
             // 同词多码取最长码(全码优先于简码),同长取频高,再同取字典序小,保证确定。
             match rev.get_mut(&word) {
                 Some(slot) => {

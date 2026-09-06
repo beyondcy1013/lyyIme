@@ -39,6 +39,17 @@ pub enum LKey {
     Punct(char),
     /// Shift 按下。core 不判定"单击";宿主判定为单击后应直接调 [`crate::Engine::toggle_mode`]。
     ShiftPress,
+    /// 造词热键(默认 Ctrl+=,`coin_hotkey` 可配置;宿主解析组合后送入本键)。
+    /// 中文态空缓冲进入造词模式,组合中先上屏再进入(合同 §12)。
+    Coin,
+    /// 方向键 ←:造词模式少选一个字;非造词模式行为同 [`LKey::Other`]。
+    ArrowLeft,
+    /// 方向键 →:造词模式多选一个字;非造词模式行为同 [`LKey::Other`]。
+    ArrowRight,
+    /// 方向键 ↑:造词模式多选一个字;非造词模式行为同 [`LKey::Other`]。
+    ArrowUp,
+    /// 方向键 ↓:造词模式少选一个字;非造词模式行为同 [`LKey::Other`]。
+    ArrowDown,
     /// 其余键:core 恒回 [`Effect::Pass`](有缓冲时先清缓冲)。
     Other,
 }
@@ -85,6 +96,8 @@ pub enum Effect {
     Pass,
     /// 吞掉该键但不产生可见效果。
     Consumed,
+    /// 辅助区临时提示(造词成功/失败等;宿主展示数秒后自行清除)。
+    Notice(String),
     /// 模式已变化,宿主更新中/EN 指示。
     ModeChanged(Mode),
 }

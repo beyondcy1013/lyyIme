@@ -67,12 +67,15 @@ import json, sys
 d = json.load(sys.stdin)
 assert isinstance(d, dict) and "checks" in d and "summary" in d, "check --json 顶层结构不对"
 ids = [c["id"] for c in d["checks"]]
-assert ids == ["env","daemon","engine-register","autostart","immodule","data","logs","locale"], ids
+assert ids == ["env","gui-env","session-bus","daemon","engine-register","autostart","immodule","data","logs","locale"], ids
 c = {x["id"]: x for x in d["checks"]}
 assert c["env"]["status"] == "fail", c["env"]
 assert c["env"]["fix_hint"], "env 项应有 fix_hint"
+# 新增两项(会话总线/真实进程环境)必须可序列化且带状态
+assert c["gui-env"]["status"] in ("ok", "warn", "fail"), c["gui-env"]
+assert c["session-bus"]["status"] in ("ok", "warn", "fail"), c["session-bus"]
 '
-pass "check --json 检出 env=fail(8 项齐全)"
+pass "check --json 检出 env=fail(10 项齐全)"
 
 # ---------------------------------------------------------------------------
 # 2. fix env --dry-run:只打印,不落盘

@@ -13,6 +13,8 @@ pub mod fixes;
 pub mod ime;
 pub mod model;
 pub mod paths;
+pub mod probe;
+pub mod session;
 pub mod system;
 
 pub use ime::ImeManager;
@@ -21,6 +23,7 @@ pub use model::{
     Summary,
 };
 pub use paths::Paths;
+pub use probe::{ProbeOptions, ProbeReport, ProbeStep};
 pub use system::{ProcInfo, RealSystem, RunOutput, SystemOps};
 
 /// 诊断 + 修复入口(GUI 与 CLI 共用)
@@ -44,9 +47,15 @@ impl Doctor {
         &self.p
     }
 
-    /// 运行全部 8 项检查(顺序:id, daemon, engine-register, autostart, immodule, data, logs, locale)
+    /// 运行全部 10 项检查(顺序:env, gui-env, session-bus, daemon, engine-register,
+    /// autostart, immodule, data, logs, locale)
     pub fn run_checks(&self) -> Vec<CheckResult> {
         checks::run_checks(&self.p, self.sys.as_ref())
+    }
+
+    /// 真屏输入链路探测(自建窗口 + 显式聚焦 + xdotool 注入 + 缓冲断言)
+    pub fn run_probe(&self, opts: &probe::ProbeOptions) -> ProbeReport {
+        probe::run_probe(self.sys.as_ref(), &self.p, opts)
     }
 
     /// 按显式 id 列表规划修复动作;id 可以是检查项 id(env/daemon/…)或修复 id(restart-ibus/…)。
@@ -122,9 +131,11 @@ mod tests {
             .with_proc(42, 0, "root", "ibus-daemon -drx");
         let d = Doctor::with_system(p, Box::new(sys));
         let results = d.run_checks();
-        assert_eq!(results.len(), 8);
+        assert_eq!(results.len(), 10);
         let expected = [
             (Status::Ok, "env"),
+            (Status::Warn, "gui-env"),          // 桩环境无桌面会话进程
+            (Status::Warn, "session-bus"),      // 同上,探测不到会话总线
             (Status::Ok, "daemon"),
             (Status::Fail, "engine-register"), // 未安装组件
             (Status::Fail, "autostart"),       // 无 autostart 目录
@@ -156,6 +167,6 @@ mod tests {
         assert!(s.contains("\"checks\""));
         assert!(s.contains("\"status\":\"fail\""));
         let back: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(back["checks"].as_array().unwrap().len(), 8);
+        assert_eq!(back["checks"].as_array().unwrap().len(), 10);
     }
 }

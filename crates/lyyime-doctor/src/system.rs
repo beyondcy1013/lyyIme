@@ -38,13 +38,33 @@ pub trait SystemOps {
     fn current_uid(&self) -> u32;
     /// 返回 args 中包含 name_hint 的进程(尽力而为,排除 ps/grep 自身)
     fn find_processes(&self, name_hint: &str) -> Vec<ProcInfo>;
+    /// 读取 /proc/<pid>/environ 为 (KEY, VALUE) 列表;读不到(权限/不存在)返回空。
+    /// 诊断铁律:进程真实环境以这里为准,不看调用方 shell(RESEARCH.md §4)。
+    fn read_proc_environ(&self, pid: u32) -> Vec<(String, String)>;
     fn command_exists(&self, prog: &str) -> bool;
     /// 执行外部命令(同步,捕获输出)
     fn run(&self, prog: &str, args: &[&str]) -> std::io::Result<RunOutput>;
     /// 向进程发 SIGTERM(仅允许对过滤过 uid 的 pid 调用)
     fn kill(&self, pid: u32) -> std::io::Result<()>;
-    /// 以脱离会话的方式拉起守护进程(不阻塞、不随调用者退出被杀)
-    fn spawn_detached(&self, prog: &str, args: &[&str]) -> std::io::Result<()>;
+    /// 以脱离会话的方式拉起守护进程(不阻塞、不随调用者退出被杀),继承当前环境
+    fn spawn_detached(&self, prog: &str, args: &[&str]) -> std::io::Result<()> {
+        self.spawn_detached_with_env(&[], prog, args)
+    }
+    /// 同 [`SystemOps::spawn_detached`],但先注入环境变量——用于把 ibus-daemon
+    /// 接到桌面会话真实使用的总线(DBUS_SESSION_BUS_ADDRESS),而不是继承调用方 shell。
+    fn spawn_detached_with_env(
+        &self,
+        envs: &[(String, String)],
+        prog: &str,
+        args: &[&str],
+    ) -> std::io::Result<()>;
+    /// 启动一个后台子进程并返回其 pid(不脱离会话,由调用方负责 kill;探测窗口等临时进程用)
+    fn spawn_background(
+        &self,
+        envs: &[(String, String)],
+        prog: &str,
+        args: &[&str],
+    ) -> std::io::Result<u32>;
 }
 
 /// 生产实现
@@ -85,6 +105,21 @@ impl SystemOps for RealSystem {
             .collect()
     }
 
+    fn read_proc_environ(&self, pid: u32) -> Vec<(String, String)> {
+        let raw = match std::fs::read(format!("/proc/{pid}/environ")) {
+            Ok(b) => b,
+            Err(_) => return vec![],
+        };
+        raw.split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| {
+                let s = String::from_utf8_lossy(s);
+                let (k, v) = s.split_once('=')?;
+                Some((k.to_string(), v.to_string()))
+            })
+            .collect()
+    }
+
     fn command_exists(&self, prog: &str) -> bool {
         // prog 全部来自本 crate 内部常量,无注入风险
         let script = format!("command -v -- {prog}");
@@ -115,11 +150,23 @@ impl SystemOps for RealSystem {
         }
     }
 
-    fn spawn_detached(&self, prog: &str, args: &[&str]) -> std::io::Result<()> {
-        // sh 后台化后立即退出;守护进程被 init 收养,不残留 zombie
-        let mut parts: Vec<String> = vec![prog.to_string()];
-        parts.extend(args.iter().map(|s| s.to_string()));
-        let script = format!("nohup {} >/dev/null 2>&1 &", parts.join(" "));
+    fn spawn_detached_with_env(
+        &self,
+        envs: &[(String, String)],
+        prog: &str,
+        args: &[&str],
+    ) -> std::io::Result<()> {
+        // sh 后台化后立即退出;守护进程被 init 收养,不残留 zombie。
+        // 注入值(如总线地址)经单引号转义,防止 ,/;/空格 等被 shell 拆词。
+        let mut script = String::new();
+        for (k, v) in envs {
+            script.push_str(&format!("export {}={}; ", sh_quote(k), sh_quote(v)));
+        }
+        let quoted_args: Vec<String> = std::iter::once(prog.to_string())
+            .chain(args.iter().map(|s| s.to_string()))
+            .map(|s| sh_quote(&s))
+            .collect();
+        script.push_str(&format!("nohup {} >/dev/null 2>&1 &", quoted_args.join(" ")));
         let status = Command::new("sh").arg("-c").arg(&script).status()?;
         if status.success() {
             Ok(())
@@ -127,6 +174,29 @@ impl SystemOps for RealSystem {
             Err(std::io::Error::other(format!("拉起 {prog} 失败")))
         }
     }
+
+    fn spawn_background(
+        &self,
+        envs: &[(String, String)],
+        prog: &str,
+        args: &[&str],
+    ) -> std::io::Result<u32> {
+        use std::process::Stdio;
+        let mut cmd = Command::new(prog);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        Ok(cmd.spawn()?.id())
+    }
+}
+
+/// POSIX 单引号转义:' → '\''
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// 路径末段("usr/bin/ibus-daemon" → "ibus-daemon")
@@ -160,10 +230,14 @@ pub(crate) mod fake {
         pub envs: BTreeMap<String, String>,
         pub uid: u32,
         pub procs: Vec<ProcInfo>,
+        /// pid → /proc/<pid>/environ 采样(检查 GUI 进程真实环境用)
+        pub proc_envs: BTreeMap<u32, Vec<(String, String)>>,
         pub exists: Vec<String>,
         pub results: BTreeMap<String, RunOutput>,
         pub ops: Rc<RefCell<Vec<String>>>,
         pub fail_spawn: bool,
+        /// spawn_background 返回的假 pid
+        pub bg_pid: u32,
     }
 
     impl FakeSystem {
@@ -172,10 +246,12 @@ pub(crate) mod fake {
                 envs: BTreeMap::new(),
                 uid,
                 procs: vec![],
+                proc_envs: BTreeMap::new(),
                 exists: vec![],
                 results: BTreeMap::new(),
                 ops: Rc::new(RefCell::new(vec![])),
                 fail_spawn: false,
+                bg_pid: 424_242,
             }
         }
         pub fn with_env(mut self, k: &str, v: &str) -> Self {
@@ -191,12 +267,24 @@ pub(crate) mod fake {
             });
             self
         }
+        /// 给指定 pid 的 /proc/<pid>/environ 采样追加一个变量(可链式多次)
+        pub fn with_proc_environ(mut self, pid: u32, k: &str, v: &str) -> Self {
+            self.proc_envs
+                .entry(pid)
+                .or_default()
+                .push((k.to_string(), v.to_string()));
+            self
+        }
         pub fn with_cmd(mut self, prog: &str, args: &[&str], out: RunOutput) -> Self {
             self.results.insert(cmd_key(prog, args), out);
             self
         }
         pub fn with_exists(mut self, prog: &str) -> Self {
             self.exists.push(prog.to_string());
+            self
+        }
+        pub fn with_bg_pid(mut self, pid: u32) -> Self {
+            self.bg_pid = pid;
             self
         }
         pub fn ops_snapshot(&self) -> Vec<String> {
@@ -230,6 +318,9 @@ pub(crate) mod fake {
                 .cloned()
                 .collect()
         }
+        fn read_proc_environ(&self, pid: u32) -> Vec<(String, String)> {
+            self.proc_envs.get(&pid).cloned().unwrap_or_default()
+        }
         fn command_exists(&self, prog: &str) -> bool {
             self.exists.iter().any(|e| e == prog)
         }
@@ -247,14 +338,48 @@ pub(crate) mod fake {
             self.ops.borrow_mut().push(format!("kill {pid}"));
             Ok(())
         }
-        fn spawn_detached(&self, prog: &str, args: &[&str]) -> std::io::Result<()> {
-            self.ops
-                .borrow_mut()
-                .push(format!("spawn {}", cmd_key(prog, args)));
+        fn spawn_detached_with_env(
+            &self,
+            envs: &[(String, String)],
+            prog: &str,
+            args: &[&str],
+        ) -> std::io::Result<()> {
+            let mut op = if envs.is_empty() {
+                "spawn".to_string()
+            } else {
+                let kv: Vec<String> =
+                    envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                format!("spawn-env {}", kv.join(","))
+            };
+            op.push(' ');
+            op.push_str(&cmd_key(prog, args));
+            self.ops.borrow_mut().push(op);
             if self.fail_spawn {
                 Err(std::io::Error::other("stub spawn failure"))
             } else {
                 Ok(())
+            }
+        }
+        fn spawn_background(
+            &self,
+            envs: &[(String, String)],
+            prog: &str,
+            args: &[&str],
+        ) -> std::io::Result<u32> {
+            let mut op = if envs.is_empty() {
+                "bg".to_string()
+            } else {
+                let kv: Vec<String> =
+                    envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                format!("bg-env {}", kv.join(","))
+            };
+            op.push(' ');
+            op.push_str(&cmd_key(prog, args));
+            self.ops.borrow_mut().push(op);
+            if self.fail_spawn {
+                Err(std::io::Error::other("stub spawn failure"))
+            } else {
+                Ok(self.bg_pid)
             }
         }
     }

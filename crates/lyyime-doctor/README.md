@@ -8,14 +8,19 @@
 | 模块 | 职责 |
 |---|---|
 | `paths.rs` | `Paths`:全部路径可注入;`Paths::for_home(tempdir)` 供测试收敛到临时目录,单测绝不触碰真实 HOME |
-| `system.rs` | `SystemOps` trait(env/进程/命令/kill/detached 拉起)+ `RealSystem` + 测试桩 `FakeSystem`(记录全部副作用调用) |
-| `checks.rs` | 8 项检查:env / daemon / engine-register / autostart / immodule / data / logs / locale |
-| `fixes.rs` | 6 个幂等修复:env / autostart / engine-register / restart-ibus / clean-cache / reinstall-dict,支持 dry-run |
+| `system.rs` | `SystemOps` trait(env/`/proc/<pid>/environ` 读取/进程/命令/kill/detached 拉起(可注入环境)/后台子进程)+ `RealSystem` + 测试桩 `FakeSystem`(记录全部副作用调用) |
+| `session.rs` | 会话环境探测:采样当前 uid 桌面会话进程(xfce4-session/panel、gnome-shell 等)的 `/proc/<pid>/environ`,归纳出会话真实使用的 `DBUS_SESSION_BUS_ADDRESS`/`DISPLAY`(多数派)。依据:诊断必须以 GUI 进程环境为准,不看调用方 shell;XFCE 私有会话总线 `/tmp/dbus-*` 不等于 `/run/user/<uid>/bus` |
+| `checks.rs` | 10 项检查:env / **gui-env**(真实 GUI 进程三件套,含跨进程一致性)/ **session-bus**(IBus 是否注册在会话真实总线上,busctl 地面真值 + daemon 进程环境兜底)/ daemon / engine-register / autostart / immodule / data / logs / locale |
+| `fixes.rs` | 6 个幂等修复:env / autostart / engine-register / **restart-ibus(自动按会话环境注入 DBUS_SESSION_BUS_ADDRESS/DISPLAY/XDG_RUNTIME_DIR 后拉起,根治「总线接错」)** / clean-cache / reinstall-dict,另有 modeb-env,支持 dry-run |
+| `probe.rs` | `probe` 子命令:真屏输入链路端到端验证(自建 `lyyime-probe` 窗口 + 显式 windowfocus + xdotool 注入 + 缓冲断言;绝不碰用户焦点窗口),直通/全角现象自动判因 |
 | `catalog.rs` | 内置输入法目录(id → dnf 包名/ibus 引擎名;包名按 openEuler 24.03) |
 | `ime.rs` | `ImeManager`:ime-list / ime-add / ime-remove / ime-default |
 
 ## 关键决策
 
+- **会话两大根因的代码化**(RESEARCH.md §4 / lyyime-ops SKILL 实录):
+  ①「总线接错」——daemon 活着但注册在错误总线(如 `/run/user/0/bus`),旧版 daemon 检查会误报 OK;现由 `session-bus` 检查以 busctl 地面真值定罪,`restart-ibus` 修复自动从 GUI 进程 environ 取会话总线注入拉起。
+  ②「环境断层」——xfce4-session 等会话进程自身缺三件套 → 全部子应用失效(GTK 3.24 不认 XSettings im-module);现由 `gui-env` 检查直接采样 `/proc/<pid>/environ`,不再被"调用方 shell 环境正常"误导。
 - **依赖只加 serde/serde_json/anyhow**(项目规则)。tempdir、XML 解析、GVariant 列表解析、UTC 时间戳均为手写小实现。
 - **安全边界**:
   - 所有写路径由 `Paths` 派生,绝不写 /etc;fix engine-register 只写 /usr/local/share(可写时)与 ~/.local。
@@ -30,5 +35,5 @@
 
 ## 测试
 
-- 单测 60 个(`cargo test -p lyyime-doctor`):catalog 纯函数、XML/GVariant 解析、8 项检查矩阵、全部 fix 动作(含幂等/dry-run/uid 过滤)、ImeManager 全流程(stub rpm/gsettings,不真装包)。
-- E2E:`tests/e2e/doctor_test.sh` —— 备份现场 → 故意写错 XMODIFIERS → `check --json` 断言 fail → `fix env --dry-run` 断言无副作用 → `fix env` → source 后断言恢复 ok → 幂等复验 → 还原;另断言 ime-list 真实输出与 ime-add/remove/default 的 dry-run 预览。
+- 单测 84 个(`cargo test -p lyyime-doctor`):catalog 纯函数、XML/GVariant 解析、10 项检查矩阵、全部 fix 动作(含幂等/dry-run/uid 过滤/会话总线注入)、会话环境采样、probe 全流程编排(缓冲由后台线程模拟引擎写盘)、ImeManager 全流程(stub rpm/gsettings,不真装包)。
+- E2E:`tests/e2e/doctor_test.sh` —— 备份现场 → 故意写错 XMODIFIERS → `check --json` 断言 fail(10 项)→ `fix env --dry-run` 断言无副作用 → `fix env` → source 后断言恢复 ok → 幂等复验 → 还原;另断言 ime-list 真实输出与 ime-add/remove/default 的 dry-run 预览。

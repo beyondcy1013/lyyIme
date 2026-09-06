@@ -93,7 +93,7 @@ def main() -> int:
             n = lib.lyyime_cand(eng, 0, buf, 256)
             assert buf.value.decode() == "你好", buf.value
             n = lib.lyyime_cand_comment(eng, 0, buf, 256)
-            assert buf.value.decode() == "ni hao", buf.value
+            assert buf.value.decode() == "wqvb", buf.value  # 注释=反查五笔码(同 tests/ffi_test.rs)
 
             # 3. -needed 约定:容量不足返回负值
             n = lib.lyyime_process_key(eng, LKEY_ESC, 0, None, 0)

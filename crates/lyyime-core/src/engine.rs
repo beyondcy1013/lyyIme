@@ -32,6 +32,7 @@ use crate::pinyin;
 use crate::punct::{to_chinese, QuoteState};
 use crate::rank;
 use crate::types::{CandKind, Candidate, Effect, LKey, Mode};
+use crate::user_words::UserWords;
 
 /// 缓冲区长度上限(合同 §5.1:连续小写字母,≤12)。
 pub(crate) const MAX_BUF: usize = 12;
@@ -39,6 +40,10 @@ pub(crate) const MAX_BUF: usize = 12;
 const MAX_CANDS: usize = 50;
 /// 完整切分枚举条数上限(防极端组合爆炸)。
 const SEGS_CAP: usize = 64;
+/// 造词历史容量:保留最近上屏的 CJK 字符数(合同 §12)。
+const RECENT_CAP: usize = 64;
+/// 造词一次选取的长度上限(词组编码取首末字,过长无意义)。
+const MAX_COIN_LEN: usize = 32;
 
 /// 排序前的原始候选(内部结构)。
 ///
@@ -109,6 +114,14 @@ pub(crate) struct Plan {
     pub(crate) quotes: QuoteState,
     /// 需要学习的上屏词(来自候选顶屏/选词/英文直通;原始字母直通不学习)。
     learned: Option<String>,
+    /// 造词:最近上屏 CJK 历史(合同 §12;仅 commit 含汉字时增长)。
+    pub(crate) recent: Vec<char>,
+    /// 造词:最近一次 commit 贡献的连续汉字数(Ctrl+= 的初始选长)。
+    pub(crate) last_run: usize,
+    /// 造词模式当前选取的尾部字长;None = 不在造词模式。
+    pub(crate) coin: Option<usize>,
+    /// 待入库的用户造词(word, code);apply 时写入造词库并落盘。
+    pub(crate) user_word: Option<(String, String)>,
 }
 
 impl Plan {
@@ -120,6 +133,10 @@ impl Plan {
             cn_hit: eng.cn_hit,
             quotes: eng.quotes,
             learned: None,
+            recent: eng.recent.clone(),
+            last_run: eng.last_run,
+            coin: eng.coin,
+            user_word: None,
         }
     }
 }
@@ -137,6 +154,14 @@ pub struct Engine {
     cn_hit: bool,
     learner: Learner,
     quotes: QuoteState,
+    /// 最近上屏 CJK 历史(造词原料,合同 §12;焦点切换不清,跨窗口即失效)。
+    recent: Vec<char>,
+    /// 最近一次 commit 贡献的连续汉字数(造词初始选长)。
+    last_run: usize,
+    /// 造词模式:Some(选长) = 进行中。
+    coin: Option<usize>,
+    /// 用户造词库(独立于 learner 的显式词,合同 §12)。
+    user_words: UserWords,
 }
 
 impl Engine {
@@ -145,7 +170,7 @@ impl Engine {
     /// 目录不存在/为空时不报错:得到一个"空引擎"(所有查询无候选,
     /// 但按键状态机、标点、直通行为照常),可用 [`Engine::is_loaded`] 判断。
     pub fn new(data_dir: &Path) -> Result<Self, crate::Error> {
-        let dict = DictIndex::load(data_dir);
+        let mut dict = DictIndex::load(data_dir);
         let cfg = Config::default();
         let path = cfg
             .user_dict
@@ -155,6 +180,9 @@ impl Engine {
         if cfg.learning {
             learner.load();
         }
+        // 造词库与用户词典同目录(user_words.tsv),启动即并入五笔索引。
+        let mut user_words = UserWords::new();
+        user_words.load(&mut dict, &user_words_path(&cfg));
         Ok(Self {
             dict,
             cfg,
@@ -165,6 +193,10 @@ impl Engine {
             cn_hit: false,
             learner,
             quotes: QuoteState::new(),
+            recent: Vec::new(),
+            last_run: 0,
+            coin: None,
+            user_words,
         })
     }
 
@@ -179,6 +211,8 @@ impl Engine {
             .unwrap_or_else(Config::default_user_dict_path);
         self.learner.set_path(path);
         self.learner.set_enabled(cfg.learning);
+        // 造词库随用户词典目录走:目录变化才重装载(造的词跟着数据目录迁移)。
+        self.user_words.set_path_and_load(&mut self.dict, user_words_path(&cfg));
         if cfg.mode != self.mode {
             self.mode = cfg.mode;
             self.clear_buf();
@@ -259,6 +293,10 @@ impl Engine {
 
     /// 直接选中当前页第 `idx`(0 起)个候选上屏;越界吞掉。
     pub fn select_candidate(&mut self, idx: usize) -> Vec<Effect> {
+        // 造词模式的单条候选仅用于展示选区与编码预览,不提供点选上屏。
+        if self.coin.is_some() {
+            return vec![Effect::Consumed];
+        }
         let mut plan = Plan::unchanged(self);
         let effects = match plan_page_slice(self, &plan).get(idx) {
             None => vec![Effect::Consumed],
@@ -294,6 +332,8 @@ impl Engine {
         }
         let mut p = Plan::unchanged(self);
         let effects = match key {
+            LKey::Coin => self.plan_coin_start(&mut p),
+            _ if self.coin.is_some() => self.plan_coin_key(&mut p, key),
             LKey::Char(c) => self.plan_char(&mut p, c),
             LKey::Digit(n) => self.plan_digit(&mut p, n),
             LKey::Space => self.plan_space(&mut p),
@@ -344,6 +384,15 @@ impl Engine {
                     vec![Effect::Preedit(None), empty_cands(), Effect::Pass]
                 }
             }
+            // 非造词模式的方向键:无组词语义,行为同 Other(有缓冲先清缓冲)。
+            LKey::ArrowLeft | LKey::ArrowRight | LKey::ArrowUp | LKey::ArrowDown => {
+                if p.buf.is_empty() {
+                    vec![Effect::Pass]
+                } else {
+                    plan_clear(&mut p);
+                    vec![Effect::Preedit(None), empty_cands(), Effect::Pass]
+                }
+            }
         };
         (effects, p)
     }
@@ -355,6 +404,16 @@ impl Engine {
         self.page = plan.page;
         self.cn_hit = plan.cn_hit;
         self.quotes = plan.quotes;
+        self.recent = plan.recent;
+        self.last_run = plan.last_run;
+        self.coin = plan.coin;
+        if let Some((word, code)) = plan.user_word {
+            // 内存索引即时生效;落盘失败不回滚(plan 阶段已做可写预检,
+            // 此处属罕见竞态),保 dirty 让下次造词重试。
+            if let Err(e) = self.user_words.add(&mut self.dict, &word, &code) {
+                eprintln!("lyyime-core: {e}");
+            }
+        }
         if let Some(word) = plan.learned {
             self.learner.record(&word);
         }
@@ -466,6 +525,172 @@ impl Engine {
     }
 
     // ------------------------------------------------------------------
+    // 造词模式(合同 §12:自定义快捷键 Ctrl+= 默认,方向键增减选字)
+    //
+    // 交互:中文态空缓冲按造词热键 → 选取最近上屏的连续汉字(初始为最近
+    // 一次 commit 的汉字串);→/↑ 多选一字,←/↓/退格 少选一字;Enter/Space
+    // 按五笔86 词组取码规则自动编码并存入 user_words.tsv;Esc 取消。
+    // 交互习惯借鉴极点五笔/万能五笔的自造词(Ctrl+= 造词)。
+    // ------------------------------------------------------------------
+
+    /// 计划态选区文本:最近 `n` 个上屏汉字。
+    fn plan_coin_text(&self, p: &Plan, n: usize) -> String {
+        let start = p.recent.len().saturating_sub(n);
+        p.recent[start..].iter().collect()
+    }
+
+    /// 造词模式的效果流:预编辑展示选区 + 单条候选(注释=自动编码预览)。
+    /// 候选同时写入计划状态(宿主经 lyyime_cand 逐条获取)。
+    fn coin_effects(&self, p: &mut Plan) -> Vec<Effect> {
+        let text = self.plan_coin_text(p, p.coin.unwrap_or(0));
+        let comment = self
+            .dict
+            .wubi_word_code(&text)
+            .unwrap_or_else(|| "缺码".to_string());
+        let cand = Candidate {
+            text: text.clone(),
+            comment,
+            score: 0.0,
+            kind: CandKind::User,
+        };
+        p.cands = vec![cand.clone()];
+        p.page = 0;
+        vec![
+            Effect::Preedit(Some(format!("造词:{text}"))),
+            Effect::Candidates(Arc::new(vec![cand])),
+        ]
+    }
+
+    /// 退出造词模式:清模式标记与候选页(缓冲本就为空)。
+    fn plan_coin_exit(p: &mut Plan) {
+        p.coin = None;
+        plan_clear(p);
+    }
+
+    /// 进入造词模式;组合中按下则先按普通流程上屏(历史随之入账)。
+    fn plan_coin_start(&self, p: &mut Plan) -> Vec<Effect> {
+        if !p.buf.is_empty() {
+            let learned = self.learn_worthy(p);
+            let text = self.finish_text(p);
+            let mut effects = plan_commit(self, p, &text, learned);
+            effects.extend(self.plan_coin_start(p));
+            return effects;
+        }
+        // 全程读计划态(p.recent/p.last_run):组合中提交的历史已在本键计划里。
+        if p.recent.is_empty() {
+            return vec![
+                Effect::Notice("造词:还没有可造词的上屏汉字,请先输入中文".to_string()),
+                Effect::Consumed,
+            ];
+        }
+        let cap = p.recent.len().min(MAX_COIN_LEN);
+        let init = p.last_run.clamp(1, cap);
+        // 最近一次只上屏了单字时自动带上前一字,凑成二字词起步。
+        p.coin = Some(if init < 2 && cap >= 2 { 2 } else { init });
+        self.coin_effects(p)
+    }
+
+    /// 造词模式中的按键:方向键增减选字,Enter/Space 存词,Esc 取消;
+    /// 其余键退出造词模式并按普通路径处理(用户继续正常输入)。
+    fn plan_coin_key(&self, p: &mut Plan, key: LKey) -> Vec<Effect> {
+        let cap = p.recent.len().min(MAX_COIN_LEN);
+        let min_sel = if cap >= 2 { 2 } else { 1 };
+        match key {
+            LKey::ArrowRight | LKey::ArrowUp => {
+                let n = p.coin.unwrap_or(0);
+                if n >= cap {
+                    vec![Effect::Consumed]
+                } else {
+                    p.coin = Some(n + 1);
+                    self.coin_effects(p)
+                }
+            }
+            LKey::ArrowLeft | LKey::ArrowDown | LKey::Backspace => {
+                let n = p.coin.unwrap_or(0);
+                if n <= min_sel {
+                    vec![Effect::Consumed]
+                } else {
+                    p.coin = Some(n - 1);
+                    self.coin_effects(p)
+                }
+            }
+            LKey::Enter | LKey::Space => self.plan_coin_commit(p),
+            LKey::Esc => {
+                Self::plan_coin_exit(p);
+                vec![Effect::Preedit(None), empty_cands(), Effect::Consumed]
+            }
+            LKey::Char(c) => {
+                Self::plan_coin_exit(p);
+                self.plan_char(p, c)
+            }
+            LKey::Digit(n) => {
+                Self::plan_coin_exit(p);
+                self.plan_digit(p, n)
+            }
+            LKey::Punct(c) => {
+                Self::plan_coin_exit(p);
+                self.plan_punct(p, c)
+            }
+            LKey::PageUp | LKey::PageDown => {
+                Self::plan_coin_exit(p);
+                self.plan_page(p, key == LKey::PageDown)
+            }
+            // Shift:空缓冲吞键,交宿主做单击判定(与普通路径一致)。
+            LKey::ShiftPress => {
+                Self::plan_coin_exit(p);
+                vec![Effect::Consumed]
+            }
+            _ => {
+                Self::plan_coin_exit(p);
+                vec![Effect::Preedit(None), empty_cands(), Effect::Pass]
+            }
+        }
+    }
+
+    /// 确认造词:推算词组编码 → 写入用户造词库(apply 落盘)。
+    fn plan_coin_commit(&self, p: &mut Plan) -> Vec<Effect> {
+        let sel = self.plan_coin_text(p, p.coin.unwrap_or(0));
+        Self::plan_coin_exit(p);
+        let clear = vec![Effect::Preedit(None), empty_cands()];
+        if sel.is_empty() {
+            return vec![Effect::Consumed];
+        }
+        if let Some(missing) = sel.chars().find(|c| !self.dict.has_wubi_code(*c)) {
+            let mut fx = vec![Effect::Notice(format!(
+                "造词失败:「{missing}」不在五笔码表,无法自动编码"
+            ))];
+            fx.extend(clear);
+            fx.push(Effect::Consumed);
+            return fx;
+        }
+        let Some(code) = self.dict.wubi_word_code(&sel) else {
+            let mut fx = vec![Effect::Notice("造词失败:编码推算异常".to_string())];
+            fx.extend(clear);
+            fx.push(Effect::Consumed);
+            return fx;
+        };
+        // 可写性预检(幂等、重试安全):失败给人话提示,不做半截应用。
+        if !self.user_words.prepare() {
+            let mut fx = vec![Effect::Notice(format!(
+                "造词失败:无法写入 {},请检查权限",
+                self.user_words.path_display()
+            ))];
+            fx.extend(clear);
+            fx.push(Effect::Consumed);
+            return fx;
+        }
+        p.user_word = Some((sel.clone(), code.clone()));
+        // 同时计入学习加成,重排时 ×1.5 置顶。
+        p.learned = Some(sel.clone());
+        vec![
+            Effect::Notice(format!("已造词:{sel}({code}),可直接用该编码打出")),
+            Effect::Preedit(None),
+            empty_cands(),
+        ]
+    }
+
+
+    // ------------------------------------------------------------------
     // 提交与状态维护(作用于 Plan)
     // ------------------------------------------------------------------
 
@@ -513,6 +738,8 @@ impl Engine {
         self.cands.clear();
         self.page = 0;
         self.cn_hit = false;
+        // 造词模式不跨焦点延续(预编辑已随 reset 消失,继续吞键会卡输入)。
+        self.coin = None;
     }
 
     // ------------------------------------------------------------------
@@ -700,16 +927,16 @@ impl Engine {
                     // 词组必须还有下一个音节来消化这个不完整片段。
                     if p.sylls.len() > seg.len() && p.sylls[seg.len()].starts_with(frag) {
                         let spec = seg.len() as f32 * 3.0 + 1.0 + frag_len / 10.0;
-                    insert_cand(
-                        pool,
-                        p.word.clone(),
-                        self.wubi_comment(&p.word, format!("{joined} {frag}")),
-                        rank::TIER_PINYIN_PARTIAL,
-                        spec,
-                        rank::norm10(p.freq, dict.py_phrase_max),
-                        CandKind::Pinyin,
-                        suggestion_of(dict, &p.word),
-                    );
+                        insert_cand(
+                            pool,
+                            p.word.clone(),
+                            self.wubi_comment(&p.word, format!("{joined} {frag}")),
+                            rank::TIER_PINYIN_PARTIAL,
+                            spec,
+                            rank::norm10(p.freq, dict.py_phrase_max),
+                            CandKind::Pinyin,
+                            suggestion_of(dict, &p.word),
+                        );
                         hits += 1;
                     }
                 }
@@ -904,12 +1131,41 @@ fn plan_commit(_eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Ef
     if learned {
         p.learned = Some(text.to_string());
     }
+    // 造词历史:只记汉字;本次 commit 不含汉字(标点/字母直通)时不打断
+    // last_run——「你好,」的逗号不应让造词起点清零。
+    let cjk: Vec<char> = text.chars().filter(|c| is_cjk(*c)).collect();
+    if !cjk.is_empty() {
+        p.last_run = cjk.len().min(RECENT_CAP);
+        p.recent.extend(cjk.iter().copied());
+        let overflow = p.recent.len().saturating_sub(RECENT_CAP);
+        if overflow > 0 {
+            p.recent.drain(..overflow);
+        }
+    }
     plan_clear(p);
     vec![
         Effect::Commit(text.to_string()),
         Effect::Preedit(None),
         empty_cands(),
     ]
+}
+
+/// CJK 统一表意字符(含扩展 A/兼容区;造词只认汉字)。
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2A6DF)
+}
+
+/// 造词库路径:与用户词典同目录的 `user_words.tsv`(目录由 user_dict 覆盖)。
+fn user_words_path(cfg: &Config) -> std::path::PathBuf {
+    let base = cfg
+        .user_dict
+        .clone()
+        .unwrap_or_else(Config::default_user_dict_path);
+    match base.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("user_words.tsv"),
+        _ => std::path::PathBuf::from("user_words.tsv"),
+    }
 }
 
 /// 组合中的效果流:[Preedit, Candidates]。

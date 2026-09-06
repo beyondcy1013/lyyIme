@@ -35,6 +35,7 @@ lyyime-cli —— lyyIme 核心引擎 headless 调试/演示工具
 键序列写法:
   字母 a-z / 数字 1-9 / 标点按字面取;空格 = 空格键;'-' 与 '=' = 翻页;
   <esc> <enter> <bs> <space> <pageup> <pagedown> <other> <shift>
+  <coin>(造词热键,Ctrl+=)<left> <right> <up> <down>(方向键,造词选字)
   (<shift> 模拟 Shift 单击,切换中/英文模式)
 
 示例:
@@ -70,6 +71,11 @@ fn parse_sequence(seq: &str) -> Result<Vec<Step>, String> {
                     "pagedown" | "next" | "equal" | "=" => Step::Key(LKey::PageDown),
                     "shift" | "shiftclick" => Step::ShiftClick,
                     "other" | "tab" => Step::Key(LKey::Other),
+                    "coin" | "ctrl+equal" => Step::Key(LKey::Coin),
+                    "left" => Step::Key(LKey::ArrowLeft),
+                    "right" => Step::Key(LKey::ArrowRight),
+                    "up" => Step::Key(LKey::ArrowUp),
+                    "down" => Step::Key(LKey::ArrowDown),
                     other => return Err(format!("未知按键标记 <{other}>(见 --help)")),
                 }
             }
@@ -189,6 +195,11 @@ fn run() -> ExitCode {
                     LKey::Punct(c) => c.to_string(),
                     LKey::ShiftPress => "<shiftpress>".to_string(),
                     LKey::Other => "<other>".to_string(),
+                    LKey::Coin => "<coin>".to_string(),
+                    LKey::ArrowLeft => "<left>".to_string(),
+                    LKey::ArrowRight => "<right>".to_string(),
+                    LKey::ArrowUp => "<up>".to_string(),
+                    LKey::ArrowDown => "<down>".to_string(),
                 };
                 (eng.process_key(*k), token)
             }

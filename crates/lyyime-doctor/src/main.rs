@@ -7,7 +7,7 @@
 //!   ime-default <id> [--yes]
 //! 依赖仅 std + serde/serde_json/anyhow(项目规则:少引依赖)。
 
-use lyyime_doctor::{CheckReport, Doctor, ImeManager, ImeOpResult, Paths, Status};
+use lyyime_doctor::{CheckReport, Doctor, ImeManager, ImeOpResult, Paths, ProbeOptions, Status};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -15,12 +15,21 @@ const USAGE: &str = r#"lyyime-doctor —— Linux 中文输入法诊断/修复/�
 
 用法:
   lyyime-doctor check [--json]
-      诊断输入法环境:env / daemon / engine-register / autostart / immodule / data / logs / locale
+      诊断输入法环境:env / gui-env / session-bus / daemon / engine-register /
+      autostart / immodule / data / logs / locale
+      (gui-env 读真实 GUI 进程 /proc/<pid>/environ;session-bus 核对 IBus 是否
+       注册在桌面会话真实使用的总线上——「总线接错」「环境断层」两大故障的直接定位项)
 
   lyyime-doctor fix (--issue <id>)... | --all [--dry-run]
       修复动作 id:env / modeb-env / autostart / engine-register / restart-ibus / clean-cache / reinstall-dict
-      也可给检查项 id(env/daemon/engine-register/autostart/immodule/data),自动映射到对应修复
+      也可给检查项 id(env/gui-env/daemon/session-bus/engine-register/autostart/immodule/data),自动映射到对应修复
+      restart-ibus 会按会话真实环境(取自 GUI 进程)接到正确总线后拉起 ibus-daemon
       默认实际执行;--dry-run 只打印将做什么
+
+  lyyime-doctor probe [--display :N] [--bus <addr>] [--text nihao] [--expect 你好]
+                      [--timeout 秒] [--script 路径]
+      真屏输入链路端到端验证:自建 lyyime-probe 窗口 + 显式聚焦(不碰用户焦点)
+      + xdotool 注入字母,断言缓冲出现上屏结果;通过=环境→总线→daemon→引擎→上屏全通
 
   lyyime-doctor ime-list [--json]
       枚举本机输入法(ibus 引擎 / fcitx5 / lyyime / 框架)
@@ -79,6 +88,7 @@ fn run(args: &[String]) -> i32 {
         }
         Some("check") => cmd_check(json),
         Some("fix") => cmd_fix(&args[1..]),
+        Some("probe") => cmd_probe(&args[1..]),
         Some("ime-list") => cmd_ime_list(json),
         Some("ime-add") => cmd_ime_op(&args[1..], ImeOp::Add),
         Some("ime-remove") => cmd_ime_op(&args[1..], ImeOp::Remove),
@@ -220,7 +230,7 @@ fn cmd_fix(args: &[String]) -> i32 {
 fn fixes_known(id: &str) -> bool {
     matches!(
         id,
-        "env" | "modeb-env" | "daemon"
+        "env" | "modeb-env" | "daemon" | "gui-env" | "session-bus"
             | "engine-register"
             | "autostart"
             | "immodule"
@@ -231,6 +241,48 @@ fn fixes_known(id: &str) -> bool {
             | "clean-cache"
             | "reinstall-dict"
     )
+}
+
+// ---------------------------------------------------------------------------
+// probe
+// ---------------------------------------------------------------------------
+
+fn cmd_probe(args: &[String]) -> i32 {
+    let val = |flag: &str| -> Option<String> {
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == flag {
+                return it.next().cloned();
+            }
+            if let Some(v) = a.strip_prefix(&format!("{flag}=")) {
+                return Some(v.to_string());
+            }
+        }
+        None
+    };
+    let opts = ProbeOptions {
+        display: val("--display"),
+        bus: val("--bus"),
+        text: val("--text").unwrap_or_else(|| "nihao".into()),
+        expect: val("--expect").unwrap_or_else(|| "你好".into()),
+        timeout_secs: val("--timeout").and_then(|v| v.parse().ok()).unwrap_or(20),
+        script: val("--script").map(std::path::PathBuf::from),
+        ..Default::default()
+    };
+    let doctor = Doctor::new(Paths::detect());
+    let report = doctor.run_probe(&opts);
+    let tag = |ok: bool| if ok { "[ OK ]" } else { "[FAIL]" };
+    for s in &report.steps {
+        println!("{} {:<8} {}", tag(s.ok), s.name, s.detail.replace('\n', "\n             "));
+    }
+    println!("{}", "─".repeat(72));
+    if report.passed {
+        println!("probe:PASS —— 真屏输入链路全通(环境→总线→daemon→引擎→上屏)");
+        0
+    } else {
+        println!("probe:FAIL —— 见上方步骤;可运行 `lyyime-doctor check` 定位具体环节,`lyyime-doctor fix --all` 一键修复");
+        1
+    }
 }
 
 // ---------------------------------------------------------------------------

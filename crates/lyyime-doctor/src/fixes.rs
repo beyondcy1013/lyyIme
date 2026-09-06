@@ -18,8 +18,8 @@ pub(crate) const FIX_IDS: [&str; 7] = [
 /// 检查项 → 修复动作的映射
 fn fix_for_check(check_id: &str) -> Option<&'static str> {
     match check_id {
-        "env" | "locale" => Some("env"),
-        "daemon" => Some("restart-ibus"),
+        "env" | "locale" | "gui-env" => Some("env"),
+        "daemon" | "session-bus" => Some("restart-ibus"),
         "engine-register" => Some("engine-register"),
         "autostart" => Some("autostart"),
         "immodule" => Some("clean-cache"),
@@ -34,7 +34,7 @@ fn action(fix_id: &str, issue: &str) -> FixAction {
         "modeb-env" => "写入 Mode B 独立外挂会话环境(GTK_IM_MODULE=xim、XMODIFIERS=@im=lyyime;Qt 应用仍走 ibus);切回 ibus 用 fix --issue env",
         "autostart" => "写入 ~/.config/autostart/im-lyyime.desktop(优先拉起 lyyime-app,缺省时拉起 ibus-daemon -drx)",
         "engine-register" => "从项目 ibus-engine/ 拷贝组件 XML 与引擎脚本到系统级(/usr/local/share)与用户级目录,并执行 ibus write-cache",
-        "restart-ibus" => "重启当前用户的 ibus-daemon(kill 本 UID 的 ibus-daemon 后以 -drx 重新拉起)",
+        "restart-ibus" => "重启当前用户的 ibus-daemon(kill 本 UID 的 ibus-daemon 后,按桌面会话真实环境[DBUS_SESSION_BUS_ADDRESS/DISPLAY,取自 GUI 进程 /proc/<pid>/environ]以 -drx 重新拉起)",
         "clean-cache" => "清理 ~/.cache/ibus/bus,并用 gtk-query-immodules-3.0 重建 GTK immodule 缓存",
         "reinstall-dict" => "调用 lyyime-dicttool convert 重新生成 data/runtime 词典",
         _ => "",
@@ -159,7 +159,7 @@ pub(crate) fn apply(
         "modeb-env" => apply_modeb_env(p, dry_run),
         "autostart" => apply_autostart(p, dry_run),
         "engine-register" => apply_engine_register(p, sys, dry_run),
-        "restart-ibus" => apply_restart_ibus(sys, dry_run),
+        "restart-ibus" => apply_restart_ibus(p, sys, dry_run),
         "clean-cache" => apply_clean_cache(p, sys, dry_run),
         "reinstall-dict" => apply_reinstall_dict(p, sys, dry_run),
         other => Ok(ApplyOutcome::Failed(format!("未知的修复动作 id:{other}"))),
@@ -375,7 +375,7 @@ fn copy_to(src: std::path::PathBuf, dst: &std::path::Path, notes: &mut Vec<Strin
     }
 }
 
-fn apply_restart_ibus(sys: &dyn SystemOps, dry: bool) -> anyhow::Result<ApplyOutcome> {
+fn apply_restart_ibus(_p: &Paths, sys: &dyn SystemOps, dry: bool) -> anyhow::Result<ApplyOutcome> {
     let uid = sys.current_uid();
     let victims: Vec<u32> = sys
         .find_processes("ibus-daemon")
@@ -383,9 +383,28 @@ fn apply_restart_ibus(sys: &dyn SystemOps, dry: bool) -> anyhow::Result<ApplyOut
         .filter(|x| x.uid == uid)
         .map(|x| x.pid)
         .collect();
+    // 经验(RESEARCH.md §4):直接继承调用方 shell 的环境会把 daemon 接到错误总线
+    // (如 /run/user/0/bus),导致"daemon 活着但应用全连不上"。必须按会话真实环境注入。
+    let sess = crate::session::detect_session_env(sys);
+    let mut envs: Vec<(String, String)> = vec![];
+    if let Some(b) = &sess.dbus_address {
+        envs.push(("DBUS_SESSION_BUS_ADDRESS".into(), b.clone()));
+    }
+    if let Some(d) = &sess.display {
+        envs.push(("DISPLAY".into(), d.clone()));
+    }
+    let runtime_dir = format!("/run/user/{uid}");
+    if std::path::Path::new(&runtime_dir).is_dir() {
+        envs.push(("XDG_RUNTIME_DIR".into(), runtime_dir));
+    }
+    let env_desc = if envs.is_empty() {
+        "继承当前环境(未探测到会话总线)".to_string()
+    } else {
+        envs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")
+    };
     if dry {
         return Ok(ApplyOutcome::DryRun(format!(
-            "将 kill 当前用户(uid={uid})的 ibus-daemon: {:?};然后执行 ibus-daemon -drx(仅本 UID,不动他人进程)",
+            "将 kill 当前用户(uid={uid})的 ibus-daemon: {:?};然后按会话环境({env_desc})拉起 ibus-daemon -drx(仅本 UID,不动他人进程)",
             victims
         )));
     }
@@ -397,13 +416,13 @@ fn apply_restart_ibus(sys: &dyn SystemOps, dry: bool) -> anyhow::Result<ApplyOut
             "已尝试 kill,但未找到 ibus-daemon 可执行文件,无法重新拉起;请安装 ibus".into(),
         ));
     }
-    match sys.spawn_detached("ibus-daemon", &["-drx"]) {
+    match sys.spawn_detached_with_env(&envs, "ibus-daemon", &["-drx"]) {
         Ok(()) => Ok(ApplyOutcome::Applied(format!(
-            "已停止 {:?} 并以 -drx 重新拉起 ibus-daemon",
+            "已停止 {:?} 并按会话环境({env_desc})重新拉起 ibus-daemon -drx",
             victims
         ))),
         Err(e) => Ok(ApplyOutcome::Failed(format!(
-            "ibus-daemon 已停止但重新拉起失败({e});请手动执行 ibus-daemon -drx"
+            "ibus-daemon 已停止但重新拉起失败({e});请手动执行:DBUS_SESSION_BUS_ADDRESS=<会话总线> ibus-daemon -drx"
         ))),
     }
 }
@@ -596,6 +615,7 @@ mod tests {
         assert!(!env_sh2.contains("GTK_IM_MODULE=xim"));
     }
 
+    #[test]
     fn fix_env_writes_both_files_and_is_idempotent() {
         let t = TempDir::new("fx1");
         let p = paths(&t);
@@ -715,7 +735,10 @@ mod tests {
         let ops = sys.ops_snapshot();
         assert!(ops.contains(&"kill 100".to_string()), "{ops:?}");
         assert!(!ops.contains(&"kill 200".to_string()), "绝不能 kill 其他用户的进程");
-        assert!(ops.contains(&"spawn ibus-daemon -drx".to_string()));
+        assert!(
+            ops.iter().any(|o| o.starts_with("spawn") && o.contains("ibus-daemon -drx")),
+            "{ops:?}"
+        );
     }
 
     #[test]
@@ -726,6 +749,57 @@ mod tests {
         let out = apply(&Paths::for_home(&t.path), &sys, &a, true).unwrap();
         assert!(matches!(out, ApplyOutcome::DryRun(_)));
         assert!(sys.ops_snapshot().is_empty(), "dry-run 不得有副作用");
+    }
+
+    #[test]
+    fn fix_restart_ibus_injects_session_bus_and_display() {
+        // 会话经验:重启后必须接到 GUI 会话真实使用的总线,而非继承调用方 shell
+        let sess_bus = "unix:path=/tmp/dbus-iF1PMFDYhv";
+        let sys = FakeSystem::new(0)
+            .with_proc(100, 0, "root", "ibus-daemon -drx")
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_proc_environ(10, "DISPLAY", ":11.0")
+            .with_exists("ibus-daemon");
+        let a = FixAction { id: "restart-ibus".into(), issue: "daemon".into(), description: String::new() };
+        let t = TempDir::new("fx13");
+        let out = apply(&Paths::for_home(&t.path), &sys, &a, false).unwrap();
+        assert!(matches!(out, ApplyOutcome::Applied(_)), "{:?}", out.message());
+        let ops = sys.ops_snapshot();
+        assert!(
+            ops.iter().any(|o| o.contains("spawn-env")
+                && o.contains(&format!("DBUS_SESSION_BUS_ADDRESS={sess_bus}"))
+                && o.contains("DISPLAY=:11.0")
+                && o.ends_with("ibus-daemon -drx")),
+            "{ops:?}"
+        );
+        assert!(out.message().contains(sess_bus), "结果消息应写明接到了哪条总线: {}", out.message());
+    }
+
+    #[test]
+    fn fix_restart_ibus_dry_run_states_target_bus() {
+        let sess_bus = "unix:path=/tmp/dbus-AAA";
+        let sys = FakeSystem::new(0)
+            .with_proc(100, 0, "root", "ibus-daemon -drx")
+            .with_proc(10, 0, "root", "xfce4-panel")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_exists("ibus-daemon");
+        let a = FixAction { id: "restart-ibus".into(), issue: "session-bus".into(), description: String::new() };
+        let t = TempDir::new("fx14");
+        let out = apply(&Paths::for_home(&t.path), &sys, &a, true).unwrap();
+        assert!(matches!(out, ApplyOutcome::DryRun(_)));
+        assert!(out.message().contains(sess_bus), "{}", out.message());
+        assert!(sys.ops_snapshot().is_empty());
+    }
+
+    #[test]
+    fn plan_maps_new_check_ids() {
+        let t = TempDir::new("pl2");
+        let sys = FakeSystem::new(0);
+        let ids: Vec<String> = vec!["gui-env".into(), "session-bus".into()];
+        let actions = plan_fixes(&paths(&t), &sys, &ids);
+        let fix_ids: Vec<&str> = actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(fix_ids, vec!["env", "restart-ibus"]);
     }
 
     #[test]

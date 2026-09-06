@@ -1,12 +1,15 @@
-//! `check`:8 项环境诊断(ARCHITECTURE.md §9)。
+//! `check`:10 项环境诊断(ARCHITECTURE.md §9)。
 
 use crate::model::{CheckResult, Status};
 use crate::paths::Paths;
-use crate::system::SystemOps;
+use crate::session::{detect_session_env, SessionEnv};
+use crate::system::{ProcInfo, SystemOps};
 
 #[allow(dead_code)] // 供测试断言顺序
-pub(crate) const CHECK_IDS: [&str; 8] = [
+pub(crate) const CHECK_IDS: [&str; 10] = [
     "env",
+    "gui-env",
+    "session-bus",
     "daemon",
     "engine-register",
     "autostart",
@@ -19,6 +22,8 @@ pub(crate) const CHECK_IDS: [&str; 8] = [
 pub(crate) fn run_checks(p: &Paths, sys: &dyn SystemOps) -> Vec<CheckResult> {
     vec![
         check_env(sys),
+        check_gui_env(sys),
+        check_session_bus(p, sys),
         check_daemon(p, sys),
         check_engine_register(p, sys),
         check_autostart(p),
@@ -154,6 +159,259 @@ fn check_env(sys: &dyn SystemOps) -> CheckResult {
         status: Status::Ok,
         detail: format!("统一指向「{}」({detail}{extra})", uniq[0]),
         fix_hint: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1b. gui-env:图形会话进程的真实环境(经验:以 GUI 应用 pid 为准,不看 shell)
+// ---------------------------------------------------------------------------
+
+/// 三件套归类。Ok((框架 token, 描述))= 该进程的应用会正确连到输入法;Err(原因)= 有断层。
+/// token 用于跨进程一致性比对:ibus / fcitx5 / lyyime(Mode B)。
+fn classify_three(
+    gtk: Option<&str>,
+    qt: Option<&str>,
+    xmod: Option<&str>,
+) -> Result<(String, String), String> {
+    let missing: Vec<&str> = [
+        ("GTK_IM_MODULE", gtk),
+        ("QT_IM_MODULE", qt),
+        ("XMODIFIERS", xmod),
+    ]
+    .iter()
+    .filter(|(_, v)| v.is_none())
+    .map(|(k, _)| *k)
+    .collect();
+    if !missing.is_empty() {
+        return Err(format!("缺少 {}", missing.join("、")));
+    }
+    let (g, q, x) = (gtk.unwrap().trim(), qt.unwrap().trim(), xmod.unwrap().trim());
+    // Mode B(独立外挂 lyyime-xim):GTK 走 xim 直连,XMODIFIERS=@im=lyyime,Qt 仍走 ibus
+    if x.contains("lyyime") && g == "xim" {
+        return Ok((
+            "lyyime".into(),
+            "Mode B 外挂 profile(GTK=xim, XMOD=@im=lyyime, Qt=ibus)".into(),
+        ));
+    }
+    let mut toks: Vec<String> = [g, q, x].iter().map(|v| normalize_framework(v)).collect();
+    toks.sort();
+    toks.dedup();
+    if toks.len() == 1 {
+        Ok((toks[0].clone(), format!("统一指向「{}」", toks[0])))
+    } else {
+        Err(format!(
+            "指向不同框架(GTK={g}, QT={q}, XMOD={x})",
+        ))
+    }
+}
+
+fn check_gui_env(sys: &dyn SystemOps) -> CheckResult {
+    let id = "gui-env";
+    let title = "图形会话进程真实环境(/proc/<pid>/environ 三件套)";
+    let sess = detect_session_env(sys);
+    if sess.sampled.is_empty() {
+        return CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Warn,
+            detail: "未发现桌面会话进程(xfce4-session/panel 等),无法采样真实应用环境(未登录图形界面时属正常)".into(),
+            fix_hint: None,
+        };
+    }
+    let mut ok_lines = vec![];
+    let mut tokens: Vec<String> = vec![];
+    let mut bad = vec![];
+    for s in &sess.sampled {
+        let label = format!("pid={}({})", s.pid, s.name);
+        match classify_three(
+            s.getenv("GTK_IM_MODULE"),
+            s.getenv("QT_IM_MODULE"),
+            s.getenv("XMODIFIERS"),
+        ) {
+            Ok((token, desc)) => {
+                ok_lines.push(format!("{label} {desc}"));
+                tokens.push(token);
+            }
+            Err(reason) => bad.push(format!("{label} {reason}")),
+        }
+    }
+    if !bad.is_empty() {
+        return CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Fail,
+            detail: format!(
+                "{}(正常项:{});环境断层:会话内新启动的应用会原样继承这份环境,GTK 3.24 实测不认 XSettings 的 im-module,三件套只能靠环境变量传入(docs/RESEARCH.md §4)",
+                bad.join("; "),
+                if ok_lines.is_empty() { String::new() } else { ok_lines.join("; ") }
+            ),
+            fix_hint: Some(
+                "lyyime-doctor fix --issue env(写入持久配置后注销重登生效;免登急修:source ~/.config/lyyime/env.sh 后重启目标应用)".into(),
+            ),
+        };
+    }
+    // 跨进程一致性:各会话进程自身没问题、但彼此指向不同框架 → 两批应用会连到不同 IM
+    let mut uniq = tokens.clone();
+    uniq.sort();
+    uniq.dedup();
+    if uniq.len() > 1 {
+        return CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Fail,
+            detail: format!(
+                "会话内不同进程指向不同框架({});不同批启动的应用会连到不同输入法框架",
+                uniq.join(" vs ")
+            ),
+            fix_hint: Some(
+                "lyyime-doctor fix --issue env(统一写入后注销重登生效)".into(),
+            ),
+        };
+    }
+    CheckResult {
+        id: id.into(),
+        title: title.into(),
+        status: Status::Ok,
+        detail: ok_lines.join("; "),
+        fix_hint: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1c. session-bus:IBus 是否注册在桌面会话真实使用的总线上
+// ---------------------------------------------------------------------------
+
+/// (总线上的注册名, 框架进程名)
+fn framework_bus_names(fw: &str) -> (&'static str, &'static str) {
+    if fw == "fcitx5" {
+        ("org.fcitx.Fcitx5", "fcitx5")
+    } else {
+        ("org.freedesktop.IBus", "ibus-daemon")
+    }
+}
+
+/// 读取本 uid 框架进程各自连接的总线地址(来自其 /proc/<pid>/environ)
+fn daemon_bus_addresses(sys: &dyn SystemOps, daemons: &[ProcInfo]) -> Vec<Option<String>> {
+    daemons
+        .iter()
+        .map(|d| {
+            sys.read_proc_environ(d.pid)
+                .iter()
+                .find(|(k, _)| k == "DBUS_SESSION_BUS_ADDRESS")
+                .map(|(_, v)| v.clone())
+        })
+        .collect()
+}
+
+fn check_session_bus(_p: &Paths, sys: &dyn SystemOps) -> CheckResult {
+    let id = "session-bus";
+    let title = "会话总线归属(IBus 注册在桌面会话真实使用的总线上)";
+    let fw = detected_framework(sys);
+    let (bus_name, daemon_name) = framework_bus_names(fw);
+    let sess: SessionEnv = detect_session_env(sys);
+    let Some(bus) = sess.dbus_address.clone() else {
+        return CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Warn,
+            detail: "未探测到图形会话总线(无桌面会话进程),无法核对注册位置".into(),
+            fix_hint: None,
+        };
+    };
+    let uid = sys.current_uid();
+    let daemons: Vec<ProcInfo> = sys
+        .find_processes(daemon_name)
+        .into_iter()
+        .filter(|x| x.uid == uid)
+        .collect();
+    let daemon_buses = daemon_bus_addresses(sys, &daemons);
+    let on_session = daemon_buses.iter().any(|b| b.as_deref() == Some(bus.as_str()));
+    let multi_note = if sess.all_dbus_addresses.len() > 1 {
+        format!(
+            "(注意:采样到 {} 条会话总线 [{}],存在多屏/多会话分裂)",
+            sess.all_dbus_addresses.len(),
+            sess.all_dbus_addresses.join(" | ")
+        )
+    } else {
+        String::new()
+    };
+
+    // 地面真值:busctl 在会话总线上列名字;不可用(None)则退回按 daemon 进程环境比对
+    let busctl_seen: Option<bool> = match sys.run("busctl", &[&format!("--address={bus}"), "list"]) {
+        Ok(o) if o.success => Some(o.stdout.contains(bus_name)),
+        _ => None,
+    };
+
+    match (busctl_seen, daemons.is_empty()) {
+        (Some(true), _) => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Ok,
+            detail: format!("{fw}({bus_name})已注册在会话总线 {bus}{multi_note}"),
+            fix_hint: None,
+        },
+        (Some(false), true) => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Fail,
+            detail: format!(
+                "会话总线({bus})上没有 {bus_name} 注册,也没有运行中的 {daemon_name}——图形会话将没有输入法可用"
+            ),
+            fix_hint: Some("lyyime-doctor fix --issue restart-ibus".into()),
+        },
+        (Some(false), false) if !on_session => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Fail,
+            detail: format!(
+                "「总线接错」:{daemon_name} 在运行,但连的是别的总线({});会话总线({bus})上没有 {bus_name} 注册,桌面应用全部连不上输入法(本机最常见故障,见 docs/RESEARCH.md §4)",
+                daemon_buses
+                    .iter()
+                    .map(|b| b.as_deref().unwrap_or("(未知)"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
+            fix_hint: Some(format!("lyyime-doctor fix --issue restart-ibus(会自动按会话环境接到 {bus})")),
+        },
+        (Some(false), false) => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Warn,
+            detail: format!(
+                "{daemon_name} 自称连着会话总线,但 busctl 未在总线 {bus} 上见到 {bus_name}(可能刚启动或会话策略限制);建议重启后复检"
+            ),
+            fix_hint: Some("lyyime-doctor fix --issue restart-ibus".into()),
+        },
+        (None, true) => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Fail,
+            detail: format!("未发现运行中的 {daemon_name}(busctl 不可用,无法进一步核对注册)"),
+            fix_hint: Some("lyyime-doctor fix --issue restart-ibus".into()),
+        },
+        (None, false) if on_session => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Ok,
+            detail: format!(
+                "{daemon_name} 连接的地址与会话总线一致({bus})(busctl 不可用,按 daemon 进程环境比对){multi_note}"
+            ),
+            fix_hint: None,
+        },
+        (None, false) => CheckResult {
+            id: id.into(),
+            title: title.into(),
+            status: Status::Fail,
+            detail: format!(
+                "「总线接错」(busctl 不可用,按 daemon 进程环境比对):{daemon_name} 连的是({});会话总线是({bus})",
+                daemon_buses
+                    .iter()
+                    .map(|b| b.as_deref().unwrap_or("(未知)"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
+            fix_hint: Some("lyyime-doctor fix --issue restart-ibus(会自动接到会话总线)".into()),
+        },
     }
 }
 
@@ -971,7 +1229,164 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_checks_run_in_order() {
+    fn gui_env_warn_without_desktop_procs() {
+        let r = check_gui_env(&FakeSystem::new(0));
+        assert_eq!(r.status, Status::Warn);
+        assert!(r.detail.contains("未发现桌面会话进程"));
+    }
+
+    #[test]
+    fn gui_env_ok_when_leaders_have_full_trio() {
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "GTK_IM_MODULE", "ibus")
+            .with_proc_environ(10, "QT_IM_MODULE", "ibus")
+            .with_proc_environ(10, "XMODIFIERS", "@im=ibus")
+            .with_proc(11, 0, "root", "xfce4-panel")
+            .with_proc_environ(11, "GTK_IM_MODULE", "ibus")
+            .with_proc_environ(11, "QT_IM_MODULE", "ibus")
+            .with_proc_environ(11, "XMODIFIERS", "@im=ibus");
+        let r = check_gui_env(&sys);
+        assert_eq!(r.status, Status::Ok, "{:?}", r.detail);
+        assert!(r.detail.contains("pid=10"));
+    }
+
+    #[test]
+    fn gui_env_ok_for_modeb_profile() {
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "GTK_IM_MODULE", "xim")
+            .with_proc_environ(10, "QT_IM_MODULE", "ibus")
+            .with_proc_environ(10, "XMODIFIERS", "@im=lyyime");
+        let r = check_gui_env(&sys);
+        assert_eq!(r.status, Status::Ok, "{:?}", r.detail);
+        assert!(r.detail.contains("Mode B"));
+    }
+
+    #[test]
+    fn gui_env_fail_when_leader_missing_vars() {
+        // 会话经验根因 #2:xfce4-session 本身没有三件套 → 全部子应用失效
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DISPLAY", ":11.0");
+        let r = check_gui_env(&sys);
+        assert_eq!(r.status, Status::Fail);
+        assert!(r.detail.contains("pid=10(xfce4-session) 缺少"), "{}", r.detail);
+        assert!(r.fix_hint.as_deref().unwrap().contains("fix --issue env"));
+    }
+
+    #[test]
+    fn gui_env_fail_when_leaders_disagree() {
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "GTK_IM_MODULE", "ibus")
+            .with_proc_environ(10, "QT_IM_MODULE", "ibus")
+            .with_proc_environ(10, "XMODIFIERS", "@im=ibus")
+            .with_proc(12, 0, "root", "xfce4-panel")
+            .with_proc_environ(12, "GTK_IM_MODULE", "fcitx")
+            .with_proc_environ(12, "QT_IM_MODULE", "fcitx")
+            .with_proc_environ(12, "XMODIFIERS", "@im=fcitx");
+        let r = check_gui_env(&sys);
+        assert_eq!(r.status, Status::Fail);
+        assert!(r.detail.contains("指向不同框架"));
+    }
+
+    #[test]
+    fn session_bus_ok_when_registered_on_session_bus() {
+        let bus = "unix:path=/tmp/dbus-AAA";
+        let sys = FakeSystem::new(0)
+            .with_env("XMODIFIERS", "@im=ibus")
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", bus)
+            .with_proc(20, 0, "root", "ibus-daemon -drx")
+            .with_proc_environ(20, "DBUS_SESSION_BUS_ADDRESS", bus)
+            .with_cmd(
+                "busctl",
+                &[&format!("--address={bus}"), "list"],
+                crate::system::RunOutput::ok("org.freedesktop.IBus :1.5 root"),
+            );
+        let r = check_session_bus(&paths(&TempDir::new("sb1")), &sys);
+        assert_eq!(r.status, Status::Ok, "{:?}", r.detail);
+    }
+
+    #[test]
+    fn session_bus_fail_when_daemon_on_wrong_bus() {
+        // 会话经验根因 #1:daemon 活着,但接在 /run/user/0/bus;会话总线是私有 /tmp/dbus-*
+        let sess_bus = "unix:path=/tmp/dbus-AAA";
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_proc(20, 0, "root", "ibus-daemon -drx")
+            .with_proc_environ(20, "DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus")
+            .with_cmd(
+                "busctl",
+                &[&format!("--address={sess_bus}"), "list"],
+                crate::system::RunOutput::ok("org.freedesktop.portal.Desktop :1.2"),
+            );
+        let r = check_session_bus(&paths(&TempDir::new("sb2")), &sys);
+        assert_eq!(r.status, Status::Fail);
+        assert!(r.detail.contains("总线接错"), "{}", r.detail);
+        assert!(r.fix_hint.as_deref().unwrap().contains("restart-ibus"));
+    }
+
+    #[test]
+    fn session_bus_fail_when_no_daemon_at_all() {
+        let sess_bus = "unix:path=/tmp/dbus-AAA";
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_cmd(
+                "busctl",
+                &[&format!("--address={sess_bus}"), "list"],
+                crate::system::RunOutput::ok("org.freedesktop.DBus"),
+            );
+        let r = check_session_bus(&paths(&TempDir::new("sb3")), &sys);
+        assert_eq!(r.status, Status::Fail);
+        assert!(r.detail.contains("没有 org.freedesktop.IBus 注册"));
+    }
+
+    #[test]
+    fn session_bus_degrades_to_environ_compare_without_busctl() {
+        let sess_bus = "unix:path=/tmp/dbus-AAA";
+        // busctl 执行失败(返回 success=false)→ 退化为进程环境比对
+        let sys = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_proc(20, 0, "root", "ibus-daemon -drx")
+            .with_proc_environ(20, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_cmd(
+                "busctl",
+                &[&format!("--address={sess_bus}"), "list"],
+                crate::system::RunOutput::failed("could not connect"),
+            );
+        let r = check_session_bus(&paths(&TempDir::new("sb4")), &sys);
+        assert_eq!(r.status, Status::Ok, "{:?}", r.detail);
+        assert!(r.detail.contains("busctl 不可用"));
+
+        // 同一退化路径下,daemon 接错总线 → Fail
+        let sys2 = FakeSystem::new(0)
+            .with_proc(10, 0, "root", "xfce4-session")
+            .with_proc_environ(10, "DBUS_SESSION_BUS_ADDRESS", sess_bus)
+            .with_proc(20, 0, "root", "ibus-daemon -drx")
+            .with_proc_environ(20, "DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus")
+            .with_cmd(
+                "busctl",
+                &[&format!("--address={sess_bus}"), "list"],
+                crate::system::RunOutput::failed("could not connect"),
+            );
+        let r2 = check_session_bus(&paths(&TempDir::new("sb5")), &sys2);
+        assert_eq!(r2.status, Status::Fail);
+    }
+
+    #[test]
+    fn session_bus_warn_when_no_session_bus_found() {
+        let r = check_session_bus(&paths(&TempDir::new("sb6")), &FakeSystem::new(0));
+        assert_eq!(r.status, Status::Warn);
+        assert!(r.detail.contains("未探测到图形会话总线"));
+    }
+
+    #[test]
+    fn all_checks_run_in_order() {
         let t = TempDir::new("all");
         let sys = FakeSystem::new(0);
         let results = run_checks(&paths(&t), &sys);

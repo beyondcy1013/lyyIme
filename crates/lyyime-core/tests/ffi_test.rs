@@ -7,8 +7,9 @@ mod common;
 use common::{fixtures, TempDir};
 use lyyime_core::ffi::{
     lyyime_cand, lyyime_cand_comment, lyyime_free, lyyime_mode, lyyime_new, lyyime_process_key,
-    lyyime_reset, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR, LKEY_DIGIT, LKEY_ENTER, LKEY_ESC,
-    LKEY_OTHER, LKEY_PAGEDOWN, LKEY_PAGEUP, LKEY_PUNCT, LKEY_SHIFTPRESS, LKEY_SPACE,
+    lyyime_reset, lyyime_set_commit_after_four, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR,
+    LKEY_DIGIT, LKEY_ENTER, LKEY_ESC, LKEY_OTHER, LKEY_PAGEDOWN, LKEY_PAGEUP, LKEY_PUNCT,
+    LKEY_SHIFTPRESS, LKEY_SPACE,
 };
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
@@ -194,6 +195,31 @@ fn ffi_模式切换与reset() {
 }
 
 #[test]
+fn ffi_四码顶屏开关() {
+    let eng = FfiEngine::new(&fixtures());
+    let mut eng = eng;
+    // 输入 aa 有候选"式";关闭选项时第 3 个字母继续组词。
+    eng.key_char('a');
+    eng.key_char('a');
+    let json = eng.key_char('a');
+    assert!(json.contains("\"s\":\"aaa\""), "{json}");
+    assert!(!json.contains("{\"t\":\"commit\"}"), "{json}");
+
+    eng.key(LKEY_ESC, 0);
+    assert_eq!(unsafe { lyyime_set_commit_after_four(eng.0, 1) }, 1);
+    for c in ['a', 'a', 'a', 'a'] {
+        eng.key_char(c);
+    }
+    let json = eng.key_char('g');
+    assert!(
+        json.contains("{\"t\":\"commit\",\"s\":\"恭恭敬敬\"}"),
+        "{json}"
+    );
+    assert!(json.contains("\"s\":\"g\""), "{json}");
+    assert_eq!(unsafe { lyyime_set_commit_after_four(eng.0, 0) }, 0);
+}
+
+#[test]
 fn ffi_key_id映射_数字选词与标点翻页() {
     let mut eng = FfiEngine::new(&fixtures());
     eng.key_char('n');
@@ -286,4 +312,38 @@ fn ffi_重试纪律_小缓冲needed不落状态_扩容重试与一次成功一�
         let b = json_of(&mut e2, LKEY_CHAR, c as u32);
         assert_eq!(a, b, "重试后的后续状态应与一次成功一致");
     }
+}
+
+// ======================================================================
+// 造词(合同 §12):FFI 键值 11–15 与 notice 效果 JSON
+// ======================================================================
+
+#[test]
+fn ffi_造词_热键方向键与notice效果流() {
+    let mut eng = FfiEngine::new(&fixtures());
+    // 上屏「你好」:wqvb + 空格。
+    for c in "wqvb".chars() {
+        eng.key_char(c);
+    }
+    eng.key(LKEY_SPACE, 0);
+    // Ctrl+= → 进入造词:preedit + 单候选,候选/注释经 lyyime_cand 可取。
+    let json = eng.key(11, 0); // LKEY_COIN
+    assert!(json.contains("{\"t\":\"preedit\",\"s\":\"造词:你好\"}"), "{json}");
+    assert!(json.contains("\"t\":\"cands\",\"n\":1"), "{json}");
+    let (text, comment) = eng.cand(0);
+    assert_eq!(text, "你好");
+    assert_eq!(comment, "wqvb");
+    // → 多选一字,← 少选一字(方向键 12/13);历史只有 2 字:扩到顶/缩到下限都吞键。
+    assert_eq!(eng.key(13, 0), "[{\"t\":\"consumed\"}]", "选长已到历史上限");
+    assert_eq!(eng.key(12, 0), "[{\"t\":\"consumed\"}]", "二字词下限保持");
+    // Enter 存词 → notice 效果(含编码),preedit 清除。
+    let json = eng.key(LKEY_ENTER, 0);
+    assert!(
+        json.contains("{\"t\":\"notice\",\"s\":\"已造词:你好(wqvb),可直接用该编码打出\"}"),
+        "{json}"
+    );
+    assert!(json.contains("{\"t\":\"preedit\"}"), "{json}");
+    // Esc 未进入造词时空缓冲直通;箭头键非造词模式直通。
+    assert_eq!(eng.key(12, 0), "[{\"t\":\"pass\"}]");
+    assert_eq!(eng.key(15, 0), "[{\"t\":\"pass\"}]");
 }

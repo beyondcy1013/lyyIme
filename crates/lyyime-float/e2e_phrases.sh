@@ -6,6 +6,7 @@
 #   ② 精确码短语排候选首位: wqvb 定义了短语 → 上屏短语而非词典"你好"
 #   ③ 长短语(>40字)直输模式下自动改粘贴并完整上屏: csph
 #   ④ 短语管理对话框冒烟(--smoke-phrases): 新增/改码走真实回调链并落盘
+#   ⑤ 动态日期触发: jjad(五笔"日期")居首, 数字2选中动态今天日期上屏
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN=${BIN:-/data/cargo-target/local/lyyIme/debug/lyyime-float}
@@ -81,6 +82,15 @@ PY
 HOME=$THOME "$BIN" --smoke-phrases >$LOG.smoke 2>&1 \
   && grep -q 'DIALOG-OK' $LOG.smoke \
   && echo '④ PASS 管理对话框增/改/改码' || { echo '④ FAIL'; cat $LOG.smoke; FAIL=1; }
+
+# ⑤ 动态日期触发: jjad = 五笔"日期"(真实码表居首), 候选2为动态今天日期
+clear_pad
+xdotool windowactivate $L; sleep 0.6
+xdotool type --delay 80 'jjad'; sleep 0.6
+xdotool key 2; sleep 3
+C=$(pad_content); echo "⑤ jjad+2 => $C"
+TODAY=$(python3 -c "from datetime import date; d=date.today(); print(f'{d.year}年{d.month}月{d.day}日')")
+[ "$C" = "$TODAY" ] && echo '⑤ PASS 动态日期触发' || { echo "⑤ FAIL (期望 $TODAY)"; FAIL=1; }
 
 echo "== done (FAIL=$FAIL) =="
 exit $FAIL

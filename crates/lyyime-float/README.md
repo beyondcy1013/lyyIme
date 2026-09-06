@@ -47,6 +47,19 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
 `星期E`)。例:`rq` → `今天是 $date(yyyy年M月d日) $week`。未识别的 `$…`
 原样上屏,不会报错。编辑器里有一排"插入变量"快捷按钮,列表页有"上屏预览"列。
 
+## 打"日期/时间"直接出动态值(触发词)
+
+不需要定义短语:只要候选里打出 **日期**(五笔 `jjad`)或 **时间**(五笔
+`jfuj`),候选里就会在它身后出现动态的今天日期/当前时间,数字选中即上屏。
+也可直接敲整拼 `riqi` / `shijian`(悬浮窗只装五笔码表,这里做了直触识别)。
+
+触发时机(避免打扰正常打词):
+- 触发词是**候选首选** → 出现(如 `jjad` → 「1日期 2 2026年9月6日 3 2026-09-06」);
+- 触发词不是首选,但**候选总数 ≤ 6**(可选少了)→ 也出现;
+- 触发词深埋、候选又多 → 不出现。
+`riqi`/`shijian` 整拼直触时动态候选追加在候选尾部。自定义短语功能完全不受影响,
+两种途径可并存(同码自定义短语仍最优先)。
+
 ## 两种发送模式(标题栏下拉切换)
 
 | 模式 | 原理 | 适用 |
@@ -63,7 +76,8 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
 - `src/ui.rs` 主窗/候选渲染/按键/菜单/短语管理对话框/打字板
 - `src/dict.rs` 码表加载:读 `/usr/share/ibus-table/tables/wubi-{极点|海峰}86.db`
   (ibus-table SQLite,`phrases(tabkeys, phrase, freq)`,13.7 万条,内存前缀索引)
-- `src/phrases.rs` 自定义短语簿(编码→文本、动态变量展开、候选合并;纯逻辑可单测)
+- `src/phrases.rs` 自定义短语簿(编码→文本、动态变量展开、"日期/时间"触发词、
+  候选合并;纯逻辑可单测)
 - `src/config.rs` config.json / user_freq.json / pidfile(单实例)
 - `src/xtrack.rs` 目标窗口追踪(_NET_ACTIVE_WINDOW,x11rb RustConnection)
 - `src/sender.rs` 直输/粘贴发送(xdotool 子进程,超时随长度伸缩)
@@ -82,9 +96,10 @@ crates/lyyime-float/install-autostart.sh  # 开机自启(当前用户)
 
 - Rust 单测(cargo test -p lyyime-float):短语簿读写/校验/增删改、动态变量
   展开(含 `$$` 转义、未知变量容错、补零)、候选合并(置顶/去重/限额)、
+  日期/时间触发词(首选触发/候选少触发/深埋不触发/整拼直触/自定义短语不受影响)、
   码表索引与学习加权。
 - `e2e_phrases.sh`:Xvfb 隔离屏全链路(词典回归 / 短语置顶 / 长短语自动粘贴 /
-  管理对话框冒烟)。
+  管理对话框冒烟 / jjad 动态日期真码表触发)。
 
 ## 已知边界
 

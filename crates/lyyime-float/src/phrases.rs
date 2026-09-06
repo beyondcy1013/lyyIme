@@ -16,6 +16,10 @@
 //!     格式 token(办公软件习惯, 补零用双写): yyyy yy MM M dd d HH H mm m ss s;
 //!     E = 星期几的汉字(如 六), 可写 "星期E"。未识别的 $… 原样保留, 不报错。
 //!
+//! 动态日期/时间触发(不影响自定义短语原有行为): 候选里打出"日期/时间"这个词
+//! (五笔等任意能命中它的码)且该词居首、或候选总数很少时, 紧随其后插入展开后的
+//! 动态日期/时间候选; 编码恰为整拼 riqi/shijian 时(悬浮窗只装五笔码表)也直接触发。
+//!
 //! 本模块不依赖 GUI, cargo test 直接覆盖。
 
 use serde_json::Value;
@@ -100,6 +104,25 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 pub const WEEK_CN: [&str; 7] = ["一", "二", "三", "四", "五", "六", "日"];
 pub const DEFAULT_DATE_FMT: &str = "yyyy-MM-dd";
 pub const DEFAULT_TIME_FMT: &str = "HH:mm";
+
+// ---- 动态日期/时间触发词(新增能力, 自定义短语行为不变) ----
+/// 触发词 → 动态候选模板(经 expand_text 按当前时刻展开)。
+pub const DYNAMIC_WORDS: [(&str, [&str; 2]); 2] = [
+    ("日期", ["$date(yyyy年M月d日)", "$date(yyyy-MM-dd)"]),
+    ("时间", ["$time(HH:mm)", "$time(H时mm分)"]),
+];
+/// 触发词不是首选时, 候选总数 ≤ 该值仍触发("可选少了");
+/// 6 词 + 2 动态 ≤ 每页 9, 动态项保证首页可见。
+pub const DYNAMIC_FEW: usize = 6;
+
+/// 整拼直触: 悬浮窗只装五笔码表打不出拼音词, 编码恰为整拼时直接识别。
+fn dynamic_code_word(code: &str) -> Option<&'static str> {
+    match code.trim().to_lowercase().as_str() {
+        "riqi" => Some("日期"),
+        "shijian" => Some("时间"),
+        _ => None,
+    }
+}
 
 /// 动态变量: $$ 转义优先; $date(格式)/$time(格式) 括号内不含括号;
 /// $week 后不接字母数字(否则视为普通文本)。
@@ -414,9 +437,55 @@ fn jarr(v: &[String]) -> String {
     format!("[{}]", parts.join(", "))
 }
 
+/// "日期/时间"触发动态候选: 触发词居首, 或候选总数 ≤ DYNAMIC_FEW(可选少了)时,
+/// 紧随触发词插入展开后的动态日期/时间(自定义短语原有行为不受影响)。
+/// 触发途径有二: 候选中出现触发词本身(五笔等任意能打出它的码), 或编码恰为
+/// 整拼 riqi/shijian(悬浮窗只装五笔码表打不出拼音词, 直接识别, 追加到尾部)。
+pub fn insert_dynamic(
+    mut cands: Vec<(String, String)>,
+    code: &str,
+    now: Civil,
+) -> Vec<(String, String)> {
+    let mut fired: Vec<&str> = Vec::new();
+    for (word, templates) in &DYNAMIC_WORDS {
+        if let Some(pos) = cands.iter().position(|(t, _)| t == *word) {
+            // pos==0 触发词居首; cands.len()<=DYNAMIC_FEW 可选少了
+            if pos == 0 || cands.len() <= DYNAMIC_FEW {
+                let dyn_c: Vec<(String, String)> = templates
+                    .iter()
+                    .map(|t| (expand_text(t, now), "动态".to_string()))
+                    .collect();
+                let at = pos + 1;
+                cands.splice(at..at, dyn_c);
+                fired.push(word);
+            }
+        }
+    }
+    if let Some(word) = dynamic_code_word(code) {
+        if !fired.contains(&word) {
+            let dyn_c: Vec<(String, String)> = DYNAMIC_WORDS
+                .iter()
+                .find(|(w, _)| *w == word)
+                .map(|(_, ts)| {
+                    ts.iter()
+                        .map(|t| (expand_text(t, now), "动态".to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let at = cands
+                .iter()
+                .position(|(t, _)| t == word)
+                .map(|p| p + 1)
+                .unwrap_or(cands.len());
+            cands.splice(at..at, dyn_c);
+        }
+    }
+    cands
+}
+
 /// floatapp 候选合并规则: 自定义短语(精确码命中, 按定义序, 先展开动态变量)
-/// 排最前, 其后接词典候选, 重复文本去重。
-/// 返回 [(text, tag)] — tag 为 "自定义" 或词典分值十进制串。
+/// 排最前, 其后接词典候选, 重复文本去重; 最后叠加"日期/时间"触发词的动态候选。
+/// 返回 [(text, tag)] — tag 为 "自定义"/"动态" 或词典分值十进制串。
 pub fn merged_candidates(
     code: &str,
     book: &PhraseBook,
@@ -444,7 +513,7 @@ pub fn merged_candidates(
         .collect();
     let mut out = custom;
     out.append(&mut rest);
-    out
+    insert_dynamic(out, &code, now)
 }
 
 #[cfg(test)]
@@ -715,6 +784,136 @@ mod tests {
             vec![
                 ("2026/9/6".to_string(), "自定义".to_string()),
                 ("固定短语".to_string(), "自定义".to_string())
+            ]
+        );
+    }
+
+    // ---------- 动态日期/时间触发词 ----------
+
+    fn texts_of(got: &[(String, String)]) -> Vec<&str> {
+        got.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    #[test]
+    fn dynamic_top_word_triggers_date() {
+        let (_d, book) = temp_book("phrase.json");
+        // "日期"是候选首选(如五笔 jjad 精确命中)
+        let got = merged_candidates(
+            "jjad",
+            &book,
+            |_, _| vec![("日期".into(), 999), ("日".into(), 100)],
+            45,
+            Some(now()),
+        );
+        assert_eq!(texts_of(&got), vec!["日期", "2026年9月6日", "2026-09-06", "日"]);
+        assert_eq!(got[1].1, "动态");
+    }
+
+    #[test]
+    fn dynamic_time_word_triggers() {
+        let (_d, book) = temp_book("phrase.json");
+        let got = merged_candidates(
+            "jfuj",
+            &book,
+            |_, _| vec![("时间".into(), 900), ("时".into(), 50)],
+            45,
+            Some(now()),
+        );
+        assert_eq!(texts_of(&got), vec!["时间", "15:07", "15时07分", "时"]);
+    }
+
+    #[test]
+    fn dynamic_not_first_but_few_still_triggers() {
+        let (_d, book) = temp_book("phrase.json");
+        // "日期"排第 3, 但候选很少(≤ DYNAMIC_FEW)→ 仍触发
+        let got = merged_candidates(
+            "xxxx",
+            &book,
+            |_, _| {
+                vec![
+                    ("甲".into(), 9),
+                    ("乙".into(), 8),
+                    ("日期".into(), 7),
+                    ("丙".into(), 6),
+                ]
+            },
+            45,
+            Some(now()),
+        );
+        assert_eq!(
+            texts_of(&got),
+            vec!["甲", "乙", "日期", "2026年9月6日", "2026-09-06", "丙"]
+        );
+    }
+
+    #[test]
+    fn dynamic_buried_in_many_no_trigger() {
+        let (_d, book) = temp_book("phrase.json");
+        // "日期"深埋、候选又多(> DYNAMIC_FEW)→ 不打扰
+        let mut cands: Vec<(String, i64)> =
+            (0..10).map(|i| (format!("词{i}"), i as i64)).collect();
+        cands.insert(3, ("日期".into(), 5));
+        let got =
+            merged_candidates("xxxx", &book, |_, _| cands.clone(), 45, Some(now()));
+        assert!(got.iter().all(|(_, tag)| tag != "动态"));
+    }
+
+    #[test]
+    fn dynamic_few_without_trigger_word_nothing_added() {
+        let (_d, book) = temp_book("phrase.json");
+        // 候选少但没有触发词 → 不加动态
+        let got = merged_candidates(
+            "wqvb",
+            &book,
+            |_, _| vec![("你好".into(), 999), ("你".into(), 100)],
+            45,
+            Some(now()),
+        );
+        assert_eq!(texts_of(&got), vec!["你好", "你"]);
+    }
+
+    #[test]
+    fn dynamic_pinyin_code_direct_trigger() {
+        let (_d, book) = temp_book("phrase.json");
+        // 悬浮窗只装五笔码表: 整拼 riqi 打不出词, 动态日期兜底出现
+        let got =
+            merged_candidates("riqi", &book, |_, _| Vec::new(), 45, Some(now()));
+        assert_eq!(
+            got,
+            vec![
+                ("2026年9月6日".to_string(), "动态".to_string()),
+                ("2026-09-06".to_string(), "动态".to_string()),
+            ]
+        );
+        let got = merged_candidates(
+            "shijian",
+            &book,
+            |_, _| vec![("间".into(), 1)],
+            45,
+            Some(now()),
+        );
+        assert_eq!(texts_of(&got), vec!["间", "15:07", "15时07分"]);
+    }
+
+    #[test]
+    fn dynamic_custom_phrase_feature_untouched() {
+        let (_d, mut book) = temp_book("phrase.json");
+        book.add("rq", "$date(yyyy/M/d)").unwrap();
+        let got = merged_candidates(
+            "rq",
+            &book,
+            |_, _| vec![("日期".into(), 1)],
+            45,
+            Some(now()),
+        );
+        // 自定义短语仍排最前并展开; 词典里的"日期"照常触发, 动态候选紧随其后
+        assert_eq!(
+            got,
+            vec![
+                ("2026/9/6".to_string(), "自定义".to_string()),
+                ("日期".to_string(), "1".to_string()),
+                ("2026年9月6日".to_string(), "动态".to_string()),
+                ("2026-09-06".to_string(), "动态".to_string()),
             ]
         );
     }

@@ -56,7 +56,7 @@ mod rank;
 mod types;
 mod user_words;
 
-pub use config::Config;
+pub use config::{default_quick_actions, Config, QuickAction, QUICK_ACTIONS_MAX};
 pub use engine::Engine;
 pub use error::Error;
 pub use ffi::effects_json;

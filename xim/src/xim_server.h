@@ -58,4 +58,12 @@ void lyy_app_reload_hotkey(App *app);
 /* 辅助区临时提示(notice 效果:造词结果等),约 4 秒后自动清除 */
 void lyy_show_notice(App *app, const char *text);
 
+/* 快速功能键执行(合同 §14):按 core 配置第 index 条 command 执行
+ * (@settings/@help 内置或 shell 命令);由 action 效果与行点击触发 */
+void lyy_run_quick_action(App *app, int index);
+
+/* 候选窗行点击桥(§14 鼠标点选):经 core lyyime_select_candidate 走与
+ * 数字选词同一条效果流路径(功能键 → action,普通候选 → commit) */
+void lyy_candwin_row_clicked(int idx, void *user_data);
+
 #endif /* LYY_XIM_SERVER_H_ */

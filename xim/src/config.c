@@ -11,8 +11,9 @@
 
 #include "keysym_map.h"
 
-/* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键 */
-#define LYY_CFG_KEYS 18
+/* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键。
+ * 追加新键放表尾(索引 clamp_key/apply_value/write_value_buf 三处同步)。 */
+#define LYY_CFG_KEYS 19
 typedef enum { LYY_VT_INT, LYY_VT_BOOL, LYY_VT_STR } LyyValType;
 static const struct {
     const char *section;
@@ -45,6 +46,14 @@ static const struct {
       "词组效率提示(上屏后最近几字有更省键的词组时候选条提示词组与编码)" },
     { NULL, "shot_hotkey", LYY_VT_STR,
       "截屏快捷键(按下拉起框选截屏,存图片目录并复制剪贴板;ctrl/alt/super/shift+键名)" },
+    { NULL, "quick_actions_enabled", LYY_VT_BOOL,
+      "快速功能键总开关(输入触发词如 peizhi 时候选条提示,数字/点击执行)" },
+};
+
+/* 内置默认功能键表(合同 §14;与 core Config::default 一致) */
+static const LyyQuickAction g_qa_defaults[] = {
+    { "peizhi", "打开配置", "@settings" },
+    { "bangzhu", "帮助", "@help" },
 };
 /* 行尾注释(# 之后)与布尔值写法缓存:load 时记下,save 时复用 */
 static char g_suffix[LYY_CFG_KEYS][256];
@@ -72,6 +81,12 @@ void lyy_config_defaults(LyyConfig *c)
     c->ai_timeout = 60;
     snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s", "ctrl+equal");
     snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s", "ctrl+alt+a");
+    /* 快速功能键(合同 §14):默认开 + 内置表(peizhi/bangzhu) */
+    c->quick_actions_enabled = 1;
+    memset(c->quick_actions, 0, sizeof(c->quick_actions));
+    c->quick_actions_count = (int)(sizeof(g_qa_defaults) / sizeof(g_qa_defaults[0]));
+    for (int i = 0; i < c->quick_actions_count; i++)
+        c->quick_actions[i] = g_qa_defaults[i];
 }
 
 int lyy_config_ai_active(const LyyConfig *c)
@@ -103,6 +118,29 @@ static int section_of(const char *line, char *out, size_t cap)
     memcpy(out, line + 1, n);
     out[n] = '\0';
     return 1;
+}
+
+/* [[quick_actions]] 块内字段识别:命中返回 0=trigger 1=label 2=command,
+ * *value_out 指向等号后的值;未命中返回 -1(借 segment/boundary 判断) */
+static int qa_field_of(const char *line, const char **value_out)
+{
+    static const char *names[3] = { "trigger", "label", "command" };
+    for (int f = 0; f < 3; f++) {
+        size_t klen = strlen(names[f]);
+        if (strncmp(line, names[f], klen) != 0)
+            continue;
+        const char *p = line + klen;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p != '=')
+            continue;
+        p++;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        *value_out = p;
+        return f;
+    }
+    return -1;
 }
 
 /* 判断受管理键:须与当前 section 匹配;命中返回键序号,*value 指向等号后的值 */
@@ -224,9 +262,18 @@ static void clamp_key(LyyConfig *c, int idx)
             snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s",
                      "ctrl+alt+a");
         break;
+    case 18:
+        /* 布尔无钳制;总开关缺省由 defaults 给 1 */
+        break;
     default:
         break;
     }
+}
+
+/* 受限拷贝:语义同 snprintf(dst,cap,"%s",src),显式精度告知编译器截断边界 */
+static void copy_bounded(char *dst, size_t cap, const char *src)
+{
+    snprintf(dst, cap, "%.*s", (int)cap - 1, src);
 }
 
 static void apply_value(LyyConfig *c, int idx, const char *v)
@@ -242,19 +289,68 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
     case 7: c->font_size = atoi(v); break;
     case 8: c->autostart = parse_bool(v, c->autostart); break;
     case 9: c->ai_enabled = parse_bool(v, c->ai_enabled); break;
-    case 10: snprintf(c->ai_api_base, sizeof(c->ai_api_base), "%s", v); break;
-    case 11: snprintf(c->ai_api_key, sizeof(c->ai_api_key), "%s", v); break;
-    case 12: snprintf(c->ai_model, sizeof(c->ai_model), "%s", v); break;
+    case 10: copy_bounded(c->ai_api_base, sizeof(c->ai_api_base), v); break;
+    case 11: copy_bounded(c->ai_api_key, sizeof(c->ai_api_key), v); break;
+    case 12: copy_bounded(c->ai_model, sizeof(c->ai_model), v); break;
     case 13:
-        snprintf(c->ai_system_prompt, sizeof(c->ai_system_prompt), "%s", v);
+        copy_bounded(c->ai_system_prompt, sizeof(c->ai_system_prompt), v);
         break;
     case 14: c->ai_timeout = atoi(v); break;
-    case 15: snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s", v); break;
+    case 15: copy_bounded(c->coin_hotkey, sizeof(c->coin_hotkey), v); break;
     case 16: c->phrase_hint = parse_bool(v, c->phrase_hint); break;
-    case 17: snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s", v); break;
+    case 17: copy_bounded(c->shot_hotkey, sizeof(c->shot_hotkey), v); break;
+    case 18:
+        c->quick_actions_enabled = parse_bool(v, c->quick_actions_enabled);
+        break;
     default: break;
     }
     clamp_key(c, idx);
+}
+
+/* [[quick_actions]] 表头识别:取 "[[" 与 "]]" 之间的表名(§14) */
+static int qa_header_of(const char *line, char *out, size_t cap)
+{
+    if (strncmp(line, "[[", 2) != 0)
+        return 0;
+    const char *end = strstr(line, "]]");
+    if (!end)
+        return 0;
+    size_t n = (size_t)(end - line - 2);
+    if (n == 0 || n >= cap)
+        return 0;
+    memcpy(out, line + 2, n);
+    out[n] = '\0';
+    /* 容忍表名两侧空格:[[ quick_actions ]] */
+    char *t = trim(out);
+    if (t != out)
+        memmove(out, t, strlen(t) + 1);
+    return 1;
+}
+
+/* 触发词合法性:小写字母 1–12 个(与 core QuickAction::trigger_valid 一致) */
+static int qa_trigger_valid(const char *s)
+{
+    size_t n = strlen(s);
+    if (n < 1 || n > 12)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (s[i] < 'a' || s[i] > 'z')
+            return 0;
+    return 1;
+}
+
+/* [[quick_actions]] 块内当前条目:表头开新条目(容量满则丢弃后续条目) */
+static LyyQuickAction *qa_current(LyyConfig *c, int *in_qa, int *overflow)
+{
+    if (*overflow || c->quick_actions_count >= LYY_QA_MAX) {
+        *overflow = 1;
+        return NULL;
+    }
+    LyyQuickAction *a = &c->quick_actions[c->quick_actions_count];
+    memset(a, 0, sizeof(*a));
+    c->quick_actions_count++;
+    *in_qa = 1;
+    return a;
 }
 
 int lyy_config_load(const char *path, LyyConfig *out)
@@ -270,6 +366,8 @@ int lyy_config_load(const char *path, LyyConfig *out)
 
     char line[2048];
     char section[64] = "";
+    int in_qa = 0;      /* 正处于 [[quick_actions]] 块内 */
+    int qa_overflow = 0; /* 条目超上限:继续消费但不入库 */
     while (fgets(line, sizeof(line), fp)) {
         char tmp[2048];
         snprintf(tmp, sizeof(tmp), "%s", line);
@@ -277,9 +375,40 @@ int lyy_config_load(const char *path, LyyConfig *out)
         if (*p == '\0' || *p == '#')
             continue;
         char sec[64];
+        if (qa_header_of(p, sec, sizeof(sec))) {
+            /* 数组表头:[[quick_actions]] 开新条目;其它 [[表]] 视为未知段 */
+            if (!strcmp(sec, "quick_actions")) {
+                qa_current(out, &in_qa, &qa_overflow);
+            } else {
+                in_qa = 0;
+            }
+            continue;
+        }
         if (section_of(p, sec, sizeof(sec))) {
+            in_qa = 0;
             snprintf(section, sizeof(section), "%s", sec);
             continue;
+        }
+        if (in_qa) {
+            /* 块内键:trigger/label/command;其它键按未知行原样保留(块结束) */
+            const char *value = NULL;
+            int field = qa_field_of(p, &value);
+            if (field >= 0) {
+                LyyQuickAction *a = qa_overflow ? NULL
+                    : &out->quick_actions[out->quick_actions_count - 1];
+                char vbuf[2048], sbuf[256];
+                split_value(value, vbuf, sizeof(vbuf), sbuf, sizeof(sbuf));
+                if (a) {
+                    if (field == 0)
+                        copy_bounded(a->trigger, sizeof(a->trigger), vbuf);
+                    else if (field == 1)
+                        copy_bounded(a->label, sizeof(a->label), vbuf);
+                    else
+                        copy_bounded(a->command, sizeof(a->command), vbuf);
+                }
+                continue;
+            }
+            in_qa = 0; /* 非块内键:块结束(该行走普通解析) */
         }
         const char *value = NULL;
         int idx = key_index_of(p, section, &value);
@@ -297,6 +426,20 @@ int lyy_config_load(const char *path, LyyConfig *out)
         apply_value(out, idx, vbuf);
     }
     fclose(fp);
+    /* 无 [[quick_actions]] 块(或全部非法):回退内置默认表 */
+    int valid = 0;
+    for (int i = 0; i < out->quick_actions_count; i++)
+        if (qa_trigger_valid(out->quick_actions[i].trigger) &&
+            out->quick_actions[i].label[0] && out->quick_actions[i].command[0])
+            out->quick_actions[valid++] = out->quick_actions[i];
+    if (valid == 0) {
+        out->quick_actions_count =
+            (int)(sizeof(g_qa_defaults) / sizeof(g_qa_defaults[0]));
+        for (int i = 0; i < out->quick_actions_count; i++)
+            out->quick_actions[i] = g_qa_defaults[i];
+    } else {
+        out->quick_actions_count = valid;
+    }
     return 0;
 }
 
@@ -402,6 +545,7 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     case 15: sval = c->coin_hotkey; break;
     case 16: val = c->phrase_hint; break;
     case 17: sval = c->shot_hotkey; break;
+    case 18: val = c->quick_actions_enabled; break;
     default: return 0;
     }
     if (g_keys[idx].type == LYY_VT_STR) {
@@ -439,10 +583,41 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     return buf_suffix(b, idx);
 }
 
+/* 把 [[quick_actions]] 全部条目写入 buf(表头 + 3 行/条;§14) */
+static int write_qa_blocks(Buf *b, const LyyConfig *c)
+{
+    for (int i = 0; i < c->quick_actions_count; i++) {
+        const LyyQuickAction *a = &c->quick_actions[i];
+        if (buf_append_str(b, "[[quick_actions]]\n") != 0 ||
+            buf_append_str(b, "trigger = \"") != 0 ||
+            buf_append_str(b, a->trigger) != 0 ||
+            buf_append_str(b, "\" # 触发词(1-12 个小写字母)\n") != 0 ||
+            buf_append_str(b, "label = \"") != 0 ||
+            buf_append_str(b, a->label) != 0 ||
+            buf_append_str(b, "\" # 候选展示文本\n") != 0 ||
+            buf_append_str(b, "command = \"") != 0 ||
+            buf_append_str(b, a->command) != 0 ||
+            buf_append_str(b, "\" # @settings/@help 或 shell 命令\n") != 0)
+            return -1;
+    }
+    return 0;
+}
+
 int lyy_config_save(const char *path, const LyyConfig *c)
 {
     /* 整读入内存:原位替换受管理键,其余行字节级保留;[ai] 段缺失键按
-     * "插入位"(段头/最后一个 ai 键之后)补齐,无段则在尾部新建。 */
+     * "插入位"(段头/最后一个 ai 键之后)补齐,无段则在尾部新建;
+     * [[quick_actions]] 块(§14)原位重写为当前表,文件里没有则追加文件尾。 */
+    /* 落盘前先压紧条目(非法触发词/空字段的条目不入盘) */
+    LyyConfig cc = *c;
+    int valid = 0;
+    for (int i = 0; i < c->quick_actions_count; i++)
+        if (qa_trigger_valid(c->quick_actions[i].trigger) &&
+            c->quick_actions[i].label[0] && c->quick_actions[i].command[0])
+            cc.quick_actions[valid++] = c->quick_actions[i];
+    cc.quick_actions_count = valid;
+    c = &cc;
+
     FILE *in = fopen(path, "r");
     size_t cap = 8192, len = 0;
     char *body = malloc(cap);
@@ -474,6 +649,9 @@ int lyy_config_save(const char *path, const LyyConfig *c)
     size_t ai_ins_off = (size_t)-1;  /* -1=文件尾(尚无 [ai] 段时) */
     size_t sec_off = (size_t)-1;     /* 首个 [section] 行偏移:顶层补齐键须插在其前 */
     int ai_hdr_seen = 0;
+    int qa_written = 0;  /* [[quick_actions]] 块已重写(首个块位置) */
+    int in_qa_save = 0;  /* 正在跳过旧 [[quick_actions]] 块的行 */
+    const char *qa_dummy = NULL;
     int rc = -1;
     char section[64] = "";
     char *cursor = body;
@@ -492,7 +670,19 @@ int lyy_config_save(const char *path, const LyyConfig *c)
         int was_ai = !strcmp(section, "ai");
         if (*p && *p != '#') {
             char sec[64];
-            if (section_of(p, sec, sizeof(sec))) {
+            if (qa_header_of(p, sec, sizeof(sec)) &&
+                !strcmp(sec, "quick_actions")) {
+                /* §14:首个块位置重写为当前表,后续旧块整块跳过 */
+                if (!qa_written) {
+                    if (write_qa_blocks(&out, c) != 0)
+                        goto out;
+                    qa_written = 1;
+                }
+                in_qa_save = 1;
+                handled = 1;
+            } else if (qa_header_of(p, sec, sizeof(sec))) {
+                in_qa_save = 0; /* 其它 [[表]]:未知段,原样保留 */
+            } else if (section_of(p, sec, sizeof(sec))) {
                 if (sec_off == (size_t)-1)
                     sec_off = out.len; /* 本行是首个段头,记下插入点 */
                 snprintf(section, sizeof(section), "%s", sec);
@@ -501,6 +691,10 @@ int lyy_config_save(const char *path, const LyyConfig *c)
                     ai_ins_off = out.len + line_len; /* 段头原样保留后再插入 */
                 }
                 was_ai = !strcmp(section, "ai");
+            } else if (in_qa_save && qa_field_of(p, &qa_dummy) >= 0) {
+                handled = 1; /* 旧块内 trigger/label/command 行:跳过 */
+            } else if (in_qa_save) {
+                in_qa_save = 0; /* 块结束 */
             } else {
                 const char *value = NULL;
                 int idx = key_index_of(p, section, &value);
@@ -590,6 +784,12 @@ int lyy_config_save(const char *path, const LyyConfig *c)
     } else {
         final = out;
         out.p = NULL; /* 所有权移交 final,避免双重释放 */
+    }
+
+    /* 文件里本没有 [[quick_actions]] 块:整表追加到文件尾(§14) */
+    if (!qa_written && c->quick_actions_count > 0) {
+        if (write_qa_blocks(&final, c) != 0)
+            goto out;
     }
 
     FILE *fo = fopen(path, "w");

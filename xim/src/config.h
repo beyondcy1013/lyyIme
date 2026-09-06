@@ -1,12 +1,14 @@
 /*
  * 配置读写:~/.config/lyyime/config.toml(与 doctor/ibus 引擎/AI 客户端共用,
- * 见 docs/ARCHITECTURE.md §4/§11)。本模块实现"平面键值 + 单层 [ai] 段"的
- * TOML 子集:
+ * 见 docs/ARCHITECTURE.md §4/§11/§14)。本模块实现"平面键值 + 单层 [ai] 段 +
+ * [[quick_actions]] 数组表"的 TOML 子集:
  *   - 顶层 `key = value`(int / bool)+ `[ai]` 段内 `key = value`
- *     (bool / int / 带引号字符串);
+ *     (bool / int / 带引号字符串)+ `[[quick_actions]]` 数组表(trigger /
+ *     label / command 带引号字符串);
  *   - **保留未知行、[section] 行、整行注释与被管理行的行尾注释**;
  *   - 写回时已知键原位更新,未出现的顶层键追加到文件尾;[ai] 段未出现的
  *     键插到 [ai] 头/最后一个 ai 键之后,整段缺失时新建 [ai] 头再追加;
+ *     [[quick_actions]] 块原位重写(首个块位置),文件里没有则追加到文件尾;
  *   - 行尾注释统一写为 ` # 注释`(历史版本漏写 #,导致文件不是合法 TOML、
  *     python tomllib 解析失败 —— 本版起修正,旧行读取兼容、保存时归一)。
  * 子集约定借鉴 TOML v1.0.0 规范(https://toml.io);只解析自己管理的键,
@@ -22,6 +24,20 @@
 #define LYY_CFG_STR_KEY 512
 #define LYY_CFG_STR_MODEL 128
 #define LYY_CFG_STR_PROMPT 1024
+#define LYY_CFG_STR_TRIGGER 64
+#define LYY_CFG_STR_LABEL 128
+#define LYY_CFG_STR_CMD 512
+
+/* 快速功能键条目上限(合同 §14;对齐 core QUICK_ACTIONS_MAX) */
+#define LYY_QA_MAX 8
+
+/* 快速功能键(合同 §14):[[quick_actions]] 数组表;触发词整串命中时候选条
+ * 追加功能候选,数字/点选后宿主执行 command(@settings/@help 内置或 shell) */
+typedef struct {
+    char trigger[LYY_CFG_STR_TRIGGER]; /* 小写字母 1–12 个 */
+    char label[LYY_CFG_STR_LABEL];     /* 候选展示文本 */
+    char command[LYY_CFG_STR_CMD];     /* @settings/@help 或 shell 命令 */
+} LyyQuickAction;
 
 typedef struct {
     int page_size;           /* 候选数(1..9),对齐 core Config */
@@ -48,6 +64,12 @@ typedef struct {
     /* 截屏快捷键(合同 §13):按下拉起 lyyime-shot 框选截屏(存图片目录 +
      * 剪贴板);写法同造词热键,默认 ctrl+alt+a */
     char shot_hotkey[LYY_CFG_STR_BASE];
+    /* 快速功能键(合同 §14):总开关 + 触发词表;
+     * 文件缺 [[quick_actions]] 块时使用内置默认表(peizhi/bangzhu),
+     * 与 core Config::default 保持一致 */
+    int quick_actions_enabled;               /* 功能总开关(默认开) */
+    LyyQuickAction quick_actions[LYY_QA_MAX]; /* 条目表 */
+    int quick_actions_count;                 /* 0..LYY_QA_MAX */
 } LyyConfig;
 
 void lyy_config_defaults(LyyConfig *c);

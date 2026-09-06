@@ -137,6 +137,40 @@ static void show_hint(App *app, const char *text)
     lyy_candwin_commit_layout(&app->candwin);
 }
 
+/* ---- 快速功能键执行(合同 §14):@settings/@help 宿主内置,其余按
+ * shell 命令执行(sh -c,与 Mode A service.run_quick_action 同合同) ---- */
+void lyy_run_quick_action(App *app, int index)
+{
+    if (!app->core.qa_ok || !app->engine)
+        return;
+    char cmd[1024];
+    int n = app->core.lyyime_action_command(app->engine, index, cmd,
+                                            (int)sizeof(cmd));
+    if (n <= 1) {
+        lyy_log(&app->log, "WARN 快速功能键下标越界:%d", index);
+        return;
+    }
+    if (!strcmp(cmd, "@settings")) {
+        lyy_log(&app->log, "快速功能键命中:打开配置(@settings)");
+        lyy_request_show_settings(app);
+        return;
+    }
+    if (!strcmp(cmd, "@help")) {
+        lyy_log(&app->log, "快速功能键命中:帮助(@help)");
+        lyy_show_notice(app,
+                        "帮助:Shift单击=中英切换  1-9选词  -/=翻页  "
+                        "Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  "
+                        "peizhi/bangzhu=功能键");
+        return;
+    }
+    lyy_log(&app->log, "快速功能键命中[%d]:执行 %s", index, cmd);
+    char *argv[] = { "sh", "-c", cmd, NULL };
+    if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                       NULL, NULL)) {
+        lyy_log(&app->log, "WARN 快速功能命令执行失败:%s", cmd);
+    }
+}
+
 /* ---- 造词热键解析(启动/设置保存后调用;失败回退默认 Ctrl+=) ---- */
 void lyy_app_reload_hotkey(App *app)
 {
@@ -220,9 +254,11 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
     LyyEffect effects[16];
     int count = 0;
     if (lyy_effects_parse(json, effects, 16, &count) != 0) {
-        /* 合同违约:降级直通,记录现场 JSON 便于与 core 对齐 */
+        /* 合同违约:降级直通,记录现场 JSON 便于与 core 对齐。
+         * 点选路径(§14)无原始键事件可回放,仅记录。 */
         lyy_log(&app->log, "ERROR 效果流解析失败,降级直通: %s", json);
-        xcb_im_forward_event(im, ic, ev);
+        if (ev)
+            xcb_im_forward_event(im, ic, ev);
         return;
     }
 
@@ -274,7 +310,7 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
             if (ai_capture) {
                 /* 采集态不回放:字母/数字/标点按原字符归入提示词 */
                 lyy_ai_on_pass_key(app, sym);
-            } else {
+            } else if (ev) {
                 xcb_im_forward_event(im, ic, ev);
             }
             passed = 1;
@@ -297,6 +333,12 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         case LYY_EFF_MODE:
             lyy_app_update_mode_ui(app);
             break;
+        case LYY_EFF_ACTION:
+            /* §14 快速功能键命中:执行功能,不上屏文本
+             * (效果流已含 preedit/cands 清除;采集态同样执行,与 Mode A 一致) */
+            lyy_log(&app->log, "action: index=%d", e->i);
+            lyy_run_quick_action(app, e->i);
+            break;
         default:
             break;
         }
@@ -311,6 +353,27 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         *had_content_out = had_content;
     if (pass_out)
         *pass_out = passed;
+}
+
+/* ---- 候选窗行点击(§14 鼠标点选) ----
+ * 经 core lyyime_select_candidate 走与数字选词同一条效果流路径:
+ * 功能键候选 → action(执行功能),普通候选 → commit(上屏)。
+ * 无原始键事件(ev=NULL):select_candidate 恒不产生 pass,解析失败/越界
+ * 仅记录,绝不回放空事件。 */
+void lyy_candwin_row_clicked(int idx, void *user_data)
+{
+    App *app = user_data;
+    if (!lyy_core_ready(app) || !app->xim.focused_ic || !app->core.qa_ok)
+        return;
+    char json[4096];
+    if (lyy_core_select_candidate_json(&app->core, app->engine, idx, json,
+                                       (int)sizeof(json)) != 0) {
+        lyy_log(&app->log, "WARN 点选候选失败(idx=%d):select_candidate 调用异常",
+                idx);
+        return;
+    }
+    int had = 0, passed = 0;
+    apply_effects(app, app->xim.focused_ic, NULL, 0, json, &had, &passed);
 }
 
 /* ---- forward event 主处理(§6 按键行为 + Shift 单击/组合判定) ---- */
@@ -515,10 +578,9 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
     int had_content = 0;
     apply_effects(app, ic, ev, (uint32_t)sym, json, &had_content, NULL);
 
-    /* Shift:core 已按合同处理(有缓冲上屏英文原串;空缓冲吞键)。
-     * 无论有无缓冲都进入 Shift 单击挂起(对齐 Mode A 引擎与合同 §6
-     * "随后单击确认切英文"):释放/时间窗确认单击 → 切英文直通。 */
-    if (key == LKEY_SHIFTPRESS && !st->shift_pending) {
+    /* Shift:core 已按合同处理。有缓冲时 had_content=1,原串已上屏且本次
+     * Shift 到此消费完毕;只有空缓冲 Shift 才挂起单击判定并允许切英文。 */
+    if (key == LKEY_SHIFTPRESS && !had_content && !st->shift_pending) {
         st->shift_pending = 1;
         app->shift_pending = 1;
         if (app->shift_timer_id)

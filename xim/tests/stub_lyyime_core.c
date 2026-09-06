@@ -465,3 +465,98 @@ int lyyime_cand_comment(void *eng, int i, char *buf, int cap)
     memcpy(buf, c, (size_t)need);
     return (int)need;
 }
+
+/* ---------- §14 快速功能键(桩:注入/执行合同;行为确定性) ---------- */
+
+/* 桩配置表:注入即替换;action_command 原样返回;select_candidate 对
+ * 缓冲 "qa" 生成单条功能候选(index 0)供点选路径断言 */
+#define STUB_QA_MAX 8
+typedef struct {
+    char trigger[64];
+    char label[128];
+    char command[512];
+} StubQa;
+typedef struct {
+    int enabled;
+    int count;
+    StubQa items[STUB_QA_MAX];
+} StubQaStore;
+
+static StubQaStore g_qa = { .enabled = 1, .count = 0 };
+
+int lyyime_set_quick_actions_enabled(void *eng, int enabled)
+{
+    (void)eng;
+    g_qa.enabled = enabled ? 1 : 0;
+    return g_qa.enabled;
+}
+
+void lyyime_clear_quick_actions(void *eng)
+{
+    (void)eng;
+    g_qa.count = 0;
+}
+
+int lyyime_add_quick_action(void *eng, const char *trigger, const char *label,
+                            const char *command)
+{
+    (void)eng;
+    if (!trigger || !label || !command || g_qa.count >= STUB_QA_MAX)
+        return -1;
+    StubQa *a = &g_qa.items[g_qa.count++];
+    snprintf(a->trigger, sizeof(a->trigger), "%s", trigger);
+    snprintf(a->label, sizeof(a->label), "%s", label);
+    snprintf(a->command, sizeof(a->command), "%s", command);
+    return 0;
+}
+
+int lyyime_action_command(void *eng, int i, char *buf, int cap)
+{
+    (void)eng;
+    if (i < 0 || i >= g_qa.count)
+        return cap > 0 ? 1 : -1; /* 越界:空串(含 \0 需 1 字节) */
+    int need = (int)strlen(g_qa.items[i].command) + 1;
+    if (cap < need)
+        return -need;
+    memcpy(buf, g_qa.items[i].command, (size_t)need);
+    return need;
+}
+
+int64_t lyyime_select_candidate(void *eng, int idx, char *buf, int64_t buf_cap)
+{
+    StubEng *e = eng;
+    if (!e || e->len == 0)
+        return -1; /* 无候选:consumed 由调用方语义处理(返回异常) */
+    /* 桩行为:缓冲恰为注入过的触发词 → action 效果;否则按普通候选上屏 */
+    for (int i = 0; i < g_qa.count; i++) {
+        if (strcmp(e->buf, g_qa.items[i].trigger) == 0) {
+            if (idx != 0)
+                return -1;
+            const char *tpl = "[{\"t\":\"action\",\"i\":%d},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]";
+            char tmp[256];
+            int need = snprintf(tmp, sizeof(tmp), tpl, i) + 1;
+            if (buf_cap >= need) {
+                memcpy(buf, tmp, (size_t)need);
+                e->len = 0;
+                e->buf[0] = '\0';
+                return need;
+            }
+            return -need;
+        }
+    }
+    /* 普通候选点选:commit 第 idx 个(越界 consumed) */
+    char word[64];
+    if (idx < 0 || idx >= 5)
+        return -1;
+    cand_text(e, idx, word, (int)sizeof(word));
+    const char *tpl = "[{\"t\":\"commit\",\"s\":\"%s\"},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]";
+    char tmp[256];
+    int need = snprintf(tmp, sizeof(tmp), tpl, word) + 1;
+    if (buf_cap >= need) {
+        memcpy(buf, tmp, (size_t)need);
+        e->len = 0;
+        e->buf[0] = '\0';
+        return need;
+    }
+    return -need;
+}

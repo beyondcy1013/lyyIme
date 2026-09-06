@@ -65,6 +65,10 @@ pub enum CandKind {
     English,
     /// 用户词(学习过、带 user.tsv 加成)。
     User,
+    /// 快速功能键(合同 §14):值 = 配置列表 `quick_actions` 的下标;
+    /// 选中(数字/鼠标/空格顶屏)产生 [`Effect::Action`],宿主执行功能,
+    /// 不上屏文本、不学习。
+    Action(u8),
 }
 
 /// 一条候选:上屏文本 + 注释(编码/拼音提示)+ 得分 + 来源。
@@ -104,4 +108,8 @@ pub enum Effect {
     Hint(String),
     /// 模式已变化,宿主更新中/EN 指示。
     ModeChanged(Mode),
+    /// 快速功能键命中(合同 §14):值 = 配置列表 `quick_actions` 的下标。
+    /// 宿主按 `command` 执行功能(`@settings`/`@help` 内置或 shell 命令),
+    /// 不上屏任何文本;候选条随之清除(本效果流已含清除效果)。
+    Action(usize),
 }

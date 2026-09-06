@@ -1020,3 +1020,151 @@ fn 学习加成_用户词优先于更高频普通词() {
     let nh = page.iter().position(|t| t == "你好").unwrap();
     assert!(nhm < nh, "学习后低频词组应在简拼通道反超,实为 {page:?}");
 }
+
+// ======================================================================
+// 快速功能键(合同 §14)
+// ======================================================================
+
+use lyyime_core::QuickAction;
+
+/// 配置单条功能键的引擎。
+fn engine_action(trigger: &str, label: &str, command: &str) -> Engine {
+    engine_with(Config {
+        quick_actions: vec![QuickAction {
+            trigger: trigger.to_string(),
+            label: label.to_string(),
+            command: command.to_string(),
+        }],
+        ..Config::default()
+    })
+}
+
+#[test]
+fn 快速功能键_触发词整串命中追加功能候选() {
+    let mut eng = engine_action("peizhi", "打开配置", "@settings");
+    // 部分触发词不出现功能候选(整串匹配才提示)
+    type_str(&mut eng, "peizh");
+    assert!(!page_texts(&eng).iter().any(|t| t == "打开配置"));
+    eng.process_key(LKey::Char('i'));
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "打开配置", "peizhi 无词库命中,功能候选置顶");
+    assert_eq!(page[0].kind, CandKind::Action(0));
+    assert_eq!(page[0].comment, "功能键");
+}
+
+#[test]
+fn 快速功能键_紧跟首选不顶替普通候选() {
+    // "nihao" 命中词库「你好」:功能候选排第 2,首选仍是普通候选。
+    let mut eng = engine_action("nihao", "打开配置", "@settings");
+    type_str(&mut eng, "nihao");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "你好");
+    assert_eq!(page[1].text, "打开配置");
+    assert_eq!(page[1].kind, CandKind::Action(0));
+    // 空格确认首选仍是普通候选(功能键不劫持顶屏)。
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
+}
+
+#[test]
+fn 快速功能键_数字选中产生Action且不学习() {
+    let td = TempDir::new();
+    let mut eng = engine_with(Config {
+        user_dict: Some(td.join("user.tsv")),
+        quick_actions: vec![QuickAction {
+            trigger: "nihao".to_string(),
+            label: "打开配置".to_string(),
+            command: "@settings".to_string(),
+        }],
+        ..Config::default()
+    });
+    type_str(&mut eng, "nihao");
+    let fx = eng.process_key(LKey::Digit(2));
+    assert!(
+        matches!(fx.first(), Some(Effect::Action(0))),
+        "数字选功能键应产生 Action 效果,实为 {fx:?}"
+    );
+    assert!(commits(&fx).is_empty(), "功能键不上屏文本");
+    assert!(eng.flush_page().is_empty(), "功能键选中后候选条清除");
+    // 不污染学习数据:用户词典保持为空。
+    eng.flush_user_dict().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(td.join("user.tsv")).unwrap_or_default(),
+        ""
+    );
+}
+
+#[test]
+fn 快速功能键_select_candidate_点选产生Action() {
+    let mut eng = engine_action("nihao", "打开配置", "@settings");
+    type_str(&mut eng, "nihao");
+    let fx = eng.select_candidate(1); // 第 2 条 = 功能键
+    assert!(matches!(fx.first(), Some(Effect::Action(0))), "{fx:?}");
+    // 越界点选吞掉,不受功能键影响。
+    type_str(&mut eng, "ni");
+    assert!(matches!(eng.select_candidate(99).as_slice(), [Effect::Consumed]));
+}
+
+#[test]
+fn 快速功能键_多条触发词按配置顺序() {
+    let mut eng = engine_with(Config {
+        quick_actions: vec![
+            QuickAction {
+                trigger: "ni".into(),
+                label: "功能一".into(),
+                command: "@settings".into(),
+            },
+            QuickAction {
+                trigger: "ni".into(),
+                label: "功能二".into(),
+                command: "@help".into(),
+            },
+        ],
+        ..Config::default()
+    });
+    type_str(&mut eng, "ni");
+    let texts = page_texts(&eng);
+    let p1 = texts.iter().position(|t| t == "功能一").unwrap();
+    let p2 = texts.iter().position(|t| t == "功能二").unwrap();
+    assert_eq!((p1, p2), (1, 2), "功能候选按配置顺序紧跟首选,实为 {texts:?}");
+}
+
+#[test]
+fn 快速功能键_总开关关闭不提示() {
+    let mut eng = engine_with(Config {
+        quick_actions_enabled: false,
+        quick_actions: vec![QuickAction {
+            trigger: "peizhi".to_string(),
+            label: "打开配置".to_string(),
+            command: "@settings".to_string(),
+        }],
+        ..Config::default()
+    });
+    type_str(&mut eng, "peizhi");
+    assert!(page_texts(&eng).is_empty());
+}
+
+#[test]
+fn 快速功能键_唯一功能候选不触发四码唯一上屏() {
+    // 4 字母触发词且无词库命中:四码唯一上屏不得把功能键自动打出去。
+    let mut eng = engine_action("abcd", "打开配置", "@settings");
+    let fx = type_str(&mut eng, "abcd");
+    assert!(
+        commits(&fx).is_empty() && !fx.iter().any(|e| matches!(e, Effect::Action(_))),
+        "唯一候选是功能键时不自动上屏,{fx:?}"
+    );
+    // 用户空格确认后才触发。
+    let fx = eng.process_key(LKey::Space);
+    assert!(matches!(fx.first(), Some(Effect::Action(0))));
+}
+
+#[test]
+fn 快速功能键_标点收尾退回原始字母不上屏功能标签() {
+    // 触发词已命中功能候选时打标点:退回原始字母收尾,不把标签当文本上屏。
+    let mut eng = engine_action("zzz", "打开配置", "@settings");
+    type_str(&mut eng, "zzz");
+    let fx = eng.process_key(LKey::Punct(','));
+    let cs = commits(&fx);
+    assert_eq!(cs.first().map(String::as_str), Some("zzz"), "退回原始字母 {cs:?}");
+    assert!(!cs.iter().any(|c| c == "打开配置"), "功能标签不得上屏 {cs:?}");
+}

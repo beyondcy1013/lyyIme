@@ -406,3 +406,123 @@ fn ffi_造词_热键方向键与notice效果流() {
     assert_eq!(eng.key(12, 0), "[{\"t\":\"pass\"}]");
     assert_eq!(eng.key(15, 0), "[{\"t\":\"pass\"}]");
 }
+
+// ---- 快速功能键(合同 §14)----
+
+use lyyime_core::ffi::{
+    lyyime_action_command, lyyime_add_quick_action, lyyime_clear_quick_actions,
+    lyyime_select_candidate, lyyime_set_quick_actions_enabled,
+};
+
+/// 经 lyyime_select_candidate 取点选效果流 JSON(缓冲足够大)。
+fn select_json(eng: *mut lyyime_core::Engine, idx: c_int) -> String {
+    let mut buf = vec![0u8; 8192];
+    let n = unsafe {
+        lyyime_select_candidate(eng, idx, buf.as_mut_ptr() as *mut c_char, buf.len() as i64)
+    };
+    assert!(n > 0, "select_candidate 返回 {n}");
+    String::from_utf8_lossy(&buf[..(n - 1) as usize]).into_owned()
+}
+
+#[test]
+fn ffi_快速功能键_默认表候选与action效果流() {
+    let mut eng = FfiEngine::new(&fixtures());
+    // 默认表含 peizhi→打开配置:无词库命中,功能候选置顶。
+    for c in "peizhi".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(eng.cand(0), ("打开配置".to_string(), "功能键".to_string()));
+    // 数字 1 选中功能键:action 效果流,不上屏文本。
+    let json = eng.key(LKEY_DIGIT, '1' as u32);
+    assert_eq!(
+        json,
+        "[{\"t\":\"action\",\"i\":0},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]"
+    );
+    // command 经 lyyime_action_command 可取(@settings 内置)。
+    let mut buf = vec![0u8; 512];
+    let n = unsafe { lyyime_action_command(eng.0, 0, buf.as_mut_ptr() as *mut c_char, 512) };
+    assert!(n > 0);
+    assert_eq!(String::from_utf8_lossy(&buf[..n as usize - 1]), "@settings");
+}
+
+#[test]
+fn ffi_快速功能键_点选select_candidate的json() {
+    let mut eng = FfiEngine::new(&fixtures());
+    for c in "peizhi".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(
+        select_json(eng.0, 0),
+        "[{\"t\":\"action\",\"i\":0},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]"
+    );
+    // 越界点选:consumed。
+    for c in "peizhi".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(select_json(eng.0, 9), "[{\"t\":\"consumed\"}]");
+}
+
+#[test]
+fn ffi_快速功能键_注入列表开关与非法参数() {
+    let mut eng = FfiEngine::new(&fixtures());
+    // 清空默认表:peizhi 不再出现功能候选。
+    unsafe { lyyime_clear_quick_actions(eng.0) };
+    for c in "peizhi".chars() {
+        eng.key_char(c);
+    }
+    assert!(eng.flush_page_texts().is_empty(), "清空后 peizhi 无候选");
+    for _ in 0..6 {
+        eng.key(LKEY_BACKSPACE, 0);
+    }
+
+    // 追加 nihao 触发词;非法触发词(大写/空格)与 NULL 参数拒绝。
+    let t = CString::new("nihao").unwrap();
+    let t_bad = CString::new("Ni Hao").unwrap();
+    let l = CString::new("功能").unwrap();
+    let c1 = CString::new("@help").unwrap();
+    assert_eq!(unsafe { lyyime_add_quick_action(eng.0, t.as_ptr(), l.as_ptr(), c1.as_ptr()) }, 0);
+    assert_eq!(unsafe { lyyime_add_quick_action(eng.0, t_bad.as_ptr(), l.as_ptr(), c1.as_ptr()) }, -1);
+    assert_eq!(unsafe { lyyime_add_quick_action(eng.0, std::ptr::null(), l.as_ptr(), c1.as_ptr()) }, -1);
+
+    // nihao 候选:首选「你好」+ 第 2 条功能键;i=1 的 command = @help。
+    for c in "nihao".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(eng.cand(1), ("功能".to_string(), "功能键".to_string()));
+    // 清空后注入的这条在配置列表里下标 0(页面位置是第 2 条)。
+    let mut buf = vec![0u8; 256];
+    let n = unsafe { lyyime_action_command(eng.0, 0, buf.as_mut_ptr() as *mut c_char, 256) };
+    assert!(n > 0);
+    assert_eq!(String::from_utf8_lossy(&buf[..n as usize - 1]), "@help");
+    // 越界 command 为空串(返回 1,内容空)。
+    let n = unsafe { lyyime_action_command(eng.0, 99, buf.as_mut_ptr() as *mut c_char, 256) };
+    assert_eq!(n, 1);
+
+    // 总开关关闭:返回 0,功能候选消失;重新打开返回 1。
+    assert_eq!(unsafe { lyyime_set_quick_actions_enabled(eng.0, 0) }, 0);
+    for _ in 0..5 {
+        eng.key(LKEY_BACKSPACE, 0);
+    }
+    for c in "nihao".chars() {
+        eng.key_char(c);
+    }
+    let page = eng.flush_page_texts();
+    assert!(!page.iter().any(|t| t == "功能"), "关闭后无功能候选 {page:?}");
+    assert_eq!(unsafe { lyyime_set_quick_actions_enabled(eng.0, 1) }, 1);
+}
+
+impl FfiEngine {
+    /// 当前页候选文本(测试辅助)。
+    fn flush_page_texts(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..9 {
+            let mut b = vec![0u8; 512];
+            let n = unsafe { lyyime_cand(self.0, i, b.as_mut_ptr() as *mut c_char, 512) };
+            if n <= 1 {
+                break;
+            }
+            out.push(String::from_utf8_lossy(&b[..n as usize - 1]).into_owned());
+        }
+        out
+    }
+}

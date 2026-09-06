@@ -85,6 +85,20 @@ int lyy_core_ffi_load(CoreFfi *ffi)
         return -1;
     }
     ffi->loaded = 1;
+
+    /* §14 快速功能键为可选符号组(2026-09 新增):旧 core 库缺任一符号时
+     * 只禁用该功能(qa_ok=0),不整体降级 —— 打字主链路照常。 */
+    ffi->lyyime_set_quick_actions_enabled =
+        dlsym(handle, "lyyime_set_quick_actions_enabled");
+    ffi->lyyime_clear_quick_actions =
+        dlsym(handle, "lyyime_clear_quick_actions");
+    ffi->lyyime_add_quick_action = dlsym(handle, "lyyime_add_quick_action");
+    ffi->lyyime_action_command = dlsym(handle, "lyyime_action_command");
+    ffi->lyyime_select_candidate = dlsym(handle, "lyyime_select_candidate");
+    ffi->qa_ok = ffi->lyyime_set_quick_actions_enabled &&
+                 ffi->lyyime_clear_quick_actions &&
+                 ffi->lyyime_add_quick_action && ffi->lyyime_action_command &&
+                 ffi->lyyime_select_candidate;
     return 0;
 }
 
@@ -101,6 +115,22 @@ int lyy_core_process_key_json(const CoreFfi *ffi, void *eng, int key_id,
     if (need <= 0 || (int64_t)out_cap < need)
         return -1;
     r = ffi->lyyime_process_key(eng, key_id, chr, out, out_cap);
+    return (r >= 0) ? 0 : -1;
+}
+
+/* §14 点选候选:语义同 process_key_json(两段式重试纪律) */
+int lyy_core_select_candidate_json(const CoreFfi *ffi, void *eng, int idx,
+                                   char *out, int out_cap)
+{
+    if (!ffi->loaded || !ffi->qa_ok || !eng || !out || out_cap <= 0)
+        return -1;
+    int64_t r = ffi->lyyime_select_candidate(eng, idx, out, out_cap);
+    if (r >= 0)
+        return 0;
+    int64_t need = -r;
+    if (need <= 0 || (int64_t)out_cap < need)
+        return -1;
+    r = ffi->lyyime_select_candidate(eng, idx, out, out_cap);
     return (r >= 0) ? 0 : -1;
 }
 

@@ -37,6 +37,9 @@ enum {
 typedef struct CoreFfi {
     int loaded; /* 1 = 全符号就绪 */
     char lib_path[1024];
+    /* §14 快速功能键符号组:1 = 五个符号齐备(旧 core 库可能缺失,
+     * 缺失仅禁用该功能,不影响其余符号加载与打字主链路) */
+    int qa_ok;
     /* §3 原型,逐字对应 */
     void *(*lyyime_new)(const char *data_dir);                       /* NULL=失败 */
     void (*lyyime_free)(void *eng);
@@ -50,17 +53,30 @@ typedef struct CoreFfi {
                                   char *buf, int64_t buf_cap);
     int (*lyyime_cand)(void *eng, int i, char *buf, int cap);
     int (*lyyime_cand_comment)(void *eng, int i, char *buf, int cap);
+    /* §14 快速功能键(可选符号组) */
+    int (*lyyime_set_quick_actions_enabled)(void *eng, int enabled); /* 返回生效值 */
+    void (*lyyime_clear_quick_actions)(void *eng);
+    int (*lyyime_add_quick_action)(void *eng, const char *trigger,
+                                   const char *label, const char *command);
+    int (*lyyime_action_command)(void *eng, int i, char *buf, int cap);
+    int64_t (*lyyime_select_candidate)(void *eng, int idx, char *buf,
+                                       int64_t buf_cap);
 } CoreFfi;
 
 /*
  * 加载并解析全部 §3 符号。成功返回 0;
  * 失败返回 -1 并由实现方写日志(含 LYYIME_CORE_LIB 用法与安装指引)。
+ * §14 快速功能键为可选符号组(qa_ok),缺失不视为加载失败。
  */
 int lyy_core_ffi_load(CoreFfi *ffi);
 
 /* 喂键便捷封装:自动处理"两段式返回 -needed"协议;返回的 JSON 写入调用方 buf */
 int lyy_core_process_key_json(const CoreFfi *ffi, void *eng, int key_id,
                               uint32_t chr, char *out, int out_cap);
+
+/* 点选候选便捷封装(§14 鼠标点选;语义同 process_key_json):返回 0 成功 */
+int lyy_core_select_candidate_json(const CoreFfi *ffi, void *eng, int idx,
+                                   char *out, int out_cap);
 
 /* 取第 i 个候选文本/注释;-needed 自动重试;失败返回 NULL */
 const char *lyy_core_cand_text(const CoreFfi *ffi, void *eng, int i,

@@ -227,6 +227,19 @@
                 <property name="top-attach">11</property>
               </packing>
             </child>
+            <child>
+              <object class="GtkCheckButton" id="chk_quick_actions">
+                <property name="visible">True</property>
+                <property name="label">快速功能键(输入触发词时候选条提示,数字键/鼠标点击执行;触发词表在 config.toml 的 [[quick_actions]])</property>
+                <property name="tooltip-text">输入与触发词完全相同的字母(如默认的 peizhi=打开配置、bangzhu=帮助)时候选条追加功能候选,数字键或鼠标点击即执行,不上屏文本。触发词/名称/命令可在 config.toml 的 [[quick_actions]] 块中增删,command 支持 @settings、@help 或任意 shell 命令</property>
+                <property name="halign">start</property>
+              </object>
+              <packing>
+                <property name="left-attach">0</property>
+                <property name="top-attach">12</property>
+                <property name="width">2</property>
+              </packing>
+            </child>
           </object>
         </child>
         <child>

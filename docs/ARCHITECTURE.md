@@ -182,7 +182,7 @@ int   lyyime_cand_comment(void* eng, int i, char* buf, int cap);
 
 - **接入**:应用设置 `XMODIFIERS=@im=lyyime`(doctor 的 Mode B profile 负责写入并重启会话应用);GTK3 内建 xim immodule / Xlib 应用原生接入。覆盖 GTK3+Xlib+XIM 类终端;Qt5 走 Mode A(互补全覆盖)。
 - **按键流**(root-window style):trigger on 后,XIM forward event → 映射 LKey → core.process_key → 效果流:Preedit/Candidates 画进自绘候选窗;Commit → `IMCommitString`(任意 Unicode);Pass 类键 → `IMForwardEvent`(协议级原样回放,零风险)。
-- **Shift 单击切换** = XIM trigger off/on:off 后应用直接收键(英文态),再 on 恢复中文态;由 XIM 协议原生保证,无任何 hack。
+- **Shift 单击切换** = 空缓冲时以 XIM trigger off/on 切换中英:off 后应用直接收键(英文态),再 on 恢复中文态;组合中 Shift 已用于上屏英文原串,该次按键被消费且 release/超时不得再次切换模式。
 - **候选窗**:GTK3 override-redirect、无边框、accept_focus(false),跟随光标(root style 下用 XQueryPointer);序号高亮首选、编码提示、翻页指示,样式对齐主流输入法。
 - **托盘**:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel):状态(中/EN)+ 右键菜单:启用/停用、模式、设置、工具(截屏(§13)/ 修复输入法 / 输入法管理(增删其它输入法、设默认,exec `lyyime-doctor` CLI 并解析 JSON,危险操作 GTK 确认对话框)、重载词库、日志)、退出。
 - **设置窗**:GTK3(GtkBuilder .ui),读写 ~/.config/lyyime/config.toml,保存即 set_config 生效;含 Mode B 专属项(XMODIFIERS 一键切换到 lyyime/恢复 ibus)。

@@ -34,6 +34,9 @@ pub trait Host {
     fn on_ai_submit(&mut self, prompt: String);
     /// 截屏热键命中(§13):宿主拉起 lyyime-shot 子进程(异步,不阻塞按键流)
     fn on_shot(&mut self);
+    /// 快速功能键命中(§14):宿主按 `quick_actions[index].command` 执行功能
+    /// (@settings/@help 内置或 shell 命令),不上屏任何文本
+    fn on_action(&mut self, index: usize);
 }
 
 /// /AI 触发会话状态:idle=未触发;slash/slash_a=已吞触发前缀;
@@ -105,6 +108,11 @@ impl EngineLogic {
         parse_hotkey(&self.core_cfg.shot_hotkey).map(|_| self.core_cfg.shot_hotkey.clone())
     }
 
+    /// 快速功能键配置(合同 §14;胶水层执行 command 用)
+    pub fn quick_actions(&self) -> &[lyyime_core::QuickAction] {
+        &self.core_cfg.quick_actions
+    }
+
     pub fn set_ai_cfg(&mut self, cfg: Option<AiConfig>) {
         self.ai_cfg = cfg;
         self.ai_reset_state();
@@ -133,10 +141,15 @@ impl EngineLogic {
                 self.pending_shift = None;
                 return false;
             }
-            // Shift 按下:有缓冲立即上屏英文原串;空缓冲进入单击检测
+            // Shift 按下:有缓冲立即上屏英文原串并消费本次 Shift;
+            // 仅空缓冲进入单击检测,避免 release 又把模式切到英文。
+            let had_composition = self
+                .engine
+                .as_ref()
+                .is_some_and(|engine| !engine.buffer().is_empty());
             let effects = self.core_mut().process_key(LKey::ShiftPress);
             let _consumed = self.dispatch(host, effects);
-            if self.preedit.is_none() {
+            if !had_composition {
                 self.pending_shift = Some(keyval);
             }
             return true; // 与 python 版一致:Shift 按下一律吞键
@@ -398,6 +411,7 @@ impl EngineLogic {
                 Effect::Consumed => {}
                 Effect::Notice(t) => host.on_notice(&t),
                 Effect::Hint(t) => host.on_hint(&t),
+                Effect::Action(i) => host.on_action(i),
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
@@ -459,6 +473,7 @@ impl EngineLogic {
                 Effect::Consumed => {}
                 Effect::Notice(t) => host.on_notice(&t),
                 Effect::Hint(t) => host.on_hint(&t),
+                Effect::Action(i) => host.on_action(i),
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
@@ -495,6 +510,16 @@ impl EngineLogic {
         host.on_preedit(None);
         host.on_candidates(&[], 0, 0, "");
         host.on_mode_changed(self.mode);
+    }
+
+    /// 鼠标/面板点选当前页第 `idx`(0 起)个候选(合同 §14);
+    /// 返回 true=已消费。功能键候选经 dispatch 产生 on_action。
+    pub fn select_candidate(&mut self, host: &mut dyn Host, idx: usize) -> bool {
+        if self.degraded() {
+            return false;
+        }
+        let effects = self.core_mut().select_candidate(idx);
+        self.dispatch(host, effects)
     }
 
     pub fn reload_dict(&mut self, host: &mut dyn Host) -> Result<(), anyhow::Error> {
@@ -560,6 +585,9 @@ mod tests {
         }
         fn on_shot(&mut self) {
             self.log("shot".to_string());
+        }
+        fn on_action(&mut self, index: usize) {
+            self.log(format!("action:{index}"));
         }
     }
 
@@ -631,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_press_flushes_letters_then_single_click_toggles_english() {
+    fn shift_press_flushes_letters_without_toggling_english() {
         let (_d, mut l) = logic_with_ai(None);
         let mut h = Mock::default();
         for k in ['t', 'h', 'e'] {
@@ -640,11 +668,22 @@ mod tests {
         // Shift 按下:有缓冲 → 上屏英文原串
         l.process_key_event(&mut h, SHIFT_L, 0);
         assert!(h.events.borrow().iter().any(|e| e == "commit:the"));
-        // Shift 释放(无其它键)→ 单击生效切英文
+        // 这次 Shift 已用于上屏,释放不得再次切换模式。
         l.process_key_event(&mut h, SHIFT_L, 1 << 30);
+        assert!(!h.events.borrow().iter().any(|e| e == "mode:1"));
+        // 仍是中文态:字母进入下一次组合。
+        assert!(l.process_key_event(&mut h, 0x61, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "aux:a"));
+    }
+
+    #[test]
+    fn shift_single_click_with_empty_buffer_toggles_english() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        assert!(l.process_key_event(&mut h, SHIFT_L, 0));
+        assert!(l.process_key_event(&mut h, SHIFT_L, 1 << 30));
         assert!(h.events.borrow().iter().any(|e| e == "mode:1"));
-        // 英文态:字母直通
-        assert!(!l.process_key_event(&mut h, 0x61, 0)); // 'a' 放行
+        assert!(!l.process_key_event(&mut h, 0x61, 0));
     }
 
     #[test]
@@ -871,5 +910,49 @@ mod tests {
                 .any(|e| e.contains("hint:") && e.contains("你好") && e.contains("wqvb")),
             "应有词组提示: {ev:?}"
         );
+    }
+
+    fn logic_with_action() -> (PathBuf, EngineLogic) {
+        let mut cfg = lyyime_core::Config::default();
+        cfg.quick_actions = vec![lyyime_core::QuickAction {
+            trigger: "peizhi".into(),
+            label: "打开配置".into(),
+            command: "@settings".into(),
+        }];
+        logic_with_core_cfg(cfg)
+    }
+
+    #[test]
+    fn 快速功能键_数字选中回调on_action不上屏() {
+        let (_d, mut l) = logic_with_action();
+        let mut h = Mock::default();
+        for k in "peizhi".chars() {
+            assert!(l.process_key_event(&mut h, k as u32, 0), "{k} 应被吞");
+        }
+        // 触发词命中:候选里出现功能键标签(经 on_candidates 下发)。
+        assert!(
+            h.events
+                .borrow()
+                .iter()
+                .any(|e| e.starts_with("cands:[") && e.contains("打开配置")),
+            "events={:?}",
+            h.events.borrow()
+        );
+        // 数字 1 选中功能键:on_action(0) 回调,无 commit。
+        assert!(l.process_key_event(&mut h, 0x31, 0));
+        let ev = h.events.borrow();
+        assert!(ev.iter().any(|e| e == "action:0"), "events={ev:?}");
+        assert!(!ev.iter().any(|e| e.starts_with("commit:")), "events={ev:?}");
+    }
+
+    #[test]
+    fn 快速功能键_点选select_candidate回调on_action() {
+        let (_d, mut l) = logic_with_action();
+        let mut h = Mock::default();
+        for k in "peizhi".chars() {
+            l.process_key_event(&mut h, k as u32, 0);
+        }
+        assert!(l.select_candidate(&mut h, 0), "点选应消费");
+        assert!(h.events.borrow().iter().any(|e| e == "action:0"));
     }
 }

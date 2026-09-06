@@ -244,6 +244,9 @@ int main(int argc, char *argv[])
             xcb_aux_get_screen(app->xim.conn, app->xim.screen_no);
         lyy_candwin_init(&app->candwin, app->xim.conn, screen->root,
                          res_dir_default, app->config.font_size);
+        /* 候选窗行点击(§14 鼠标点选):桥到 core select_candidate */
+        app->candwin.on_click = lyy_candwin_row_clicked;
+        app->candwin.click_user_data = app;
     }
     {
         char icon_dir[1024];

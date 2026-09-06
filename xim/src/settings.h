@@ -24,6 +24,7 @@ typedef struct SettingsUi {
     GtkWidget *chk_commit_unique_four;
     GtkWidget *chk_phrase_hint; /* 词组效率提示(上屏后提示更省键词组) */
     GtkWidget *chk_autostart;
+    GtkWidget *chk_quick_actions; /* 快速功能键总开关(合同 §14) */
     GtkWidget *ent_coin_hotkey; /* 造词快捷键(coin_hotkey,合同 §12) */
     GtkWidget *ent_shot_hotkey; /* 截屏快捷键(shot_hotkey,合同 §13) */
     /* AI 助手([ai] 段) */

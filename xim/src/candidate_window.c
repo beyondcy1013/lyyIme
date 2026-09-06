@@ -124,6 +124,18 @@ static gboolean on_pos_timer(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
+/* 行点击(§14 鼠标点选):左键单击候选行 → 宿主注入的回调(core select_candidate) */
+static gboolean on_row_pressed(GtkWidget *row, GdkEventButton *ev,
+                               gpointer user_data)
+{
+    CandidateWindow *cw = user_data;
+    if (ev->button != 1 || !cw->on_click)
+        return FALSE;
+    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "lyy-idx"));
+    cw->on_click(idx, cw->click_user_data);
+    return TRUE;
+}
+
 static GtkWidget *make_row(CandidateWindow *cw, int i)
 {
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -141,6 +153,10 @@ static GtkWidget *make_row(CandidateWindow *cw, int i)
     gtk_box_pack_start(GTK_BOX(row), cw->num[i], FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(row), cw->word[i], FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(row), cw->comment[i], FALSE, FALSE, 0);
+    /* 点选(§14):行接收按钮事件;下标挂对象数据,回调统一转发宿主 */
+    gtk_widget_add_events(row, GDK_BUTTON_PRESS_MASK);
+    g_object_set_data(G_OBJECT(row), "lyy-idx", GINT_TO_POINTER(i));
+    g_signal_connect(row, "button-press-event", G_CALLBACK(on_row_pressed), cw);
     return row;
 }
 

@@ -32,6 +32,8 @@ static void ui_from_config(SettingsUi *ui)
                                  c->phrase_hint);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_autostart),
                                  c->autostart);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_quick_actions),
+                                 c->quick_actions_enabled);
     gtk_entry_set_text(GTK_ENTRY(ui->ent_coin_hotkey), c->coin_hotkey);
     gtk_entry_set_text(GTK_ENTRY(ui->ent_shot_hotkey), c->shot_hotkey);
     /* AI 助手([ai] 段) */
@@ -67,6 +69,8 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint));
     c->autostart =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_autostart));
+    c->quick_actions_enabled = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_quick_actions));
     snprintf(c->coin_hotkey, sizeof(c->coin_hotkey), "%s",
              gtk_entry_get_text(GTK_ENTRY(ui->ent_coin_hotkey)));
     g_strstrip(c->coin_hotkey);
@@ -210,11 +214,11 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     lyy_app_reload_hotkey(app); /* 造词/截屏热键即时生效 */
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d unique4=%d hint=%d font=%d autostart=%d ai=%d base=%s model=%s coin=%s shot=%s",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d unique4=%d hint=%d font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s",
             c.page_size, c.mixed_english, c.auto_commit_english,
             c.chinese_punct, c.learning, c.commit_after_four,
             c.commit_unique_four, c.phrase_hint, c.font_size, c.autostart,
-            c.ai_enabled,
+            c.quick_actions_enabled, c.quick_actions_count, c.ai_enabled,
             c.ai_api_base, c.ai_model, c.coin_hotkey, c.shot_hotkey);
     gtk_widget_hide(ui->window);
 }
@@ -411,6 +415,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_phrase_hint"));
     ui->chk_autostart =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_autostart"));
+    ui->chk_quick_actions =
+        GTK_WIDGET(gtk_builder_get_object(builder, "chk_quick_actions"));
     ui->ent_coin_hotkey =
         GTK_WIDGET(gtk_builder_get_object(builder, "ent_coin_hotkey"));
     ui->ent_shot_hotkey =
@@ -433,7 +439,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
     if (!ui->window || !ui->spin_page || !ui->spin_font || !ui->chk_mixed ||
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
         !ui->chk_commit_four || !ui->chk_commit_unique_four ||
-        !ui->chk_phrase_hint || !ui->chk_autostart || !ui->chk_ai_enabled ||
+        !ui->chk_phrase_hint || !ui->chk_autostart ||
+        !ui->chk_quick_actions || !ui->chk_ai_enabled ||
         !ui->ent_ai_base || !ui->ent_ai_key || !ui->ent_ai_model ||
         !ui->ent_ai_prompt || !ui->spin_ai_timeout || !ui->btn_ai_test ||
         !ui->ent_coin_hotkey) {

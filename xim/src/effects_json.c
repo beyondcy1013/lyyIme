@@ -55,6 +55,7 @@ static int kind_of(const char *t)
     if (!strcmp(t, "notice")) return LYY_EFF_NOTICE;
     if (!strcmp(t, "hint")) return LYY_EFF_HINT;
     if (!strcmp(t, "mode")) return LYY_EFF_MODE;
+    if (!strcmp(t, "action")) return LYY_EFF_ACTION;
     return -1;
 }
 
@@ -68,7 +69,7 @@ static const char *parse_effect(const char *p, LyyEffect *eff)
 
     memset(eff, 0, sizeof(*eff));
     eff->kind = -1;
-    eff->n = eff->page = eff->pages = eff->m = 0;
+    eff->n = eff->page = eff->pages = eff->m = eff->i = 0;
     eff->s[0] = '\0';
     int have_t = 0;
 
@@ -100,7 +101,8 @@ static const char *parse_effect(const char *p, LyyEffect *eff)
             if (!p)
                 return NULL;
         } else if (!strcmp(key, "n") || !strcmp(key, "page") ||
-                   !strcmp(key, "pages") || !strcmp(key, "m")) {
+                   !strcmp(key, "pages") || !strcmp(key, "m") ||
+                   !strcmp(key, "i")) {
             char *end = NULL;
             long v = strtol(p, &end, 10);
             if (end == p || (end && *end != '\0' && !isspace((unsigned char)*end) &&
@@ -109,7 +111,8 @@ static const char *parse_effect(const char *p, LyyEffect *eff)
             if (!strcmp(key, "n")) eff->n = (int)v;
             else if (!strcmp(key, "page")) eff->page = (int)v;
             else if (!strcmp(key, "pages")) eff->pages = (int)v;
-            else eff->m = (int)v;
+            else if (!strcmp(key, "m")) eff->m = (int)v;
+            else eff->i = (int)v;
             p = end;
         } else {
             return NULL; /* 固定 schema 之外的键判违约 */
@@ -177,6 +180,7 @@ const char *lyy_effect_kind_name(int kind)
     case LYY_EFF_NOTICE: return "notice";
     case LYY_EFF_HINT: return "hint";
     case LYY_EFF_MODE: return "mode";
+    case LYY_EFF_ACTION: return "action";
     default: return "?";
     }
 }

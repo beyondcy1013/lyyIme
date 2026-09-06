@@ -18,6 +18,10 @@
 
 #define LYY_MAX_ROWS 9
 
+/* 行点击回调(§14 鼠标点选):idx=行下标(0 基),GTK 主线程内调用;
+ * 由宿主(xim_server)注入,点选走 core select_candidate(功能键/普通候选同路径) */
+typedef void (*LyyCandwinClickFn)(int idx, void *user_data);
+
 typedef struct CandidateWindow {
     GtkWidget *win;
     GtkWidget *frame;      /* .lyy-frame 圆角+阴影容器 */
@@ -34,6 +38,8 @@ typedef struct CandidateWindow {
     xcb_window_t root;
     int font_size;
     char css_dir[1024];    /* candidate.css 所在目录(空=未找到) */
+    LyyCandwinClickFn on_click;   /* 行点击回调(§14);NULL=不响应点击 */
+    void *click_user_data;        /* 回调入参(宿主传 App*) */
 } CandidateWindow;
 
 /* 初始化并构建窗口(隐藏状态);css_dir 给出 res 目录,找不到样式用内置兜底 */

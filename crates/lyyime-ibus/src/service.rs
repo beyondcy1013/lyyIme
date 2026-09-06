@@ -40,6 +40,8 @@ pub enum Action {
     Hint(String),
     AiSubmit(String),
     Shot,
+    /// 快速功能键命中(§14):值 = quick_actions 下标,调用方单独执行
+    QuickRun(usize),
 }
 
 impl logic::Host for CollectingHost {
@@ -77,6 +79,9 @@ impl logic::Host for CollectingHost {
     }
     fn on_shot(&mut self) {
         self.actions.push(Action::Shot);
+    }
+    fn on_action(&mut self, index: usize) {
+        self.actions.push(Action::QuickRun(index));
     }
 }
 
@@ -301,6 +306,7 @@ impl EngineService {
             }
             Action::AiSubmit(_) => Ok(()), // 由调用方单独处理
             Action::Shot => Ok(()),        // 由调用方单独处理
+            Action::QuickRun(_) => Ok(()), // 由调用方单独处理(§14)
         }
     }
 
@@ -455,6 +461,48 @@ impl EngineService {
             .spawn();
     }
 
+    /// 执行快速功能键(合同 §14):`@settings`/`@help` 宿主内置,
+    /// 其余按 shell 命令执行(不阻塞按键流)。
+    fn run_quick_action(&self, index: usize) {
+        let cmd = {
+            let logic = self.0.logic.lock().unwrap();
+            logic.quick_actions().get(index).map(|a| a.command.clone())
+        };
+        let Some(cmd) = cmd else {
+            crate::logger::warn(&format!("快速功能键下标越界:{index}"));
+            return;
+        };
+        match cmd.as_str() {
+            "@settings" => {
+                crate::logger::info("快速功能键命中:打开配置(@settings)");
+                self.launch_setup();
+            }
+            "@help" => {
+                crate::logger::info("快速功能键命中:帮助(@help)");
+                let msg = "帮助:Shift单击=中英切换  1-9选词  -/=翻页  Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  peizhi/bangzhu=功能键";
+                let this = self.clone();
+                let _ = zbus::block_on(async {
+                    this.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true))
+                        .await
+                });
+                self.schedule_notice_clear();
+            }
+            custom => {
+                crate::logger::info(&format!("快速功能键命中[{index}]:执行 {custom}"));
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(custom)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(_) => crate::logger::info("快速功能命令已拉起"),
+                    Err(e) => crate::logger::error(&format!("快速功能命令失败({custom}):{e}")),
+                }
+            }
+        }
+    }
+
     fn launch_setup(&self) {
         // 拉起设置窗:lyyime-app 缺失时回退 lyyime-xim --settings(共用 config.toml)
         let argv: Option<Vec<String>> = which("lyyime-app")
@@ -522,6 +570,7 @@ impl EngineService {
         let mut actions = Vec::new();
         let mut ai_prompt: Option<String> = None;
         let mut shot = false;
+        let mut quick: Option<usize> = None;
         let consumed = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
@@ -530,6 +579,7 @@ impl EngineService {
                 match a {
                     Action::AiSubmit(p) => ai_prompt = Some(p),
                     Action::Shot => shot = true,
+                    Action::QuickRun(i) => quick = Some(i),
                     other => actions.push(other),
                 }
             }
@@ -546,7 +596,33 @@ impl EngineService {
         if shot {
             self.spawn_shot();
         }
+        if let Some(i) = quick {
+            self.run_quick_action(i);
+        }
         consumed
+    }
+
+    async fn candidate_clicked(&self, index: u32, _button: u32, _state: u32) {
+        // 候选点击(合同 §14 鼠标点选):与数字选词同一条 core 路径
+        let mut actions = Vec::new();
+        let mut quick: Option<usize> = None;
+        {
+            let mut logic = self.0.logic.lock().unwrap();
+            let mut host = CollectingHost::default();
+            let _consumed = logic.select_candidate(&mut host, index as usize);
+            for a in host.actions {
+                match a {
+                    Action::QuickRun(i) => quick = Some(i),
+                    other => actions.push(other),
+                }
+            }
+        }
+        for a in &actions {
+            let _ = self.emit_action(a).await;
+        }
+        if let Some(i) = quick {
+            self.run_quick_action(i);
+        }
     }
 
     async fn focus_in(&self) {

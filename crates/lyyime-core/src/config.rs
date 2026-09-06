@@ -14,6 +14,46 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use crate::types::Mode;
 
+/// 快速功能键(合同 §14):输入缓冲与 `trigger` 完全相等时候选条追加功能候选,
+/// 数字键/鼠标点选后宿主执行 `command`,不上屏文本。
+///
+/// - `trigger`:小写字母 1–12 个(受缓冲上限与"数字键是选词键"约束);
+/// - `label`:候选展示文本(如「打开配置」);注释固定为「功能键」;
+/// - `command`:`@settings` / `@help` 为宿主内置功能,其余按 shell 命令执行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickAction {
+    pub trigger: String,
+    pub label: String,
+    pub command: String,
+}
+
+impl QuickAction {
+    /// trigger 合法性:小写字母 1–12 个(数字键是选词键,不允许进触发词)。
+    pub fn trigger_valid(trigger: &str) -> bool {
+        (1..=12).contains(&trigger.len())
+            && trigger.bytes().all(|b| b.is_ascii_lowercase())
+    }
+}
+
+/// 快速功能键条目上限(每页最多 9 个候选,功能键不该挤占整页)。
+pub const QUICK_ACTIONS_MAX: usize = 8;
+
+/// 快速功能键默认表(合同 §14):配置/帮助两个内置功能。
+pub fn default_quick_actions() -> Vec<QuickAction> {
+    vec![
+        QuickAction {
+            trigger: "peizhi".to_string(),
+            label: "打开配置".to_string(),
+            command: "@settings".to_string(),
+        },
+        QuickAction {
+            trigger: "bangzhu".to_string(),
+            label: "帮助".to_string(),
+            command: "@help".to_string(),
+        },
+    ]
+}
+
 /// 引擎配置(字段语义见各注释;与 config.toml 一一对应)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -53,6 +93,10 @@ pub struct Config {
     /// 截屏快捷键(合同 §13):拉起 `lyyime-shot` 框选截屏;写法同造词热键
     /// (修饰+键名)。core 不消费该值,仅集中 schema 供各宿主解析匹配。
     pub shot_hotkey: String,
+    /// 快速功能键总开关(合同 §14):关闭后触发词不再产生功能候选。
+    pub quick_actions_enabled: bool,
+    /// 快速功能键列表(合同 §14);触发词整串命中时候选条追加功能候选。
+    pub quick_actions: Vec<QuickAction>,
 }
 
 impl Default for Config {
@@ -73,6 +117,8 @@ impl Default for Config {
             phrase_hint: true,
             coin_hotkey: "ctrl+equal".to_string(),
             shot_hotkey: "ctrl+alt+a".to_string(),
+            quick_actions_enabled: true,
+            quick_actions: default_quick_actions(),
         }
     }
 }
@@ -98,6 +144,8 @@ struct ConfigToml {
     phrase_hint: bool,
     coin_hotkey: String,
     shot_hotkey: String,
+    quick_actions_enabled: bool,
+    quick_actions: Vec<QuickAction>,
 }
 
 impl Default for ConfigToml {
@@ -133,6 +181,8 @@ impl From<&Config> for ConfigToml {
             phrase_hint: c.phrase_hint,
             coin_hotkey: c.coin_hotkey.clone(),
             shot_hotkey: c.shot_hotkey.clone(),
+            quick_actions_enabled: c.quick_actions_enabled,
+            quick_actions: c.quick_actions.clone(),
         }
     }
 }
@@ -259,6 +309,25 @@ impl Config {
             "# Esc 取消、Enter 确认、双击整屏);写法同造词快捷键,如 ctrl+alt+a、ctrl+shift+x"
         );
         let _ = writeln!(s, "shot_hotkey = \"{}\"", d.shot_hotkey);
+        let _ = writeln!(
+            s,
+            "\n# 快速功能键(合同 §14):输入触发词(整串小写字母)时候选条追加"
+        );
+        let _ = writeln!(
+            s,
+            "# 功能候选,数字键/鼠标点选执行,不上屏文本;command 为 @settings/"
+        );
+        let _ = writeln!(
+            s,
+            "# @help(宿主内置)或任意 shell 命令;总开关关闭则整表不生效。"
+        );
+        let _ = writeln!(s, "quick_actions_enabled = {}", d.quick_actions_enabled);
+        for a in &d.quick_actions {
+            let _ = writeln!(s, "\n[[quick_actions]]");
+            let _ = writeln!(s, "trigger = \"{}\"", a.trigger);
+            let _ = writeln!(s, "label = \"{}\"", a.label);
+            let _ = writeln!(s, "command = \"{}\"", a.command);
+        }
         s
     }
 
@@ -347,8 +416,39 @@ impl ConfigToml {
                     hk
                 }
             },
+            quick_actions_enabled: self.quick_actions_enabled,
+            quick_actions: validate_quick_actions(&self.quick_actions, path)?,
         })
     }
+}
+
+/// 快速功能键条目校验(合同 §14):格式非法给人话错误;上限 [`QUICK_ACTIONS_MAX`]。
+fn validate_quick_actions(list: &[QuickAction], path: &Path) -> Result<Vec<QuickAction>, Error> {
+    if list.len() > QUICK_ACTIONS_MAX {
+        return Err(Error::new(format!(
+            "配置文件 {} 中 quick_actions 有 {} 条,最多 {} 条",
+            path.display(),
+            list.len(),
+            QUICK_ACTIONS_MAX
+        )));
+    }
+    for a in list {
+        if !QuickAction::trigger_valid(&a.trigger) {
+            return Err(Error::new(format!(
+                "配置文件 {} 中 quick_actions 触发词 \"{}\" 不合法:需 1–12 个小写字母",
+                path.display(),
+                a.trigger
+            )));
+        }
+        if a.label.trim().is_empty() || a.command.trim().is_empty() {
+            return Err(Error::new(format!(
+                "配置文件 {} 中 quick_actions \"{}\" 的 label/command 不能为空",
+                path.display(),
+                a.trigger
+            )));
+        }
+    }
+    Ok(list.to_vec())
 }
 
 #[cfg(test)]
@@ -384,5 +484,47 @@ mod tests {
             .into_config(Path::new("x"))
             .unwrap();
         assert_eq!(cfg3.shot_hotkey, "ctrl+shift+x");
+    }
+
+    #[test]
+    fn quick_actions_缺项回默认表() {
+        let cfg: Config = toml::from_str::<ConfigToml>("mode = \"cn\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(cfg.quick_actions_enabled);
+        assert_eq!(cfg.quick_actions, default_quick_actions());
+    }
+
+    #[test]
+    fn quick_actions_自定义表解析与非法触发词() {
+        let text = r#"
+quick_actions_enabled = false
+[[quick_actions]]
+trigger = "rizhi"
+label = "看日志"
+command = "xfce4-terminal -e 'tail -f ~/.local/share/lyyime/logs/xim.log'"
+[[quick_actions]]
+trigger = "wenjian"
+label = "帮助"
+command = "@help"
+"#;
+        let cfg: Config = toml::from_str::<ConfigToml>(text)
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.quick_actions_enabled);
+        assert_eq!(cfg.quick_actions.len(), 2);
+        assert_eq!(cfg.quick_actions[0].trigger, "rizhi");
+        assert_eq!(cfg.quick_actions[1].command, "@help");
+
+        // 触发词含数字/大写/超长:整份配置判损坏(人话错误,宿主回退默认)
+        for bad in ["Peizhi", "pe-i", "peizhi1", "a".repeat(13).as_str()] {
+            let text = format!("[[quick_actions]]\ntrigger = \"{bad}\"\nlabel = \"x\"\ncommand = \"@help\"\n");
+            let r = toml::from_str::<ConfigToml>(&text)
+                .map_err(|e| Error::new(e.to_string()))
+                .and_then(|raw| raw.into_config(Path::new("x")));
+            assert!(r.is_err(), "trigger {bad} 应判不合法");
+        }
     }
 }

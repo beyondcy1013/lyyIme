@@ -13,6 +13,10 @@
 //! - 四码唯一上屏(可配置):恰好凑满四码且候选唯一时,免空格直接上屏;
 //! - 词组提示(可配置):上屏后最近几字有更省键的五笔词组时,效果流在
 //!   清除类效果之后追加 [`Effect::Hint`](候选条展示,下一次输入才清除);
+//! - 快速功能键(可配置,合同 §14):缓冲与触发词完全相等时候选条追加
+//!   功能候选(`CandKind::Action`,紧跟首选之后);数字/鼠标/空格选中产生
+//!   [`Effect::Action`](宿主执行功能,不上屏文本、不学习),普通候选
+//!   不会被功能键顶替首选位置;
 //! - ShiftPress:有缓冲上屏英文原串;空缓冲吞键,宿主判定单击后调
 //!   [`Engine::toggle_mode`];
 //! - 其它键:Pass(有缓冲先清缓冲)。
@@ -307,20 +311,23 @@ impl Engine {
 
     /// 直接选中当前页第 `idx`(0 起)个候选上屏;越界吞掉。
     pub fn select_candidate(&mut self, idx: usize) -> Vec<Effect> {
-        // 造词模式的单条候选仅用于展示选区与编码预览,不提供点选上屏。
-        if self.coin.is_some() {
-            return vec![Effect::Consumed];
-        }
-        let mut plan = Plan::unchanged(self);
-        let effects = match plan_page_slice(self, &plan).get(idx) {
-            None => vec![Effect::Consumed],
-            Some(c) => {
-                let text = c.text.clone();
-                plan_commit(self, &mut plan, &text, true)
-            }
-        };
+        let (effects, plan) = self.plan_select_candidate(idx);
         self.apply_plan(plan);
         effects
+    }
+
+    /// 点选候选的规划态版本(FFI 两段式重试纪律,合同 §3)。
+    pub(crate) fn plan_select_candidate(&self, idx: usize) -> (Vec<Effect>, Plan) {
+        // 造词模式的单条候选仅用于展示选区与编码预览,不提供点选上屏。
+        if self.coin.is_some() {
+            return (vec![Effect::Consumed], Plan::unchanged(self));
+        }
+        let mut plan = Plan::unchanged(self);
+        let effects = match plan_page_slice(self, &plan).get(idx).cloned() {
+            None => vec![Effect::Consumed],
+            Some(c) => plan_select(self, &mut plan, &c, true),
+        };
+        (effects, plan)
     }
 
     /// 把内存累计的用户词立即落盘(write-behind 之外的显式 flush,合同 §4"退出时")。
@@ -445,16 +452,19 @@ impl Engine {
         }
         // 可选顶屏:恰好四码且已有候选时,再来的字母先确认当前选中,
         // 该字母开启新组合。关闭后保持前缀渐进组词。
+        // 功能键候选不作顶屏确认(避免拼到一半误触发功能),继续缓冲。
         if self.cfg.commit_on_extra_after_four && p.buf.chars().count() == 4 {
             if let Some(top) = plan_page_slice(self, p).first() {
-                let text = top.text.clone();
-                let mut effects = plan_commit(self, p, &text, true);
-                plan_clear(p);
-                p.buf.push(c);
-                p.page = 0;
-                self.recompute_into(p);
-                effects.extend(composition_effects(self, p));
-                return effects;
+                if !matches!(top.kind, CandKind::Action(_)) {
+                    let text = top.text.clone();
+                    let mut effects = plan_commit(self, p, &text, true);
+                    plan_clear(p);
+                    p.buf.push(c);
+                    p.page = 0;
+                    self.recompute_into(p);
+                    effects.extend(composition_effects(self, p));
+                    return effects;
+                }
             }
         }
         p.buf.push(c);
@@ -464,9 +474,11 @@ impl Engine {
         // 恰好凑满四码且合并排序后的候选唯一时,免空格直接上屏。
         // 多候选(拼音/英文通道有共存候选)不触发,避免劫持混打渐进输入;
         // 唯一性按完整候选列表判定,与空格顶屏的选择一致(免按空格而已)。
+        // 唯一候选是功能键时同样不触发:功能须经用户确认(数字/点选/空格)。
         if self.cfg.commit_unique_four
             && p.buf.chars().count() == 4
             && p.cands.len() == 1
+            && !matches!(p.cands[0].kind, CandKind::Action(_))
         {
             let text = p.cands[0].text.clone();
             return plan_commit(self, p, &text, true);
@@ -488,8 +500,8 @@ impl Engine {
             // 越界:吞掉,避免数字被注入到正在组合的文本流中。
             return vec![Effect::Consumed];
         }
-        let text = page[idx].text.clone();
-        plan_commit(self, p, &text, true)
+        let cand = page[idx].clone();
+        plan_select(self, p, &cand, true)
     }
 
     fn plan_space(&self, p: &mut Plan) -> Vec<Effect> {
@@ -498,9 +510,9 @@ impl Engine {
         }
         // Space 是确认键:只要有候选,一律上屏当前选中(首选),不做英文抢占。
         // 英文输入走 Shift 单击切换后的英文直通态;无候选时仍保留原字母兜底。
-        if let Some(top) = plan_page_slice(self, p).first() {
-            let text = top.text.clone();
-            plan_commit(self, p, &text, true)
+        // 选中首选是功能键时同样产生 Action 效果(空格=确认首选)。
+        if let Some(top) = plan_page_slice(self, p).first().cloned() {
+            plan_select(self, p, &top, true)
         } else {
             // 有缓冲无候选:直通原始字母(中英混合,合同 §6)。
             let raw = p.buf.clone();
@@ -773,11 +785,12 @@ impl Engine {
     }
 
     /// 组合结束时应上屏的文本:页内首选 > 原始字母。
+    /// 功能键候选不能当文本上屏:退回原始字母(标点等收尾场景不误触发功能)。
     fn finish_text(&self, p: &Plan) -> String {
-        if let Some(top) = plan_page_slice(self, p).first() {
-            return top.text.clone();
+        match plan_page_slice(self, p).first() {
+            Some(top) if !matches!(top.kind, CandKind::Action(_)) => top.text.clone(),
+            _ => p.buf.clone(),
         }
-        p.buf.clone()
     }
 
     pub(crate) fn page_size(&self) -> usize {
@@ -868,7 +881,34 @@ impl Engine {
                 kind: rc.kind,
             })
             .collect();
+        self.insert_quick_actions(p, &buf);
         p.page = 0;
+    }
+
+    /// 快速功能键(合同 §14):缓冲与触发词完全相等时,把功能候选紧跟首选
+    /// 之后追加(无任何候选时置顶)——普通候选不被顶替,数字键/鼠标点选
+    /// 可达;多条触发词按配置顺序依次排布。不参与排序/截断(重算即插入)。
+    fn insert_quick_actions(&self, p: &mut Plan, buf: &str) {
+        if !self.cfg.quick_actions_enabled || buf.is_empty() {
+            return;
+        }
+        let mut off = 0usize;
+        for (i, a) in self.cfg.quick_actions.iter().enumerate() {
+            if a.trigger != buf {
+                continue;
+            }
+            let at = if p.cands.is_empty() { 0 } else { 1 + off };
+            p.cands.insert(
+                at.min(p.cands.len()),
+                Candidate {
+                    text: a.label.clone(),
+                    comment: "功能键".to_string(),
+                    score: 0.0,
+                    kind: CandKind::Action(i as u8),
+                },
+            );
+            off += 1;
+        }
     }
 
     /// 五笔通道(§5.2):完全同码(code == buffer,简码奖励并入该层)与前缀渐进分两路查询。
@@ -1218,6 +1258,21 @@ fn plan_commit(eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Eff
         effects.push(hint);
     }
     effects
+}
+
+/// 选中一条候选的上屏规划(数字/鼠标/空格确认共用):功能键候选(合同 §14)
+/// → [`Effect::Action`](宿主执行功能,不上屏文本、不学习、不入造词历史);
+/// 普通候选 → [`plan_commit`]。
+fn plan_select(eng: &Engine, p: &mut Plan, cand: &Candidate, learned: bool) -> Vec<Effect> {
+    if let CandKind::Action(i) = cand.kind {
+        plan_clear(p);
+        return vec![
+            Effect::Action(i as usize),
+            Effect::Preedit(None),
+            empty_cands(),
+        ];
+    }
+    plan_commit(eng, p, &cand.text, learned)
 }
 
 /// CJK 统一表意字符(含扩展 A/兼容区;造词只认汉字)。

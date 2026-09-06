@@ -31,6 +31,26 @@ int lyy_engine_ensure(App *app)
     app->core.lyyime_set_commit_after_four(app->engine, app->config.commit_after_four);
     app->core.lyyime_set_commit_unique_four(app->engine, app->config.commit_unique_four);
     app->core.lyyime_set_phrase_hint(app->engine, app->config.phrase_hint);
+    /* 快速功能键(合同 §14):总开关 + 触发词表注入(可选符号组,旧库跳过) */
+    if (app->core.qa_ok) {
+        app->core.lyyime_set_quick_actions_enabled(
+            app->engine, app->config.quick_actions_enabled);
+        app->core.lyyime_clear_quick_actions(app->engine);
+        for (int i = 0; i < app->config.quick_actions_count; i++) {
+            LyyQuickAction *a = &app->config.quick_actions[i];
+            if (app->core.lyyime_add_quick_action(app->engine, a->trigger,
+                                                  a->label,
+                                                  a->command) != 0)
+                lyy_log(&app->log, "WARN 快速功能键注入失败(触发词 %s)",
+                        a->trigger);
+        }
+        lyy_log(&app->log, "快速功能键已注入:%d 条(开关=%d)",
+                app->config.quick_actions_count,
+                app->config.quick_actions_enabled);
+    } else {
+        lyy_log(&app->log, "INFO core 库无快速功能键符号(§14),该功能不可用"
+                           "(请更新 liblyyime_core.so 后重启)");
+    }
     lyy_log(&app->log, "core 引擎已创建:data_dir=%s", app->data_dir);
     return 0;
 }

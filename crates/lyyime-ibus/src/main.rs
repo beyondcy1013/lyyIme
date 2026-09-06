@@ -88,7 +88,8 @@ fn resolve_ibus_address() -> Option<String> {
 
 /// 读共用 config.toml(缺项/损坏一律回退默认,引擎永不因配置启动失败):
 /// page_size(1–9)、commit_on_extra_after_four、commit_unique_four、
-/// phrase_hint、coin_hotkey 与 shot_hotkey(§12/§13,EngineLogic 解析匹配用)。
+/// phrase_hint、coin_hotkey、shot_hotkey(§12/§13)与快速功能键
+/// quick_actions_enabled/[[quick_actions]](§14,EngineLogic/service 用)。
 fn read_core_config() -> Config {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
@@ -119,6 +120,28 @@ fn read_core_config() -> Config {
                 if !v.trim().is_empty() {
                     cfg.shot_hotkey = v.trim().to_string();
                 }
+            }
+            // 快速功能键(§14):写出的表替换默认表;非法条目跳过,不致命
+            if let Some(v) = data.get("quick_actions_enabled").and_then(|v| v.as_bool()) {
+                cfg.quick_actions_enabled = v;
+            }
+            if let Some(arr) = data.get("quick_actions").and_then(|v| v.as_array()) {
+                let list: Vec<lyyime_core::QuickAction> = arr
+                    .iter()
+                    .filter_map(|t| {
+                        let trigger = t.get("trigger")?.as_str()?.to_string();
+                        let label = t.get("label")?.as_str()?.to_string();
+                        let command = t.get("command")?.as_str()?.to_string();
+                        lyyime_core::QuickAction::trigger_valid(&trigger)
+                            .then_some(lyyime_core::QuickAction {
+                                trigger,
+                                label,
+                                command,
+                            })
+                    })
+                    .take(lyyime_core::QUICK_ACTIONS_MAX)
+                    .collect();
+                cfg.quick_actions = list;
             }
         }
     }

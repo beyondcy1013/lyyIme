@@ -8,18 +8,22 @@
 //! [{"t":"commit","s":"你好"},{"t":"preedit","s":"nihao"},
 //!  {"t":"cands","n":5,"page":0,"pages":3},{"t":"pass"},{"t":"consumed"},
 //!  {"t":"notice","s":"已造词:你好(wqvb)"},{"t":"mode","m":1},
-//!  {"t":"hint","s":"词组提示:「你好」可用 wqvb 打出"}]
+//!  {"t":"hint","s":"词组提示:「你好」可用 wqvb 打出"},
+//!  {"t":"action","i":0}]
 //! ```
 //!
 //! 约定:
 //! - JSON 手工拼装而非 serde 序列化,保证键序 `t` 在前、与合同示例一致;
 //! - `preedit` 为 None 时输出 `{"t":"preedit"}`(无 s 字段,宿主据此清除预编辑);
+//! - `action`(合同 §14 快速功能键)的 `i` 为配置列表 `quick_actions` 的下标,
+//!   宿主经 `lyyime_action_command` 取 command 后执行,不上屏文本;
 //! - 返回值 = 写入 buf 所需字节数(含 `\0`);buf 容量不足时不写入并返回 `-needed`
 //!   (可先用 `buf=NULL, cap=0` 探测所需大小)。
 
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
+use crate::config::QuickAction;
 use crate::engine::Engine;
 use crate::types::{Effect, LKey, Mode};
 
@@ -117,6 +121,9 @@ pub fn effects_json(effects: &[Effect], page: usize, pages: usize) -> String {
             }
             Effect::ModeChanged(m) => {
                 out.push_str(&format!("{{\"t\":\"mode\",\"m\":{}}}", mode_int(*m)));
+            }
+            Effect::Action(i) => {
+                out.push_str(&format!("{{\"t\":\"action\",\"i\":{i}}}"));
             }
         }
     }
@@ -368,4 +375,127 @@ pub unsafe extern "C" fn lyyime_cand_comment(
         .map(|c| c.comment.as_str())
         .unwrap_or("");
     put_cstr(buf, cap as i64, text) as c_int
+}
+
+/// 设置“快速功能键”总开关(合同 §14)。
+///
+/// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_quick_actions_enabled(
+    eng: *mut Engine,
+    enabled: c_int,
+) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.quick_actions_enabled = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().quick_actions_enabled)
+        }
+        None => 0,
+    }
+}
+
+/// 清空快速功能键列表(宿主按配置重注入前的复位步骤,合同 §14)。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_clear_quick_actions(eng: *mut Engine) {
+    if let Some(e) = eng.as_mut() {
+        let mut cfg = e.config().clone();
+        cfg.quick_actions.clear();
+        e.set_config(cfg);
+    }
+}
+
+/// 追加一条快速功能键(合同 §14)。返回 0 成功;-1 参数非法/为空/超上限。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针;三个字符串均须是以 `\0` 结尾的有效 C 字符串
+/// (可为 NULL,视作非法)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_add_quick_action(
+    eng: *mut Engine,
+    trigger: *const c_char,
+    label: *const c_char,
+    command: *const c_char,
+) -> c_int {
+    let Some(e) = eng.as_mut() else { return -1 };
+    let read = |p: *const c_char| -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(p).to_str().ok().map(str::to_string)
+    };
+    let (Some(trigger), Some(label), Some(command)) = (read(trigger), read(label), read(command))
+    else {
+        return -1;
+    };
+    let mut cfg = e.config().clone();
+    if cfg.quick_actions.len() >= crate::config::QUICK_ACTIONS_MAX
+        || !QuickAction::trigger_valid(&trigger)
+        || label.trim().is_empty()
+        || command.trim().is_empty()
+    {
+        return -1;
+    }
+    cfg.quick_actions.push(QuickAction {
+        trigger,
+        label,
+        command,
+    });
+    e.set_config(cfg);
+    0
+}
+
+/// 取快速功能键第 `i` 条的 command(`@settings`/`@help` 内置或 shell 命令),
+/// 返回值语义同 [`lyyime_cand`]。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针;`buf` 可写 `cap` 字节。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_action_command(
+    eng: *mut Engine,
+    i: c_int,
+    buf: *mut c_char,
+    cap: c_int,
+) -> c_int {
+    let Some(e) = eng.as_ref() else { return 0 };
+    let text = e
+        .config()
+        .quick_actions
+        .get(i.max(0) as usize)
+        .map(|a| a.command.as_str())
+        .unwrap_or("");
+    put_cstr(buf, cap as i64, text) as c_int
+}
+
+/// 选中当前页第 `idx`(0 起)个候选(鼠标/面板点选,合同 §14),
+/// 效果流 JSON 写入 `buf`;返回值与重试纪律同 [`lyyime_process_key`]。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针;`buf` 可写 `buf_cap` 字节(可为 NULL)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_select_candidate(
+    eng: *mut Engine,
+    idx: c_int,
+    buf: *mut c_char,
+    buf_cap: i64,
+) -> i64 {
+    let Some(e) = eng.as_mut() else { return 0 };
+    let (effects, plan) = e.plan_select_candidate(idx.max(0) as usize);
+    let json = effects_json(
+        &effects,
+        plan.page,
+        Engine::pages_for(plan.cands.len(), e.page_size()),
+    );
+    let n = put_cstr(buf, buf_cap, &json);
+    if n >= 0 {
+        e.apply_plan(plan);
+    }
+    n
 }

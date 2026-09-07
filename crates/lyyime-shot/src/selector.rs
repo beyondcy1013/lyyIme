@@ -44,8 +44,8 @@ enum Outcome {
 
 /// 运行框选,返回 `None` = 用户取消;`Some((整屏快照, 设备像素裁剪矩形))`。
 pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32, i32, i32))>> {
-        use gdk::Window as GdkWindow;
     use gdk::prelude::WindowExtManual;
+    use gdk::Window as GdkWindow;
     let root = <GdkWindow as WindowExtManual>::default_root_window();
     let (_, _, sw, sh) = root.geometry();
     if sw <= 0 || sh <= 0 {
@@ -72,12 +72,14 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
     da.add_events(
         gdk::EventMask::BUTTON_PRESS_MASK
             | gdk::EventMask::BUTTON_RELEASE_MASK
-            | gdk::EventMask::POINTER_MOTION_MASK,
+            | gdk::EventMask::POINTER_MOTION_MASK
+            | gdk::EventMask::BUTTON_MOTION_MASK,
     );
     win.add(&da);
 
     // ---- 共享状态 ----
     let anchor: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+    let dragging: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let sel: Rc<RefCell<Option<Rect>>> = Rc::new(RefCell::new(None));
     let result: Rc<RefCell<Option<Outcome>>> = Rc::new(RefCell::new(None));
     // 双击消歧:单击抬起(无拖拽)延迟 280ms 才取消,期间到来的双击优先
@@ -152,6 +154,7 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
         let anchor = anchor.clone();
         let sel = sel.clone();
         let result = result.clone();
+        let dragging = dragging.clone();
         let cancel_pending = cancel_pending.clone();
         let win2 = win.clone();
         da.connect_button_press_event(move |_, ev| {
@@ -168,19 +171,29 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
             }
             let (x, y) = ev.position();
             anchor.set(Some((x, y)));
-            *sel.borrow_mut() = Some(Rect { x, y, w: 0.0, h: 0.0 });
+            dragging.set(true);
+            *sel.borrow_mut() = Some(Rect {
+                x,
+                y,
+                w: 0.0,
+                h: 0.0,
+            });
+            win2.queue_draw();
             glib::Propagation::Proceed
         });
     }
     {
         let anchor = anchor.clone();
         let sel = sel.clone();
+        let dragging = dragging.clone();
         let da2 = da.clone();
         da.connect_motion_notify_event(move |_, ev| {
-            if let Some((ax, ay)) = anchor.get() {
-                let (x, y) = ev.position();
-                *sel.borrow_mut() = Some(Rect::from_points(ax, ay, x, y));
-                da2.queue_draw();
+            if dragging.get() {
+                if let Some((ax, ay)) = anchor.get() {
+                    let (x, y) = ev.position();
+                    *sel.borrow_mut() = Some(Rect::from_points(ax, ay, x, y));
+                    da2.queue_draw();
+                }
             }
             glib::Propagation::Proceed
         });
@@ -189,6 +202,7 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
         let anchor = anchor.clone();
         let result = result.clone();
         let cancel_pending = cancel_pending.clone();
+        let dragging = dragging.clone();
         let win = win.clone();
         da.connect_button_release_event(move |_, ev| {
             if ev.button() != 1 {
@@ -197,16 +211,18 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
             let Some((ax, ay)) = anchor.get() else {
                 return glib::Propagation::Proceed;
             };
+            dragging.set(false);
             let (x, y) = ev.position();
             let r = Rect::from_points(ax, ay, x, y);
             if r.w < 3.0 && r.h < 3.0 {
                 // 单击未拖拽(<3px)= 取消,避免误截;延迟 280ms 留给双击整屏
                 let result2 = result.clone();
                 let win3 = win.clone();
-                let sid = glib::timeout_add_local(std::time::Duration::from_millis(280), move || {
-                    finish(&win3, &result2, Outcome::Cancelled);
-                    glib::ControlFlow::Break
-                });
+                let sid =
+                    glib::timeout_add_local(std::time::Duration::from_millis(280), move || {
+                        finish(&win3, &result2, Outcome::Cancelled);
+                        glib::ControlFlow::Break
+                    });
                 cancel_pending.set(Some(sid));
                 return glib::Propagation::Stop;
             }
@@ -264,16 +280,22 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
 }
 
 /// 当前选区:锚点 + 最新指针位置(负方向归一化)。
-fn current_rect(anchor: &Rc<Cell<Option<(f64, f64)>>>, sel: &Rc<RefCell<Option<Rect>>>) -> Option<Rect> {
+fn current_rect(
+    anchor: &Rc<Cell<Option<(f64, f64)>>>,
+    sel: &Rc<RefCell<Option<Rect>>>,
+) -> Option<Rect> {
     let r = *sel.borrow().as_ref()?;
     let (ax, ay) = anchor.get()?;
     Some(Rect::from_points(ax, ay, r.x + r.w, r.y + r.h))
 }
 
 /// 结果 → 裁剪矩形(设备像素;整屏/取消路径同样返回快照)。
-fn apply_outcome(o: Outcome, snap: gtk::gdk_pixbuf::Pixbuf) -> Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32, i32, i32))> {
-    use gdk::Window as GdkWindow;
+fn apply_outcome(
+    o: Outcome,
+    snap: gtk::gdk_pixbuf::Pixbuf,
+) -> Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32, i32, i32))> {
     use gdk::prelude::WindowExtManual;
+    use gdk::Window as GdkWindow;
     let (sw, sh) = (snap.width(), snap.height());
     let scale = <GdkWindow as WindowExtManual>::default_root_window()
         .scale_factor()
@@ -289,7 +311,10 @@ fn apply_outcome(o: Outcome, snap: gtk::gdk_pixbuf::Pixbuf) -> Option<(gtk::gdk_
         ),
     };
     // 夹取到快照范围
-    let (x, y) = (crop.0.clamp(0, (sw - 1).max(0)), crop.1.clamp(0, (sh - 1).max(0)));
+    let (x, y) = (
+        crop.0.clamp(0, (sw - 1).max(0)),
+        crop.1.clamp(0, (sh - 1).max(0)),
+    );
     let w = crop.2.clamp(1, sw - x);
     let h = crop.3.clamp(1, sh - y);
     Some((snap, (x, y, w, h)))
@@ -306,8 +331,12 @@ fn focus_overlay(win: &gtk::Window) {
         return;
     };
     let xid = x11win.xid() as u32;
-    let Ok((conn, screen)) = x11rb::connect(None) else { return };
-    let Some(root) = conn.setup().roots.get(screen).map(|s| s.root) else { return };
+    let Ok((conn, screen)) = x11rb::connect(None) else {
+        return;
+    };
+    let Some(root) = conn.setup().roots.get(screen).map(|s| s.root) else {
+        return;
+    };
     let _ = root;
     if conn
         .set_input_focus(InputFocus::POINTER_ROOT, xid, x11rb::CURRENT_TIME)

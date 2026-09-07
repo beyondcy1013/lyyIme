@@ -85,6 +85,10 @@ quick_actions_enabled = true
 trigger = "ceshi"
 label = "E2E 功能键"
 command = "touch $2"
+[[quick_actions]]
+trigger = "jietu"
+label = "E2E 截图"
+command = "@shot"
 EOF
 }
 wait_buffer() { # $1=期望 $2=超时秒
@@ -115,6 +119,14 @@ export LYYIME_AI_HELPER="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/re
 export LYYIME_RES_DIR="$ROOT/xim/res"   # e2e 测仓库自带设置界面/样式
 QA_MARKER="$WORK/qa-marker"
 write_ai_config "$HOME" "$QA_MARKER"
+# 截屏桩(B8,@shot):$LYYIME_SHOT 优先解析
+SHOT_MARKER_B="$WORK/shot-marker-b"
+cat > "$WORK/stub-shot-b" <<STUBB
+#!/usr/bin/env bash
+echo shot >>"$SHOT_MARKER_B"
+STUBB
+chmod +x "$WORK/stub-shot-b"
+export LYYIME_SHOT="$WORK/stub-shot-b"
 start_xvfb 97
 
 LYYIME_CORE_LIB="$CORE_LIB" LYYIME_DATA_DIR="$DATA_DIR" "$XIM_BIN" >"$WORK/xim.stdout" 2>&1 &
@@ -182,6 +194,16 @@ for _ in $(seq 1 60); do [[ -f "$QA_MARKER" ]] && break; sleep 0.1; done
 grep -q "快速功能键命中\[0\]" "$XIM_LOG" || fail "Mode B 日志无功能键执行记录"
 grep -qF "E2E 功能键" "$BUFFER" && fail "功能键标签不应上屏:$(cat "$BUFFER")"
 echo "PASS B7:触发词 ceshi + 数字 2 → 执行功能键命令(marker 出现,文本未上屏)"
+
+# ---- 快速功能键 @shot(B8):触发词 jietu → 数字 2 → 拉起桩 + 工具提示带热键 ----
+xdotool type --delay 80 "jietu"; sleep 0.5
+xdotool key 2
+for _ in $(seq 1 60); do [[ -f "$SHOT_MARKER_B" ]] && break; sleep 0.1; done
+[[ -f "$SHOT_MARKER_B" ]] || fail "Mode B @shot 未拉起截屏桩:$(tail -5 "$XIM_LOG")"
+grep -q "快速功能键命中:截图(@shot)" "$XIM_LOG" || fail "Mode B @shot 无日志"
+grep -q "已拉起截屏(热键 ctrl+alt+a)" "$XIM_LOG" || grep -q "热键 ctrl+alt+a" "$XIM_LOG" || fail "Mode B @shot 提示未带热键:$(tail -5 "$XIM_LOG")"
+grep -qF "截图" "$BUFFER" && fail "功能键标签不应上屏:$(cat "$BUFFER")"
+echo "PASS B8:触发词 jietu + 数字 2 → @shot 拉起截屏桩,提示含热键 ctrl+alt+a"
 echo "Mode B 最终缓冲: $(cat "$BUFFER")"
 kill "$CLIENT_PID" "$XIM_PID" 2>/dev/null || true
 cleanup_work; trap cleanup_all EXIT
@@ -280,6 +302,10 @@ dbus-run-session -- bash -c '
     xdotool type --delay 90 "ceshi"; sleep 0.5
     xdotool key 2
     sleep 1.5
+    # ---- 快速功能键 @shot(A6):jietu + 数字 2 → 拉起桩 + 提示含热键 ----
+    xdotool type --delay 90 "jietu"; sleep 0.5
+    xdotool key 2
+    sleep 1.5
 '
 wait_buffer "你好the网络ok" 10
 IBUS_LOG="$WORK/home/.local/share/lyyime/logs/ibus.log"
@@ -301,6 +327,11 @@ echo "PASS A4:Mode A 截屏热键 ctrl+alt+a → 拉起 lyyime-shot(桩)并吞�
 [[ -f "$QA_MARKER_A" ]] || fail "Mode A 快速功能键未执行(marker 未出现):$(tail -5 "$IBUS_LOG")"
 grep -q "快速功能键命中" "$IBUS_LOG" || fail "Mode A 日志无功能键执行记录"
 echo "PASS A5:触发词 ceshi + 数字 2 → 执行功能键命令(marker 出现,文本未上屏)"
+SHOT_N="$(grep -c shot "$SHOT_MARKER" 2>/dev/null || echo 0)"
+[[ "$SHOT_N" -ge 2 ]] || fail "Mode A @shot 未拉起截屏桩(桩命中 $SHOT_N 次,需 ≥2:热键 A4 + jietu A6)"
+grep -q "快速功能键命中:截图(@shot)" "$IBUS_LOG" || fail "Mode A @shot 无日志"
+grep -q "热键 ctrl+alt+a" "$IBUS_LOG" || fail "Mode A @shot 提示未带热键"
+echo "PASS A6:触发词 jietu + 数字 2 → @shot 拉起截屏桩,提示含热键 ctrl+alt+a"
 echo "Mode A 最终缓冲: $(cat "$BUFFER")"
 
 ############################################
@@ -308,4 +339,4 @@ echo "== [3/7] 截屏助手 lyyime-shot(Xvfb :95) =="
 LYYIME_SHOT_BIN="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-shot" bash "$ROOT/tests/e2e/shot_e2e.sh"
 
 echo "== [4/7] 汇总 =="
-echo "E2E-ALL-PASS: Mode B(9 断言)+ Mode A(7 断言)+ /AI 全链路 + lyyime-shot + 快速功能键通过 ✅"
+echo "E2E-ALL-PASS: Mode B(10 断言)+ Mode A(8 断言)+ /AI 全链路 + lyyime-shot + 快速功能键(含 @shot 热键提示)通过 ✅"

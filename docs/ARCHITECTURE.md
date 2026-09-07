@@ -127,7 +127,11 @@ int64_t lyyime_select_candidate(void* eng, int idx, char* buf, int64_t buf_cap);
 用户数据:`~/.local/share/lyyime/user.tsv`,格式 `word\tfreq_extra\tlast_used_epoch`;core 定期(每 64 次 commit/退出时)批量落盘。
 用户造词:`~/.local/share/lyyime/user_words.tsv`,格式 `word\tcode\tcount`(与 user.tsv 同目录,随 user_dict 覆盖迁移);启动时整表并入五笔索引,造词即时落盘(临时文件 + rename 原子替换),见 §12。
 
-输入统计:`~/.local/share/lyyime/stats/YYYY-MM-DD.tsv`(本地日期,按天分文件),每行 `epoch_ms\tchars`——一次上屏一条(chars=非空白字符数)。Mode A(`EngineLogic::dispatch` 的 Commit 效果)与 Mode C(悬浮窗 commit 成功后)各自进程内追加同一目录(单行 O_APPEND,不交错)。查询走 core `stats` 模块(`today_summary`,纯函数、时间由调用方传入):字数 = 当天 chars 之和;速度 = 字数 ÷ 活跃时长,相邻上屏间隔 ≤ 排除阈值才计入时长(超时空隙——思考/离开——不算)。显示端为 lyyime-float:输入停顿 `stats_pause_secs`(默认 10)秒后在状态行显示「今日已输入 N 字 · 约 M 字/分」,重新输入即还原;配置在 float config.json:`stats_enabled` / `stats_pause_secs` / `stats_idle_exclude_secs`(悬浮窗菜单「输入统计设置…」可改)。统计为旁路功能,任何文件错误静默,绝不影响输入主链路。
+输入统计:`~/.local/share/lyyime/stats/YYYY-MM-DD.tsv`(本地日期,按天分文件),每行 `epoch_ms\tchars`——一次上屏一条(chars=非空白字符数)。Mode A(`EngineLogic::dispatch` 的 Commit 效果)与 Mode C(悬浮窗 commit 成功后)各自进程内追加同一目录(单行 O_APPEND,不交错)。查询走 core `stats` 模块(`today_summary`,纯函数、时间由调用方传入):字数 = 当天 chars 之和;速度 = 字数 ÷ 活跃时长,相邻上屏间隔 ≤ 排除阈值才计入时长(超时空隙——思考/离开——不算)。显示端为 lyyime-float:输入停顿 `stats_pause_secs`(默认 10)秒后在状态行显示「今日已输入 N 字 · 约 M 字/分」,重新输入即还原;统计设置为**全局配置**,真源在 config.toml 顶层 `stats_enabled` / `stats_pause_secs` / `stats_idle_exclude_secs`,由设置窗口「输入统计」页统一管理(悬浮窗菜单不再有设置入口),悬浮窗对 config.toml 做文件监视、改动即时生效;悬浮窗旧 config.json 的同名键仅作迁移回退(toml 一个统计键都没有时才读)。统计为旁路功能,任何文件错误静默,绝不影响输入主链路。
+
+Mode C 不抢焦点模式(float config.json `keep_target_focus`,默认关,菜单「光标留在目标窗口(不抢焦点)」切换):悬浮窗 `accept_focus/focus_on_map=false`(WM_HINTS input=False,点击/映射均不夺焦,目标文本框光标全程保持),键盘经 GdkSeat 抓取(`gdk_seat_grab` KEYBOARD,owner_events=true——本进程菜单/对话框照常收键)送达输入框;窗口映射未完成时抓取按 100ms 重试。上屏/直通退格的 XTest 注入前必须解抓→注入→重抓(抓取在,注入会被自己的 grab 拦回悬浮窗)。该模式下悬浮窗可见期间全局键盘由其接管(含 Alt+Tab),隐藏(—)即让出。E2E:`crates/lyyime-float/e2e_no_focus.sh`(断言全程活动窗口=目标、目标内容恰为连续上屏文本)。
+
+Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.rs` 自实现状态栈(每次变更加一个状态,上限 200,回填去重,撤销后输入丢弃重做分支),覆盖编码框/打字板/短语编辑器(Ctrl+Z 撤销、Ctrl+Y/Ctrl+Shift+Z 重做)。编码框历史按词重开(上屏/Esc 即 reset);空缓冲且无可撤销时 Ctrl+Z/Ctrl+Y 直通目标窗口,撤销/重做的是目标应用里刚上屏的文本(与空缓冲退格直通同一合同)。
 
 配置:`~/.config/lyyime/config.toml`(doctor/app/ibus 共用;字段见 core `Config` 默认值,注释中文)。快捷键类:`coin_hotkey`(§12)、`shot_hotkey`(§13),写法均为「修饰(ctrl/alt/super/shift,至少一个)+键名」。
 
@@ -192,7 +196,8 @@ int64_t lyyime_select_candidate(void* eng, int idx, char* buf, int64_t buf_cap);
 - **按键流**(root-window style):trigger on 后,XIM forward event → 映射 LKey → core.process_key → 效果流:Preedit/Candidates 画进自绘候选窗;Commit → `IMCommitString`(任意 Unicode);Pass 类键 → `IMForwardEvent`(协议级原样回放,零风险)。
 - **Shift 单击切换** = 空缓冲时以 XIM trigger off/on 切换中英:off 后应用直接收键(英文态),再 on 恢复中文态;组合中 Shift 已用于上屏英文原串,该次按键被消费且 release/超时不得再次切换模式。
 - **候选窗**:GTK3 override-redirect、无边框、accept_focus(false),跟随光标(root style 下用 XQueryPointer);序号高亮首选、编码提示、翻页指示,样式对齐主流输入法。
-- **托盘**:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel):状态(中/EN)+ 右键菜单:启用/停用、模式、设置、工具(截屏(§13)/ 修复输入法 / 输入法管理(增删其它输入法、设默认,exec `lyyime-doctor` CLI 并解析 JSON,危险操作 GTK 确认对话框)、重载词库、日志)、退出。
+- **托盘**:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel):状态(中/EN)+ 左键单击切换中英 + 右键菜单:主窗口、启用/停用、模式、设置、工具(直输模式/截屏(§13)/ 修复输入法 / 输入法管理(exec `lyyime-doctor` CLI 并解析 JSON,危险操作 GTK 确认对话框)、重载词库、日志)、退出。
+- **主窗口**:GTK3 纯代码构建(`mainwin.c`,标题 "lyyIme 输入法"):状态行(版本/启用/中 EN/引擎态,随 `update_mode_ui` 即时刷新)+ 入口(输入设置…=打开设置窗;直输模式…=拉起 lyyime-float,Mode C 悬浮独立输入)+ 工具箱(与托盘工具共用 `tools.c` 动作)。唤起路径:托盘菜单、`lyyime-xim --mainwin`(单实例二次启动发 SIGUSR2;SIGUSR1 仍弹设置窗)、`--mainwin` 首次启动直弹。关闭=隐藏保活,退出走托盘。
 - **设置窗**:GTK3(GtkBuilder .ui),读写 ~/.config/lyyime/config.toml,保存即 set_config 生效;含 Mode B 专属项(XMODIFIERS 一键切换到 lyyime/恢复 ibus)。
 - **探路石前置**:先交付"最小 XIM server + GTK3 Entry 连通"spike(Xvfb 实证),通过后才铺全量;失败则升级为自带 GTK immodule 方案并回报主控。
 - 设置窗:GTK3,读写 config.toml,保存即生效(core set_config)。
@@ -402,14 +407,16 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
 | 展示 | 候选文本 = `label`,注释 = 「功能键」;总开关 `quick_actions_enabled` 关闭则整表不生效 |
 | 执行 | 数字 1–9 / 鼠标点击候选行 / Space 确认首选 → core 回 `Effect::Action(i)`(i = 配置下标) + 清除效果流;宿主执行 `command`,不上屏文本 |
 | 标点/Enter 收尾 | 功能键候选不作首选文本:退回原始字母直通(不会把 label 当文字打出) |
-| command 语义 | `@settings` = 打开设置窗;`@help` = 辅助区帮助提示(两宿主同文案);其余按 `sh -c` 执行(异步,不阻塞按键流) |
+| command 语义 | `@settings` = 打开设置窗;`@shot` = 拉起截屏助手并提示「已拉起截屏(热键 …)」,热键取 `shot_hotkey` 配置(助手缺失时安装指引覆盖提示);`@help` = 辅助区帮助提示(两宿主同文案);其余按 `sh -c` 执行(异步,不阻塞按键流) |
+| 候选注释 | 普通 = 「功能键」;`@shot` = 「功能键 热键:<shot_hotkey>」——候选阶段即可看到快捷方式(跟随配置) |
 
 ### 14.2 配置与实现
 
 - **配置**(`config.toml`,三端共用;键名两端同名,吸取 §8 历史陷阱教训):
   顶层 `quick_actions_enabled = true` + `[[quick_actions]]` 数组表
   (`trigger` = 1–12 个小写字母 / `label` = 候选文本 / `command`)。缺省表 =
-  peizhi(打开配置)/ bangzhu(帮助),与 core `Config::default` 一致;
+  peizhi(打开配置)/ shezhi(设置)/ jietu(截图,@shot)/ bangzhu(帮助),
+  与 core `Config::default` 一致;
   条目上限 8(`QUICK_ACTIONS_MAX`/`LYY_QA_MAX`);非法触发词的条目剔除,
   全部非法回退默认表。core 侧非法配置判"配置损坏"(人话错误)。
 - **core**:`types.rs` `CandKind::Action(u8)` + `Effect::Action(usize)`;

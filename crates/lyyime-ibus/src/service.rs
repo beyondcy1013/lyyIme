@@ -477,9 +477,27 @@ impl EngineService {
                 crate::logger::info("快速功能键命中:打开配置(@settings)");
                 self.launch_setup();
             }
+            "@shot" => {
+                let hk = {
+                    let logic = self.0.logic.lock().unwrap();
+                    logic
+                        .shot_hotkey_text()
+                        .unwrap_or_else(|| "ctrl+alt+a".to_string())
+                };
+                crate::logger::info(&format!("快速功能键命中:截图(@shot),热键 {hk}"));
+                // 先提示(含热键);助手缺失时 spawn_shot 的安装指引会覆盖本提示
+                let this = self.clone();
+                let msg = format!("已拉起截屏(热键 {hk})");
+                let _ = zbus::block_on(async {
+                    this.emit("UpdateAuxiliaryText", &(wire::ibus_text(&msg, false), true))
+                        .await
+                });
+                self.schedule_notice_clear();
+                self.spawn_shot();
+            }
             "@help" => {
                 crate::logger::info("快速功能键命中:帮助(@help)");
-                let msg = "帮助:Shift单击=中英切换  1-9选词  -/=翻页  Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  peizhi/bangzhu=功能键";
+                let msg = "帮助:Shift单击=中英切换  1-9选词  -/=翻页  Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  peizhi/shezhi=设置 jietu=截图 bangzhu=帮助";
                 let this = self.clone();
                 let _ = zbus::block_on(async {
                     this.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true))

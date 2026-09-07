@@ -1059,6 +1059,42 @@ fn 快速功能键_触发词整串命中追加功能候选() {
 }
 
 #[test]
+fn 快速功能键_默认表四条含设置截图() {
+    let mut eng = engine(); // Config::default 自带 peizhi/shezhi/jietu/bangzhu
+    // 截图(jietu,配置下标 2):注释带配置的截屏热键,候选阶段即可看到
+    type_str(&mut eng, "jietu");
+    let page = eng.flush_page();
+    let pos = page
+        .iter()
+        .position(|c| c.text == "截图")
+        .expect("jietu 应出现截图功能候选");
+    assert_eq!(page[pos].kind, CandKind::Action(2));
+    assert_eq!(page[pos].comment, "功能键 热键:ctrl+alt+a");
+    // 设置(shezhi,配置下标 1):注释保持「功能键」(无快捷键可提示)
+    let mut eng = engine();
+    type_str(&mut eng, "shezhi");
+    let page = eng.flush_page();
+    let pos = page
+        .iter()
+        .position(|c| c.text == "设置")
+        .expect("shezhi 应出现设置功能候选");
+    assert_eq!(page[pos].kind, CandKind::Action(1));
+    assert_eq!(page[pos].comment, "功能键");
+}
+
+#[test]
+fn 快速功能键_热键注释跟随配置() {
+    let mut eng = engine_with(Config {
+        shot_hotkey: "ctrl+shift+x".into(),
+        ..Config::default()
+    });
+    type_str(&mut eng, "jietu");
+    let page = eng.flush_page();
+    let pos = page.iter().position(|c| c.text == "截图").unwrap();
+    assert_eq!(page[pos].comment, "功能键 热键:ctrl+shift+x");
+}
+
+#[test]
 fn 快速功能键_紧跟首选不顶替普通候选() {
     // "nihao" 命中词库「你好」:功能候选排第 2,首选仍是普通候选。
     let mut eng = engine_action("nihao", "打开配置", "@settings");

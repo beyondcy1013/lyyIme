@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, QuickAction};
 use crate::dict::{suggestion_of, DictIndex};
 use crate::learner::Learner;
 use crate::pinyin;
@@ -902,12 +902,21 @@ impl Engine {
                 at.min(p.cands.len()),
                 Candidate {
                     text: a.label.clone(),
-                    comment: "功能键".to_string(),
+                    comment: self.action_comment(a),
                     score: 0.0,
                     kind: CandKind::Action(i as u8),
                 },
             );
             off += 1;
+        }
+    }
+
+    /// 功能候选注释:普通为「功能键」;截图(@shot)附配置的热键,
+    /// 候选阶段即可看到快捷方式(选中后宿主还会再提示一次,§14)。
+    fn action_comment(&self, a: &QuickAction) -> String {
+        match a.command.as_str() {
+            "@shot" => format!("功能键 热键:{}", self.cfg.shot_hotkey),
+            _ => "功能键".to_string(),
         }
     }
 

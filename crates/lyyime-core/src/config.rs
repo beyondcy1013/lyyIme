@@ -38,13 +38,23 @@ impl QuickAction {
 /// 快速功能键条目上限(每页最多 9 个候选,功能键不该挤占整页)。
 pub const QUICK_ACTIONS_MAX: usize = 8;
 
-/// 快速功能键默认表(合同 §14):配置/帮助两个内置功能。
+/// 快速功能键默认表(合同 §14):设置两个触发词、截图(带热键提示)、帮助。
 pub fn default_quick_actions() -> Vec<QuickAction> {
     vec![
         QuickAction {
             trigger: "peizhi".to_string(),
             label: "打开配置".to_string(),
             command: "@settings".to_string(),
+        },
+        QuickAction {
+            trigger: "shezhi".to_string(),
+            label: "设置".to_string(),
+            command: "@settings".to_string(),
+        },
+        QuickAction {
+            trigger: "jietu".to_string(),
+            label: "截图".to_string(),
+            command: "@shot".to_string(),
         },
         QuickAction {
             trigger: "bangzhu".to_string(),

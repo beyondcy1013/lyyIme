@@ -81,6 +81,18 @@ pub(crate) struct DictIndex {
     /// 词 → 通用词频(排序同分兜底,合同 §5.5"排序兜底")。
     pub suggestion: HashMap<String, u64>,
 
+    // ---- 单字语料频次 ----
+    /// 字 → 真实语料频次(pinyin_char.tsv 全量、同字多音节取最大;五笔精确层
+    /// 单字排序用——码表 freq 对大量字是默认值,排序噪声大)。
+    pub char_corpus: HashMap<char, u64>,
+    pub char_corpus_max: u64,
+
+    /// 字 → GB2312 分档(1=一级常用 3755 字,2=二级次常用 3008 字;char_tier.tsv)。
+    /// 表内没有的字 = 生僻/繁体/扩展区,排序沉到词组之后;表缺失 = 空表,
+    /// 退回纯语料排序。拼音语料对生僻字是填充值,只有分档表能可靠回答
+    /// "是不是常用字"(2026-09 牏/歟类生僻字抢首位的修复)。
+    pub char_tier: HashMap<char, u8>,
+
     /// 成功加载出数据的通道数(0 = 全空引擎)。
     pub loaded_channels: usize,
 }
@@ -118,6 +130,9 @@ impl DictIndex {
             en_rank: HashMap::new(),
             en_max: 0,
             suggestion: HashMap::new(),
+            char_corpus: HashMap::new(),
+            char_corpus_max: 0,
+            char_tier: HashMap::new(),
             loaded_channels: 0,
         };
         d.load_wubi(&dir.join("wubi.tsv"));
@@ -125,6 +140,7 @@ impl DictIndex {
         d.load_pinyin_phrase(&dir.join("pinyin_phrase.tsv"));
         d.load_english(&dir.join("english.tsv"));
         d.load_suggestion(&dir.join("suggestion.tsv"));
+        d.load_char_tier(&dir.join("char_tier.tsv"));
         // meta.json 仅作元信息校验,损坏/缺失直接忽略(不影响任何通道)。
         if let Ok(text) = fs::read_to_string(dir.join("meta.json")) {
             let _ = serde_json::from_str::<serde_json::Value>(&text);
@@ -287,6 +303,7 @@ impl DictIndex {
 
     fn load_pinyin_char(&mut self, path: &Path) {
         let mut map: HashMap<String, Vec<(char, u64)>> = HashMap::new();
+        let mut corpus: HashMap<char, u64> = HashMap::new();
         for cols in read_rows(path, 3) {
             let py = cols[0].to_lowercase();
             let Some(ch) = cols[1].chars().next() else {
@@ -299,10 +316,16 @@ impl DictIndex {
                 continue;
             }
             map.entry(py).or_default().push((ch, freq));
+            let slot = corpus.entry(ch).or_insert(0);
+            if freq > *slot {
+                *slot = freq;
+            }
         }
         if map.is_empty() {
             return;
         }
+        self.char_corpus = corpus;
+        self.char_corpus_max = self.char_corpus.values().copied().max().unwrap_or(0);
         for (syll, list) in map {
             // 音节表取自 pinyin_char 去重(合同 §5.3),并建字符前缀表供缺尾判定。
             for plen in 1..=syll.len() {
@@ -423,6 +446,23 @@ impl DictIndex {
         self.loaded_channels += 1;
     }
 
+    /// 加载 GB2312 单字分档表(dicttool tier 产物);缺失/损坏 → 空表(降级纯语料排序)。
+    fn load_char_tier(&mut self, path: &Path) {
+        let mut m: HashMap<char, u8> = HashMap::new();
+        for cols in read_rows(path, 2) {
+            let Some(ch) = cols[0].chars().next() else {
+                continue;
+            };
+            let Ok(tier) = cols[1].parse::<u8>() else {
+                continue;
+            };
+            if (1..=2).contains(&tier) {
+                m.insert(ch, tier);
+            }
+        }
+        self.char_tier = m;
+    }
+
     fn load_suggestion(&mut self, path: &Path) {
         let mut count = 0usize;
         for cols in read_rows(path, 2) {
@@ -467,3 +507,21 @@ fn read_rows(path: &Path, min_cols: usize) -> Vec<Vec<String>> {
 pub(crate) fn suggestion_of(dict: &DictIndex, word: &str) -> u64 {
     dict.suggestion.get(word).copied().unwrap_or(0)
 }
+
+    /// 单字的真实语料频次:仅当 `word` 是单字且该字在语料表内时返回 Some。
+    pub(crate) fn char_corpus_freq(dict: &DictIndex, word: &str) -> Option<u64> {
+        let mut it = word.chars();
+        let (Some(ch), None) = (it.next(), it.next()) else {
+            return None;
+        };
+        dict.char_corpus.get(&ch).copied()
+    }
+
+    /// 单字 GB2312 分档:1=一级常用,2=二级次常用;表外/表缺失返回 None。
+    pub(crate) fn char_tier_of(dict: &DictIndex, word: &str) -> Option<u8> {
+        let mut it = word.chars();
+        let (Some(ch), None) = (it.next(), it.next()) else {
+            return None;
+        };
+        dict.char_tier.get(&ch).copied()
+    }

@@ -1,9 +1,11 @@
 /*
  * 托盘:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel,任务书指定方案)
- * 中/EN 图标 + 右键菜单:启用/停用、切换中英、设置、工具(修复输入法/
- * 输入法管理/重载词库/打开日志)、关于、退出。
- * 工具菜单 exec `lyyime-doctor` CLI;缺失时弹安装提示;长输出放
- * GtkTextView 滚动对话框;危险操作先 GtkMessageDialog 确认再执行。
+ * 中/EN 图标;左键单击切换中英;右键菜单:主窗口、启用/停用、切换中英、
+ * 设置、工具(直输模式/截屏(§13)/修复输入法/输入法管理/重载词库/日志)、
+ * 退出。
+ * 工具动作实现统一在 tools.c(主窗口「工具箱」共用);菜单 exec
+ * `lyyime-doctor` CLI;缺失时弹安装提示;长输出放 GtkTextView 滚动对话框;
+ * 危险操作先 GtkMessageDialog 确认再执行。
  */
 #ifndef LYY_TRAY_H_
 #define LYY_TRAY_H_

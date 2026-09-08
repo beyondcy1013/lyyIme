@@ -122,6 +122,7 @@ int64_t lyyime_select_candidate(void* eng, int idx, char* buf, int64_t buf_cap);
 | `pinyin_phrase.tsv` | `word\tpinyin\tfreq` | 词组、无声调全拼(音节空格分隔)、词频 |
 | `english.tsv` | `word\tfreq` | 小写英文词+词频,≥1万行 |
 | `suggestion.tsv` | `word\tfreq` | 通用词频(排序兜底) |
+| `char_tier.tsv` | `char\ttier` | GB2312 单字分档(1=一级常用 3755 字,2=二级次常用 3008 字);`dicttool tier` 从内嵌表生成,缺失时引擎按纯语料排序降级 |
 | `meta.json` | `{"version":1,"source":...,"rows":...,"built_at":...}` | 校验信息 |
 
 用户数据:`~/.local/share/lyyime/user.tsv`,格式 `word\tfreq_extra\tlast_used_epoch`;core 定期(每 64 次 commit/退出时)批量落盘。
@@ -142,7 +143,7 @@ Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.r
 3. **拼音通道**:对 buf 做音节切分(DP,音节表取自 pinyin_char 去重),允许末音节不完整;查 pinyin_phrase(词组)与 pinyin_char(单字);简拼(每音节首字母,≥2 键)低权重参与。
    **注释反查五笔**:候选的 comment 编码提示统一为五笔——拼音命中的词经 wubi.tsv 的词→码反查索引(`wubi_rev`,同词多码取最长全码)显示其五笔编码,便于拼音打字时学习五笔;词不在五笔表时保留拼音注释兜底。五笔候选注释仍为其命中编码,英文候选仍为 `en`。
 4. **英文通道**(修订版细则见第 5 条末"英文通道修订"):无中文命中 → 前缀候选;buffer 是完整高频英文词 → 即使有中文命中也入选;直通上屏按"无中文命中 或 top-500 词"门控。
-5. **合并排序(v1.1,真实词库集成后修订——层级主导词典序)**:排序键为**词典序 (tier, specificity, freq_norm)**——层间不可跨越,层内先按 specificity(词组音节数放大、完整片段>更短片段、完全同码英文词 +0.5,用于压制伪切分),再按 `freq_norm ∈ [0,10)`。实现详见 `crates/lyyime-core/src/rank.rs`(模块文档含层级表)。设计动机:各源频率尺度差 4 个数量级以上,加性权重会被大频值跨层碾压。
+5. **合并排序(v1.1,真实词库集成后修订——层级主导词典序)**:排序键为**词典序 (tier, specificity, freq_norm)**——层间不可跨越,层内先按 specificity(词组音节数放大、完整片段>更短片段、完全同码英文词 +0.5,用于压制伪切分;wubi_exact 层内单字按 **GB2312 分档:一级 3.0 > 二级 2.5 > 词组 1.0 > 表外生僻 0.5**——码表 freq 对大量字是默认值、拼音语料对生僻字是填充值(`pinyin_char.tsv` 里 牏/汆 等共享 585000),都回答不了"是不是常用字",分档表(`char_tier.tsv`)是唯一可靠依据;繁体(歟/與/種)、扩展区生僻字沉到词组之后但仍可翻页选出;无分档表时退化为 单字 2.0 > 词组 1.0),再按 `freq_norm ∈ [0,10)`。分档内的单字 freq_norm 用真实语料频次(pinyin_char.tsv 全量、同字取最大)归一,语料未覆盖按码表频 norm ×0.1,生僻档与无语料时按码表频;词组恒按码表频。实现详见 `crates/lyyime-core/src/rank.rs`(模块文档含层级表)。设计动机:各源频率尺度差 4 个数量级以上,加性权重会被大频值跨层碾压。
    | 层 | tier_base | 说明 |
    |---|---|---|
    | wubi_exact | 60 | code==buffer(简码奖励并入此层) |
@@ -187,6 +188,10 @@ Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.r
 - 托盘属性菜单:中英切换 / 截屏(§13)/ 设置(拉起 `lyyime-app --settings`)/ 工具与修复(拉起 `lyyime-doctor --gui`)。
 - 崩溃隔离:engine 异常时退化为英文直通并打日志 `~/.local/share/lyyime/logs/ibus.log`。
 
+
+**引擎状态发布(悬浮窗联动)**:引擎进程把中/英模式与启用态发布到 `/tmp/lyyime-engine-state.json`
+(`{"source":"ibus","mode":"cn|en","enabled":bool,"ts":ms}`;变更即写 + 10s 心跳刷 ts),
+悬浮窗状态行前缀「内置:中/EN/停用」每秒读取联动;超过 30s 无新鲜心跳显示「未运行」。
 ## 8. Mode B:lyyime-xim 独立外挂(X11,XIM server 路线)
 
 > 架构决策依据见 RESEARCH.md §2(本机实证:被动 grab 回放不可靠,XIM 是正统路线)。

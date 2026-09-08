@@ -33,6 +33,10 @@ if [ ! -f data/runtime/meta.json ]; then
   "$DICTTOOL" convert --wubi-db /usr/share/ibus-table/tables/wubi-haifeng86.db --out data/runtime
   "$DICTTOOL" fetch --out data/runtime
 fi
+# 单字分档表(GB2312 常用字档,生僻字沉底依据):旧数据目录补齐
+if [ ! -f data/runtime/char_tier.tsv ]; then
+  "$DICTTOOL" tier --out data/runtime
+fi
 "$DICTTOOL" verify data/runtime
 
 step "3/6 安装核心库、词库、CLI 工具到 $PREFIX"

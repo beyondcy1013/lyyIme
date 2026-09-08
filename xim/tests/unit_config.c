@@ -301,13 +301,18 @@ int main(void)
     /* 16. 快速功能键(合同 §14):默认表 / [[quick_actions]] 解析 / 保存回读 */
     LyyConfig q0;
     lyy_config_defaults(&q0);
-    CHECK(q0.quick_actions_enabled == 1 && q0.quick_actions_count == 2 &&
+    CHECK(q0.quick_actions_enabled == 1 && q0.quick_actions_count == 4 &&
               strcmp(q0.quick_actions[0].trigger, "peizhi") == 0 &&
               strcmp(q0.quick_actions[0].label, "打开配置") == 0 &&
               strcmp(q0.quick_actions[0].command, "@settings") == 0 &&
-              strcmp(q0.quick_actions[1].trigger, "bangzhu") == 0 &&
-              strcmp(q0.quick_actions[1].command, "@help") == 0,
-          "快速功能键默认表(peizhi/bangzhu)");
+              strcmp(q0.quick_actions[1].trigger, "shezhi") == 0 &&
+              strcmp(q0.quick_actions[1].command, "@settings") == 0 &&
+              strcmp(q0.quick_actions[2].trigger, "jietu") == 0 &&
+              strcmp(q0.quick_actions[2].label, "截图") == 0 &&
+              strcmp(q0.quick_actions[2].command, "@shot") == 0 &&
+              strcmp(q0.quick_actions[3].trigger, "bangzhu") == 0 &&
+              strcmp(q0.quick_actions[3].command, "@help") == 0,
+          "快速功能键默认表(peizhi/shezhi/jietu/bangzhu)");
 
     /* 带 [[quick_actions]] 块的文件:解析出条目与开关 */
     FILE *fqa = fopen(path, "w");
@@ -336,9 +341,10 @@ int main(void)
     fclose(fqa2);
     LyyConfig q2;
     lyy_config_load(path, &q2);
-    CHECK(q2.quick_actions_count == 2 &&
-              strcmp(q2.quick_actions[0].trigger, "peizhi") == 0,
-          "全部条目非法回退默认表");
+    CHECK(q2.quick_actions_count == 4 &&
+              strcmp(q2.quick_actions[0].trigger, "peizhi") == 0 &&
+              strcmp(q2.quick_actions[2].trigger, "jietu") == 0,
+          "全部条目非法回退默认表(4 条)");
 
     /* 保存回读:[[quick_actions]] 块按当前表重写,块内键可再解析 */
     LyyConfig q3 = q0;
@@ -353,9 +359,62 @@ int main(void)
     g_free(qbody);
     LyyConfig q4;
     CHECK(lyy_config_load(path, &q4) == 0 &&
-              q4.quick_actions_count == 2 &&
-              strcmp(q4.quick_actions[0].command, "xfce4-terminal") == 0,
+              q4.quick_actions_count == 4 &&
+              strcmp(q4.quick_actions[0].command, "xfce4-terminal") == 0 &&
+              strcmp(q4.quick_actions[2].command, "@shot") == 0,
           "保存后回读一致");
+
+    /* 17. 输入统计(stats_* 顶层键):默认值 / 解析 / 钳制 / 保存回读 */
+    LyyConfig s0;
+    lyy_config_defaults(&s0);
+    CHECK(s0.stats_enabled == 1 && s0.stats_pause_secs == 10 &&
+              s0.stats_idle_exclude_secs == 30,
+          "统计三项默认值(开 / 10 / 30)");
+
+    FILE *fst = fopen(path, "w");
+    fprintf(fst,
+            "page_size = 6\n"
+            "stats_enabled = false\n"
+            "stats_pause_secs = 42\n"
+            "stats_idle_exclude_secs = 77\n"
+            "# 用户手写注释\n");
+    fclose(fst);
+    LyyConfig s1;
+    CHECK(lyy_config_load(path, &s1) == 0 && s1.stats_enabled == 0 &&
+              s1.stats_pause_secs == 42 && s1.stats_idle_exclude_secs == 77 &&
+              s1.page_size == 6,
+          "统计三键解析(其余键不受影响)");
+
+    /* 越界钳制回默认 */
+    FILE *fst2 = fopen(path, "w");
+    fprintf(fst2,
+            "stats_enabled = true\n"
+            "stats_pause_secs = 9999\n"
+            "stats_idle_exclude_secs = 1\n"
+            "# 用户手写注释\n");
+    fclose(fst2);
+    LyyConfig s2;
+    lyy_config_load(path, &s2);
+    CHECK(s2.stats_pause_secs == 10 && s2.stats_idle_exclude_secs == 30,
+          "统计秒数越界钳制回默认");
+
+    /* 保存回读:三键落盘为顶层键,未知行与注释保留 */
+    LyyConfig s3 = s0;
+    s3.stats_enabled = 0;
+    s3.stats_pause_secs = 15;
+    s3.stats_idle_exclude_secs = 45;
+    CHECK(lyy_config_save(path, &s3) == 0, "保存含统计键的配置");
+    char *sbody = read_all(path);
+    CHECK(sbody && strstr(sbody, "stats_enabled = false") &&
+              strstr(sbody, "stats_pause_secs = 15") &&
+              strstr(sbody, "stats_idle_exclude_secs = 45") &&
+              strstr(sbody, "# 用户手写注释"),
+          "统计键原位更新且未知行保留");
+    g_free(sbody);
+    LyyConfig s4;
+    CHECK(lyy_config_load(path, &s4) == 0 && s4.stats_enabled == 0 &&
+              s4.stats_pause_secs == 15 && s4.stats_idle_exclude_secs == 45,
+          "统计键保存后回读一致");
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);

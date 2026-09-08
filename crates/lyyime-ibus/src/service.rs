@@ -85,6 +85,50 @@ impl logic::Host for CollectingHost {
     }
 }
 
+/// 引擎对外状态发布(悬浮窗「内置:中/EN」联动):
+/// /tmp/lyyime-engine-state.json, 模式/启用变更即写, 心跳每 10s 刷 ts;
+/// 悬浮窗 30s 读不到新鲜时间戳即视为引擎未运行。
+static ENGINE_PUB: Mutex<EnginePub> = Mutex::new(EnginePub {
+    mode: None,
+    enabled: None,
+});
+
+#[derive(Default)]
+struct EnginePub {
+    mode: Option<u8>,
+    enabled: Option<bool>,
+}
+
+fn engine_state_publish() {
+    let g = ENGINE_PUB.lock().unwrap();
+    let mut parts: Vec<String> = vec![r#""source":"ibus""#.to_string()];
+    if let Some(m) = g.mode {
+        parts.push(format!(r#""mode":"{}""#, if m == 0 { "cn" } else { "en" }));
+    }
+    if let Some(en) = g.enabled {
+        parts.push(format!(r#""enabled":{}"#, en));
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    parts.push(format!(r#""ts":{ts}"#));
+    let _ = std::fs::write(
+        "/tmp/lyyime-engine-state.json",
+        format!("{{{}}}", parts.join(",")),
+    );
+}
+
+fn engine_state_set_mode(mode: u8) {
+    ENGINE_PUB.lock().unwrap().mode = Some(mode);
+    engine_state_publish();
+}
+
+fn engine_state_set_enabled(enabled: bool) {
+    ENGINE_PUB.lock().unwrap().enabled = Some(enabled);
+    engine_state_publish();
+}
+
 pub struct EngineState {
     pub conn: zbus::Connection,
     pub path: String,
@@ -92,6 +136,8 @@ pub struct EngineState {
     pub notice_gen: AtomicU64,
     pub setup_pid: Mutex<u32>,
     pub icon_dir: String,
+    /// 引擎是否被 ibus 启用(enable/disable 回调维护;悬浮窗状态联动读它)
+    pub enabled: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -111,6 +157,7 @@ impl EngineService {
             notice_gen: AtomicU64::new(0),
             setup_pid: Mutex::new(0),
             icon_dir,
+            enabled: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -276,6 +323,7 @@ impl EngineService {
                 }
             }
             Action::ModeChanged(mode) => {
+                engine_state_set_mode(*mode);
                 // 显式 variant 装箱(绕开 OwnedValue 序列化的不确定性)
                 let boxed = zbus::zvariant::Value::Value(Box::new(self.mode_property(*mode)));
                 logger::debug(&format!("UpdateProperty tree={boxed:?}"));
@@ -680,9 +728,13 @@ impl EngineService {
         self.focus_out().await;
     }
 
-    async fn enable(&self) {}
+    async fn enable(&self) {
+        engine_state_set_enabled(true);
+    }
 
-    async fn disable(&self) {}
+    async fn disable(&self) {
+        engine_state_set_enabled(false);
+    }
 
     async fn set_cursor_location(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
 
@@ -873,7 +925,34 @@ pub async fn run(
         "lyyIme ibus 引擎启动(版本 {})(Rust/zbus)",
         wire::VERSION
     ));
-    // 常驻:对象服务器由 zbus 内部执行器驱动,主线程挂起即可
+    // 初始状态发布(模式默认中文; enabled 等 ibus 回调置位) + 10s 心跳刷 ts,
+    // 悬浮窗超过 30s 读不到新鲜 ts 即显示「未运行」
+    engine_state_set_mode(0);
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        engine_state_publish();
+    });
+    // ibus-daemon 退出/重启时，zbus 4 没有 Connection::closed() API。
+    // 定期调用总线 Ping 监测断线；否则引擎会被孤儿化并长期占用 swap，
+    // 其子进程也无法被回收（典型于隔离 E2E 会话结束后）。
+    let watchdog_conn = conn.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let ping = zbus::block_on(watchdog_conn.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "Ping",
+                &(),
+            ));
+            if let Err(err) = ping {
+                logger::warn(&format!("ibus 总线已断开,退出引擎: {err}"));
+                std::process::exit(0);
+            }
+        }
+    });
+    // 常驻:对象服务器由 zbus 内部执行器驱动,主线程挂起即可。
     std::future::pending::<()>().await;
     Ok(())
 }

@@ -137,7 +137,7 @@ static void show_hint(App *app, const char *text)
     lyy_candwin_commit_layout(&app->candwin);
 }
 
-/* ---- 快速功能键执行(合同 §14):@settings/@help 宿主内置,其余按
+/* ---- 快速功能键执行(合同 §14):@settings/@shot/@help 宿主内置,其余按
  * shell 命令执行(sh -c,与 Mode A service.run_quick_action 同合同) ---- */
 void lyy_run_quick_action(App *app, int index)
 {
@@ -155,12 +155,24 @@ void lyy_run_quick_action(App *app, int index)
         lyy_request_show_settings(app);
         return;
     }
+    if (!strcmp(cmd, "@shot")) {
+        /* 工具提示带配置的热键;助手缺失时 lyy_spawn_shot 的安装指引
+         * 会覆盖本提示(候选条文本替换) */
+        lyy_log(&app->log, "快速功能键命中:截图(@shot),热键 %s",
+                app->config.shot_hotkey);
+        char msg[320];
+        snprintf(msg, sizeof(msg), "已拉起截屏(热键 %.200s)",
+                 app->config.shot_hotkey);
+        lyy_show_notice(app, msg);
+        lyy_spawn_shot(app);
+        return;
+    }
     if (!strcmp(cmd, "@help")) {
         lyy_log(&app->log, "快速功能键命中:帮助(@help)");
         lyy_show_notice(app,
                         "帮助:Shift单击=中英切换  1-9选词  -/=翻页  "
                         "Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  "
-                        "peizhi/bangzhu=功能键");
+                        "peizhi/shezhi=设置 jietu=截图 bangzhu=帮助");
         return;
     }
     lyy_log(&app->log, "快速功能键命中[%d]:执行 %s", index, cmd);
@@ -839,4 +851,5 @@ void lyy_app_update_mode_ui(App *app)
         english = app->core.lyyime_mode(app->engine) == 1;
     lyy_tray_set_mode(&app->tray, english ? LYY_MODE_EN : LYY_MODE_ZH,
                       app->enabled && !app->degraded);
+    lyy_mainwin_refresh(&app->mainwin); /* 主窗口状态行同步(未建时安全) */
 }

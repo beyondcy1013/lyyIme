@@ -38,6 +38,34 @@ impl XTrack {
         r.value32().and_then(|mut v| v.next()).filter(|w| *w != 0)
     }
 
+    /// 指针在根窗口上的坐标(「模拟内置」无光标事件时的兜底锚点)。
+    pub fn pointer_position(&self) -> Option<(i32, i32)> {
+        let r = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+        Some((r.root_x as i32, r.root_y as i32))
+    }
+
+    /// 根窗口(屏幕)像素尺寸, 供候选窗越界收敛。
+    pub fn screen_size(&self) -> (i32, i32) {
+        self.conn
+            .get_geometry(self.root)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|g| (g.width as i32, g.height as i32))
+            .unwrap_or((1920, 1080))
+    }
+
+    /// 窗口左上角在根窗口(屏幕)上的坐标。
+    /// 「模拟内置」用: AT-SPI 光标坐标是窗口相对值, 与之相加得屏幕绝对位置。
+    pub fn window_root_position(&self, wid: u32) -> Option<(i32, i32)> {
+        let r = self
+            .conn
+            .translate_coordinates(wid, self.root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some((r.dst_x as i32, r.dst_y as i32))
+    }
+
     /// 窗口标题: 先 _NET_WM_NAME(UTF8), 退回 WM_NAME(按 UTF-8 宽容解码)。
     pub fn window_title(&self, wid: u32) -> String {
         for (atom, ty) in [

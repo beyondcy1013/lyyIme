@@ -45,6 +45,13 @@ static void ui_from_config(SettingsUi *ui)
     gtk_entry_set_text(GTK_ENTRY(ui->ent_ai_prompt), c->ai_system_prompt);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_ai_timeout),
                               c->ai_timeout);
+    /* 输入统计(config.toml 顶层 stats_* 键,悬浮窗文件监视即时生效) */
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_stats_enabled),
+                                 c->stats_enabled);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_stats_pause),
+                              c->stats_pause_secs);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_stats_idle),
+                              c->stats_idle_exclude_secs);
 }
 
 static void config_from_ui(SettingsUi *ui, LyyConfig *c)
@@ -93,6 +100,13 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
              gtk_entry_get_text(GTK_ENTRY(ui->ent_ai_prompt)));
     c->ai_timeout =
         (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_ai_timeout));
+    /* 输入统计(config.toml 顶层 stats_* 键) */
+    c->stats_enabled = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_stats_enabled));
+    c->stats_pause_secs =
+        (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_stats_pause));
+    c->stats_idle_exclude_secs = (int)gtk_spin_button_get_value(
+        GTK_SPIN_BUTTON(ui->spin_stats_idle));
 }
 
 /* ---- 快捷键弹窗提示(写法非法/冲突避让结果,人话) ---- */
@@ -214,12 +228,13 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     lyy_app_reload_hotkey(app); /* 造词/截屏热键即时生效 */
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d unique4=%d hint=%d font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d unique4=%d hint=%d font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s stats=%d pause=%d idle=%d",
             c.page_size, c.mixed_english, c.auto_commit_english,
             c.chinese_punct, c.learning, c.commit_after_four,
             c.commit_unique_four, c.phrase_hint, c.font_size, c.autostart,
             c.quick_actions_enabled, c.quick_actions_count, c.ai_enabled,
-            c.ai_api_base, c.ai_model, c.coin_hotkey, c.shot_hotkey);
+            c.ai_api_base, c.ai_model, c.coin_hotkey, c.shot_hotkey,
+            c.stats_enabled, c.stats_pause_secs, c.stats_idle_exclude_secs);
     gtk_widget_hide(ui->window);
 }
 
@@ -435,6 +450,12 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         GTK_WIDGET(gtk_builder_get_object(builder, "spin_ai_timeout"));
     ui->btn_ai_test =
         GTK_WIDGET(gtk_builder_get_object(builder, "btn_ai_test"));
+    ui->chk_stats_enabled =
+        GTK_WIDGET(gtk_builder_get_object(builder, "chk_stats_enabled"));
+    ui->spin_stats_pause =
+        GTK_WIDGET(gtk_builder_get_object(builder, "spin_stats_pause"));
+    ui->spin_stats_idle =
+        GTK_WIDGET(gtk_builder_get_object(builder, "spin_stats_idle"));
 
     if (!ui->window || !ui->spin_page || !ui->spin_font || !ui->chk_mixed ||
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
@@ -443,7 +464,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         !ui->chk_quick_actions || !ui->chk_ai_enabled ||
         !ui->ent_ai_base || !ui->ent_ai_key || !ui->ent_ai_model ||
         !ui->ent_ai_prompt || !ui->spin_ai_timeout || !ui->btn_ai_test ||
-        !ui->ent_coin_hotkey) {
+        !ui->ent_coin_hotkey || !ui->chk_stats_enabled ||
+        !ui->spin_stats_pause || !ui->spin_stats_idle) {
         lyy_log(&lyy_app()->log, "ERROR 设置界面缺少控件(%s)", file);
         g_object_unref(builder);
         return;
@@ -458,6 +480,29 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
     if (cancel)
         g_signal_connect(cancel, "clicked", G_CALLBACK(on_cancel), ui);
     g_signal_connect(ui->btn_ai_test, "clicked", G_CALLBACK(on_ai_test), ui);
+
+    /* 字体大一号:主题默认字号 +1(反馈:设置窗口与相关文字过小)。
+     * override_font 在 GTK3.16 标记弃用但功能完好,与文件头 StatusIcon 同理。 */
+    {
+        GtkSettings *gs = gtk_settings_get_default();
+        gchar *fname = NULL;
+        g_object_get(gs, "gtk-font-name", &fname, NULL);
+        PangoFontDescription *fd = pango_font_description_from_string(
+            fname && fname[0] ? fname : "Sans 10");
+        int sz = pango_font_description_get_size(fd);
+        if (sz <= 0) {
+            pango_font_description_free(fd);
+            fd = pango_font_description_from_string("Sans 11");
+            sz = pango_font_description_get_size(fd);
+        }
+        if (pango_font_description_get_size_is_absolute(fd))
+            pango_font_description_set_absolute_size(fd, sz + PANGO_SCALE);
+        else
+            pango_font_description_set_size(fd, sz + PANGO_SCALE);
+        gtk_widget_override_font(ui->window, fd); /* 级联到全部子控件 */
+        pango_font_description_free(fd);
+        g_free(fname);
+    }
 
     ui->built = 1;
     ui_from_config(ui);

@@ -33,7 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::{Config, QuickAction};
-use crate::dict::{suggestion_of, DictIndex};
+use crate::dict::{char_corpus_freq, char_tier_of, suggestion_of, DictIndex};
 use crate::learner::Learner;
 use crate::pinyin;
 use crate::punct::{to_chinese, QuoteState};
@@ -924,19 +924,49 @@ impl Engine {
     ///
     /// 精确命中直接查 exact 索引,不受前缀桶截断影响——真实词库中 `a`/`wq` 这类
     /// 高频前缀桶按频次取前 32 时可能把精确码挤出,必须独立保证"精确 > 前缀"。
+    ///
+    /// 精确层内单字按 GB2312 分档(spec:一级 3.0 > 二级 2.5 > 词组 1.0 > 生僻 0.5):
+    /// 海峰码表 freq 对大量字是默认值、拼音语料对生僻字是填充值,都回答不了
+    /// "是不是常用字";分档表(char_tier.tsv,dicttool tier 产物)是唯一可靠依据,
+    /// 生僻/繁体/扩展字(牏/歟类)沉到词组之后但仍可翻页选出。
+    /// 档内单字 norm 按真实语料频次归一,语料未覆盖按表频 ×0.1;语料通道缺失
+    /// 或无分档表(旧数据目录)时整体回退码表频。用户学习 ×1.5 只在组内生效。
     fn wubi_candidates(&self, buf: &str, pool: &mut HashMap<String, RawCand>) -> usize {
         let dict = &self.dict;
         let mut hits = 0;
         if let Some(idxs) = dict.wubi_exact.get(buf) {
             for &i in idxs {
                 let e = &dict.wubi[i as usize];
+                let single = e.word.chars().count() == 1;
+                let table_norm = rank::norm10(e.freq, dict.wubi_max);
+                let tiered = single && !dict.char_tier.is_empty();
+                let tier = if tiered { char_tier_of(dict, &e.word) } else { None };
+                let spec = match tier {
+                    Some(1) => 3.0,
+                    Some(_) => 2.5,
+                    None if tiered => 0.5,
+                    None if single => 2.0,
+                    None => 1.0,
+                };
+                // 档内单字按语料频;生僻档(表外字,语料是填充值)与无档位表时按表频。
+                let corpus_ranked = single
+                    && !dict.char_corpus.is_empty()
+                    && (!tiered || tier.is_some());
+                let norm = if corpus_ranked {
+                    match char_corpus_freq(dict, &e.word) {
+                        Some(f) => rank::norm10(f, dict.char_corpus_max),
+                        None => table_norm * 0.1,
+                    }
+                } else {
+                    table_norm
+                };
                 insert_cand(
                     pool,
                     e.word.clone(),
                     e.code.clone(),
                     rank::TIER_WUBI_EXACT,
-                    1.0,
-                    rank::norm10(e.freq, dict.wubi_max),
+                    spec,
+                    norm,
                     CandKind::Wubi,
                     suggestion_of(dict, &e.word),
                 );

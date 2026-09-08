@@ -43,6 +43,7 @@ pub fn run(dir: PathBuf) -> Result<()> {
     check_suggestion(&dir, &mut checks);
     check_goucima(&dir, &mut checks);
     check_meta(&dir, &mut checks)?;
+    check_char_tier(&dir, &mut checks);
 
     // 摘要表
     eprintln!("\n===== dicttool verify 摘要({:?}) =====", dir);
@@ -432,5 +433,47 @@ fn check_meta(dir: &Path, checks: &mut Vec<Check>) -> Result<()> {
         mismatches.is_empty(),
         if mismatches.is_empty() { "6 个文件全部一致".into() } else { mismatches.join("; ") },
     ));
+    Ok(())
+}
+
+/// char_tier.tsv 为宽松检查:缺失跳过(兼容旧数据目录,引擎自行降级),
+/// 存在则断言 ≥6700 有效行且档位取值合法(1=一级 / 2=二级)。
+fn check_char_tier(dir: &Path, checks: &mut Vec<Check>) {
+    let path = dir.join("char_tier.tsv");
+    if !path.is_file() {
+        checks.push(Check::new(
+            "char_tier.tsv 存在",
+            true,
+            "缺失(旧数据目录,引擎按无语料档降级;可 dicttool tier --out 补齐)".into(),
+        ));
+        return;
+    }
+    let mut rows = 0u64;
+    let mut bad = 0u64;
+    match fs_scan_tier(&path, &mut rows, &mut bad) {
+        Ok(()) => checks.push(Check::new(
+            "char_tier.tsv 分档行",
+            rows >= 6700 && bad == 0,
+            format!("{rows} 字(GB2312 应 6763),非法档位 {bad} 行"),
+        )),
+        Err(e) => checks.push(Check::new("char_tier.tsv 可读", false, e.to_string())),
+    }
+}
+
+fn fs_scan_tier(path: &Path, rows: &mut u64, bad: &mut u64) -> std::io::Result<()> {
+    let f = BufReader::new(std::fs::File::open(path)?);
+    for line in f.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let _ch = it.next().unwrap_or("");
+        match it.next().unwrap_or("") {
+            "1" | "2" => *rows += 1,
+            _ => *bad += 1,
+        }
+    }
     Ok(())
 }

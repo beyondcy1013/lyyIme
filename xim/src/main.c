@@ -2,12 +2,12 @@
  * lyyime-xim 入口(Mode B 独立外挂,docs/ARCHITECTURE.md §8)
  *
  * 职责:
- *   - CLI(--help/--version/--settings)与"人话"错误提示;
- *   - 单实例(pidfile ~/.local/share/lyyime/xim.pid;二次启动 SIGUSR1 唤起
- *     已存在实例弹出设置窗后自身退出);
+ *   - CLI(--help/--version/--settings/--mainwin)与"人话"错误提示;
+ *   - 单实例(pidfile ~/.local/share/lyyime/xim.pid;二次启动 SIGUSR1 弹
+ *     设置窗 / SIGUSR2 弹主窗口后自身退出);
  *   - 信号:SIGTERM/SIGINT 优雅退出(关 XIM server、删 pidfile);
  *   - 装配:日志 → 配置 → core FFI(dlopen)→ XIM server → 候选窗 → 托盘
- *     → 设置窗 → GLib 主循环(xcb fd 融入,单线程,满足 §3 线程约定)。
+ *     → 设置窗 → 主窗口 → GLib 主循环(xcb fd 融入,单线程,满足 §3 线程约定)。
  */
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -30,6 +30,7 @@ static void usage(FILE *out)
             "%s — lyyIme 独立输入法外挂(Mode B,XIM server)\n"
             "用法: lyyime-xim [选项]\n"
             "  --settings   显示设置窗口(若已在运行则唤起已存在实例)\n"
+            "  --mainwin    显示主窗口(门面:输入设置/直输模式/工具箱)\n"
             "  --version    显示版本\n"
             "  --help       显示本帮助\n\n"
             "环境变量:\n"
@@ -72,6 +73,10 @@ static gboolean on_flags_tick(gpointer user_data)
     if (app->settings_requested) {
         app->settings_requested = 0;
         lyy_settings_show(&app->settings);
+    }
+    if (app->mainwin_requested) {
+        app->mainwin_requested = 0;
+        lyy_mainwin_show(&app->mainwin);
     }
     if (app->quit_requested) {
         g_main_loop_quit(app->loop);
@@ -131,6 +136,10 @@ int main(int argc, char *argv[])
             app->settings_requested = 2; /* 启动即弹设置(或唤起已有实例) */
             continue;
         }
+        if (!strcmp(argv[i], "--mainwin")) {
+            app->mainwin_requested = 2; /* 启动即弹主窗口(或唤起已有实例) */
+            continue;
+        }
         fprintf(stderr, "未知参数:%s(见 --help)\n", argv[i]);
         return 2;
     }
@@ -168,13 +177,15 @@ int main(int argc, char *argv[])
     lyy_log(&app->log, "==== %s %s 启动(pid=%ld) ====", LYY_APP_NAME,
             LYY_APP_VERSION, (long)getpid());
 
-    /* 单实例:已存在实例 → SIGUSR1 唤起(弹设置窗),自身退出 */
+    /* 单实例:已存在实例 → 唤起信号(--mainwin 走 SIGUSR2 弹主窗口,
+     * 其余 SIGUSR1 弹设置窗),自身退出 */
     long alive_pid = 0;
     if (pidfile_alive(pidfile, &alive_pid)) {
+        int want_mainwin = app->mainwin_requested == 2;
         lyy_log(&app->log, "已存在实例(pid=%ld),发送唤起信号后退出", alive_pid);
-        kill((pid_t)alive_pid, SIGUSR1);
-        fprintf(stderr, "lyyime-xim 已在运行(pid=%ld),已唤起其设置窗口。\n",
-                alive_pid);
+        kill((pid_t)alive_pid, want_mainwin ? SIGUSR2 : SIGUSR1);
+        fprintf(stderr, "lyyime-xim 已在运行(pid=%ld),已唤起其%s窗口。\n",
+                alive_pid, want_mainwin ? "主" : "设置");
         lyy_log_close(&app->log);
         return 0;
     }
@@ -238,7 +249,7 @@ int main(int argc, char *argv[])
     /* core 引擎实例 */
     lyy_engine_ensure(app);
 
-    /* 候选窗 / 托盘 / 设置窗 */
+    /* 候选窗 / 托盘 / 设置窗 / 主窗口 */
     {
         xcb_screen_t *screen =
             xcb_aux_get_screen(app->xim.conn, app->xim.screen_no);
@@ -249,9 +260,19 @@ int main(int argc, char *argv[])
         app->candwin.click_user_data = app;
     }
     {
+        /* 图标目录:安装位 SVG 在 icons/(res/ 只放 settings.ui/candidate.css);
+         * 优先用"确认存在 zh.svg"的目录,避免安装版托盘/主窗口图标破图 */
         char icon_dir[1024];
         snprintf(icon_dir, sizeof(icon_dir), "%s", res_dir_default);
+        char probe[1200];
+        snprintf(probe, sizeof(probe), "%s/zh.svg", icon_dir);
+        if (!g_file_test(probe, G_FILE_TEST_EXISTS) &&
+            g_file_test("/usr/local/share/lyyime/icons/zh.svg",
+                        G_FILE_TEST_EXISTS))
+            snprintf(icon_dir, sizeof(icon_dir),
+                     "/usr/local/share/lyyime/icons");
         lyy_tray_init(&app->tray, icon_dir);
+        lyy_mainwin_init(&app->mainwin, icon_dir);
     }
     lyy_settings_init(&app->settings, res_dir_default);
     lyy_app_update_mode_ui(app);
@@ -269,6 +290,8 @@ int main(int argc, char *argv[])
                 "详见 %s\n", app->log.path);
     if (app->settings_requested == 2)
         app->settings_requested = 1; /* 启动即弹设置 */
+    if (app->mainwin_requested == 2)
+        app->mainwin_requested = 1; /* 启动即弹主窗口 */
 
     g_main_loop_run(loop);
 

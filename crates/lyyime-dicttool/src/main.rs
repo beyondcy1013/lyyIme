@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
-use lyyime_dicttool::{convert, fetch, query, verify};
+use lyyime_dicttool::{convert, fetch, query, tier, verify};
 
 const USAGE: &str = "用法:
   dicttool convert [--wubi-db <path>] [--out <dir>]      ibus-table sqlite -> wubi/pinyin_char/suggestion/goucima TSV
   dicttool fetch   [--out <dir>] [--cache <dir>]         下载拼音词组与英文词频 -> pinyin_phrase/english TSV
   dicttool verify  [<dir>]                               行数/格式/排序/抽样断言
+  dicttool tier    [--out <dir>]                         生成 GB2312 单字分档表 char_tier.tsv
   dicttool query   wubi|pinyin|en <query> [--out <dir>]  对 TSV 做前缀查询,打印前 9 个候选
 
 默认:wubi-db=/usr/share/ibus-table/tables/wubi-haifeng86.db,out=data/runtime,cache=dicts/raw";
@@ -88,6 +89,12 @@ fn dispatch(args: Vec<String>) -> Result<()> {
                 bail!("fetch 不接受位置参数:{:?}", parsed.positionals);
             }
             fetch::run(fetch::FetchOpts { out: parsed.out, cache: parsed.cache })
+        }
+        "tier" => {
+            if !parsed.positionals.is_empty() {
+                bail!("tier 不接受位置参数:{:?}", parsed.positionals);
+            }
+            tier::run(&parsed.out)
         }
         "verify" => {
             let mut pos = parsed.positionals;

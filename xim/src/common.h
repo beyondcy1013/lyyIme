@@ -10,7 +10,9 @@
  *   ai_capture.c      /AI 触发会话(采集提示词,子进程调 lyyime_ai.py 上屏)
  *   candidate_window.c GTK3 override-redirect 候选窗
  *   tray.c            托盘与工具菜单
+ *   mainwin.c         主窗口(门面:输入设置/直输模式/工具箱入口)
  *   settings.c        设置对话框(GtkBuilder)
+ *   tools.c           工具动作(主窗口与托盘菜单共用;含直输模式窗口拉起)
  *   config.c          ~/.config/lyyime/config.toml 平面键值 TOML 子集读写
  */
 #ifndef LYY_COMMON_H_
@@ -21,7 +23,9 @@
 #include "config.h"
 #include "core_ffi.h"
 #include "log.h"
+#include "mainwin.h"
 #include "settings.h"
+#include "tools.h"
 #include "tray.h"
 #include "xim_server.h"
 
@@ -67,6 +71,7 @@ struct _App {
     CandidateWindow candwin;
     Tray tray;
     SettingsUi settings;
+    MainWin mainwin;               /* 主窗口(门面:设置/直输模式/工具箱) */
     AiCapture ai;                  /* /AI 触发会话(见 ai_capture.h) */
     GMainLoop *loop;               /* GLib 主循环 */
     guint shift_timer_id;          /* Shift 单击判定时间窗(280ms) */
@@ -82,7 +87,8 @@ struct _App {
         uint32_t sym;
         int ok;
     } hotkey_shot;
-    int settings_requested;        /* SIGUSR1 唤起 → 主循环里弹设置窗 */
+    int settings_requested;        /* SIGUSR1/--settings 唤起 → 主循环弹设置窗 */
+    int mainwin_requested;         /* SIGUSR2/--mainwin 唤起 → 主循环弹主窗口 */
     int quit_requested;            /* SIGTERM/SIGINT → 优雅退出 */
 };
 

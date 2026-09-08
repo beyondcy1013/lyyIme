@@ -164,7 +164,10 @@ mod tests {
         }
         unsafe { tzset() };
         assert_eq!(timestamp_stem(1_788_652_800), "lyyIme_20260906_000000");
-        assert_eq!(timestamp_stem(1_788_652_800 + 3661), "lyyIme_20260906_010101");
+        assert_eq!(
+            timestamp_stem(1_788_652_800 + 3661),
+            "lyyIme_20260906_010101"
+        );
         assert_eq!(timestamp_stem(0), "lyyIme_19700101_000000");
     }
 

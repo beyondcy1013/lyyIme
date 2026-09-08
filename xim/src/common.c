@@ -88,12 +88,14 @@ void lyy_request_show_settings(App *app)
     app->settings_requested = 1;
 }
 
-/* 让二次启动"唤起"已存在实例:SIGUSR1 → 主循环弹设置窗 */
+/* 让二次启动"唤起"已存在实例:SIGUSR1 → 设置窗,SIGUSR2 → 主窗口 */
 static void on_signal(int sig)
 {
     App *app = lyy_app();
     if (sig == SIGUSR1)
         app->settings_requested = 1; /* volatile 语义字段,仅置位 */
+    else if (sig == SIGUSR2)
+        app->mainwin_requested = 1;
     else
         app->quit_requested = 1;
 }
@@ -101,6 +103,7 @@ static void on_signal(int sig)
 void lyy_install_signal_handlers(void)
 {
     signal(SIGUSR1, on_signal);
+    signal(SIGUSR2, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGINT, on_signal);
 }

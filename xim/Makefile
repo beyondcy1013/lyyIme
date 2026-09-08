@@ -46,7 +46,7 @@ VENDOR_LIB  := $(VENDOR_DIR)/libxcb-imdkit.a
 SRC_DIR := $(ROOT_DIR)/src
 APP_SRCS := main.c common.c log.c config.c core_ffi.c effects_json.c \
             keysym_map.c xim_server.c ai_capture.c candidate_window.c \
-            tray.c settings.c shot.c
+            tray.c mainwin.c settings.c tools.c shot.c
 APP_OBJS := $(addprefix $(BUILD_DIR)/app/,$(APP_SRCS:.c=.o))
 APP_HDRS := $(wildcard $(SRC_DIR)/*.h)
 

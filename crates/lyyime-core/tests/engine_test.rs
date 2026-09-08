@@ -249,14 +249,15 @@ fn 词组提示_字母直通不提示() {
 }
 
 #[test]
-fn 五笔精确层_简码满分归一() {
+fn 五笔精确层_单字按语料频次归一() {
     let mut eng = engine();
     let fx = type_str(&mut eng, "a");
     let top = &eng.flush_page()[0];
     assert_eq!(top.text, "工");
-    // 层级词典序:工 处于五笔精确层(60),通道内最高频 → 归一满值 10。
+    // 层级词典序:工 处于五笔精确层(60);单字 norm 按真实语料频次归一,
+    // 满值 10 只属于语料最高频字,故得分落在 [60,70) 区间。
     assert!(
-        (top.score - 70.0).abs() < 1e-4,
+        (60.0..70.0).contains(&top.score),
         "精确层得分实为 {}",
         top.score
     );
@@ -302,6 +303,98 @@ fn 五笔空格顶屏首选() {
     let fx = eng.process_key(LKey::Space);
     assert_eq!(commits(&fx), vec!["恭恭敬敬".to_string()]);
     assert!(eng.buffer().is_empty());
+}
+
+#[test]
+fn 四码单字_优先于同码词组与用户词() {
+    // 私有夹具镜像真库场景(不污染共享夹具的前缀候选):gcft 同时精确命中
+    // 「致」(900)与「死难者」(1200)——词组频次更高,学习 ×1.5 后单字仍须居首。
+    let td = TempDir::new();
+    let mut wubi = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wubi.push_str("gcft\t致\t900\ngcft\t死难者\t1200\n");
+    std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("user.tsv")),
+            ..Config::default()
+        },
+    );
+
+    type_str(&mut eng, "gcft");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "致", "四码精确单字应排同码词组之前");
+    assert_eq!(page[1].text, "死难者");
+
+    // 选中词组学习后再打,单字仍居首,词组带 User 标记紧随其后。
+    let fx = eng.process_key(LKey::Digit(2)); // 选中「死难者」→ 学习
+    assert_eq!(commits(&fx), vec!["死难者".to_string()]);
+    type_str(&mut eng, "gcft");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "致", "用户学习加成不得把同码词组抬到单字之前");
+    assert_eq!(page[0].kind, CandKind::Wubi);
+    assert_eq!(page[1].text, "死难者");
+    assert_eq!(page[1].kind, CandKind::User);
+}
+
+#[test]
+fn 四码生僻单字_按GB2312分档沉到词组后() {
+    // 私有夹具镜像真库 thgj:牏(码表默认频 1000,语料填充值 58.5万,不在 GB2312)
+    // 曾压过词组「处理」;分档表落实 一级字 > 词组 > 生僻字,生僻字仍可达。
+    let td = TempDir::new();
+    let mut wubi = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wubi.push_str("thgj\t牏\t1000\nthgj\t㸟\t95\nthgj\t处理\t500\nxxyy\t引\t1000\nxxyy\t引子\t1500\n");
+    std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
+    std::fs::write(td.join("char_tier.tsv"), "引\t1\n").unwrap();
+    let mut eng = engine_with_fixtures(&td.path, Config::default());
+
+    type_str(&mut eng, "thgj");
+    let texts = page_texts(&eng);
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("处理"),
+        "生僻单字(表外)不得越过词组:{texts:?}"
+    );
+    assert!(
+        texts.contains(&"牏".to_string()),
+        "生僻字沉底但不消失,仍可翻页选出:{texts:?}"
+    );
+    eng.process_key(LKey::Esc); // 清缓冲再试下一段
+    type_str(&mut eng, "xxyy");
+    let texts = page_texts(&eng);
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("引"),
+        "一级常用字压过词组:{texts:?}"
+    );
+}
+
+#[test]
+fn 四码单字_按语料频次排_生僻字沉底() {
+    // 私有夹具镜像真库病态:海峰码表给生僻字默认频(~1000),码表频排序会让
+    // 「靷」(语料 5e3)压过「引」(语料 9e8);语料外死字「齾」按表频 ×0.1 沉底。
+    let td = TempDir::new();
+    let mut wubi = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wubi.push_str("xxyy\t靷\t2000\nxxyy\t引\t1000\nxxyy\t齾\t3000\nxxyy\t引子\t1500\n");
+    std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "yin\t引\t900000000\nyin\t靷\t5000\n",
+    )
+    .unwrap();
+    let mut eng = engine_with_fixtures(&td.path, Config::default());
+
+    type_str(&mut eng, "xxyy");
+    let texts = page_texts(&eng);
+    assert_eq!(
+        texts.iter().take(3).map(String::as_str).collect::<Vec<_>>(),
+        vec!["引", "靷", "齾"],
+        "单字按语料频次排,语料外死字沉底:{texts:?}"
+    );
+    assert!(
+        !texts[..3].contains(&"引子".to_string()),
+        "词组(spec 1.0)不得越过单字组:{texts:?}"
+    );
 }
 
 // ======================================================================

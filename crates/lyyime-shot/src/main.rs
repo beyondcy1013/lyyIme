@@ -32,7 +32,9 @@ fn parse_auto_arg(arg: &str) -> Result<(i32, i32, i32, i32)> {
         .split(',')
         .map(|s| s.trim().parse::<i32>())
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|_| anyhow!("--auto 参数应为 X,Y,W,H 四个整数(如 --auto=0,0,800,600),收到:{arg}"))?;
+        .map_err(|_| {
+            anyhow!("--auto 参数应为 X,Y,W,H 四个整数(如 --auto=0,0,800,600),收到:{arg}")
+        })?;
     if v.len() != 4 {
         return Err(anyhow!(
             "--auto 参数应为 X,Y,W,H 四个整数,收到 {arg}({} 个值)",
@@ -175,8 +177,8 @@ fn run(opts: Options) -> Result<()> {
 
 /// 设备缩放(X11 通常 1;HiDPI 下逻辑坐标 × scale = 像素坐标)。
 fn pb_scale() -> i32 {
-    use gdk::Window as GdkWindow;
     use gdk::prelude::WindowExtManual;
+    use gdk::Window as GdkWindow;
     <GdkWindow as WindowExtManual>::default_root_window()
         .scale_factor()
         .max(1)
@@ -184,8 +186,8 @@ fn pb_scale() -> i32 {
 
 /// 截取整个根窗口,返回 (pixbuf, 宽, 高)(设备像素)。
 fn capture_root() -> Result<(gtk::gdk_pixbuf::Pixbuf, i32, i32)> {
-    use gdk::Window as GdkWindow;
     use gdk::prelude::WindowExtManual;
+    use gdk::Window as GdkWindow;
     let root = <GdkWindow as WindowExtManual>::default_root_window();
     let (_, _, w, h) = root.geometry();
     if w <= 0 || h <= 0 {
@@ -213,7 +215,10 @@ mod tests {
     #[test]
     fn auto_参数解析() {
         assert_eq!(parse_auto_arg("--auto=0,0,64,48").unwrap(), (0, 0, 64, 48));
-        assert_eq!(parse_auto_arg("--auto= 10 , 20 , 300 , 200 ").unwrap(), (10, 20, 300, 200));
+        assert_eq!(
+            parse_auto_arg("--auto= 10 , 20 , 300 , 200 ").unwrap(),
+            (10, 20, 300, 200)
+        );
         assert!(parse_auto_arg("--auto=1,2,3").is_err());
         assert!(parse_auto_arg("--auto=a,b,c,d").is_err());
         assert!(parse_auto_arg("--auto=1,2,0,4").is_err());

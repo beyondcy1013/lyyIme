@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  lyyime-xim 设置对话框(GtkBuilder 格式,GTK3)
-  项目:候选数 / 混合英文 / 自动直通 / 中文标点 / 学习开关 / 四码顶屏 /
-       四码唯一上屏 / 字体大小 / 开机自启 / 造词与截屏快捷键(冲突自动避让)
-  控件 id 与 src/settings.c 一一对应;按钮行为:确定=保存并即时生效,取消=还原。
+  lyyime-xim 设置窗口(GtkBuilder 格式,GTK3,多标签页 GtkNotebook)
+  页1 常规:候选数 / 字体大小 / 中文标点 / 词频学习 / 开机自启
+  页2 输入:中英混合 / 自动直通 / 四码顶屏 / 四码唯一上屏 / 词组效率提示
+  页3 快捷键:造词 / 截屏(冲突自动避让)/ 快速功能键
+  页4 AI 助手:OpenAI 兼容接口(地址/密钥/模型/系统提示/超时 + 测试连接)
+  页5 输入统计:停顿显示今日统计(全局数据,显示端=悬浮窗状态行)
+  控件 id 与 src/settings.c 一一对应(跨页共用,勿改);按钮行为:
+  确定=保存全部页并即时生效,取消=还原。
 -->
 <interface domain="lyyime">
   <requires lib="gtk+" version="3.10"/>
@@ -25,6 +29,18 @@
     <property name="step_increment">5</property>
     <property name="page_increment">30</property>
   </object>
+  <object class="GtkAdjustment" id="adj_stats_pause">
+    <property name="lower">3</property>
+    <property name="upper">300</property>
+    <property name="step_increment">1</property>
+    <property name="page_increment">10</property>
+  </object>
+  <object class="GtkAdjustment" id="adj_stats_idle">
+    <property name="lower">5</property>
+    <property name="upper">600</property>
+    <property name="step_increment">5</property>
+    <property name="page_increment">30</property>
+  </object>
   <object class="GtkWindow" id="settings_window">
     <property name="title">lyyIme 输入法设置</property>
     <property name="resizable">False</property>
@@ -35,238 +51,270 @@
         <property name="orientation">vertical</property>
         <property name="spacing">10</property>
         <child>
-          <object class="GtkGrid" id="grid">
+          <object class="GtkNotebook" id="notebook">
             <property name="visible">True</property>
-            <property name="row-spacing">8</property>
-            <property name="column-spacing">12</property>
+            <property name="can-focus">True</property>
+
+            <!-- ===== 页 1:常规 ===== -->
             <child>
-              <object class="GtkLabel" id="lbl_page">
+              <object class="GtkGrid" id="grid_general">
                 <property name="visible">True</property>
-                <property name="halign">start</property>
-                <property name="label">候选词数</property>
+                <property name="margin-top">8</property>
+                <property name="row-spacing">8</property>
+                <property name="column-spacing">12</property>
+                <child>
+                  <object class="GtkLabel" id="lbl_page">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">候选词数</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">0</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="spin_page_size">
+                    <property name="visible">True</property>
+                    <property name="adjustment">adj_page_size</property>
+                    <property name="numeric">True</property>
+                    <property name="width-chars">4</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">0</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_font">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">候选窗字体大小</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="spin_font_size">
+                    <property name="visible">True</property>
+                    <property name="adjustment">adj_font_size</property>
+                    <property name="numeric">True</property>
+                    <property name="width-chars">4</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_chinese_punct">
+                    <property name="visible">True</property>
+                    <property name="label">中文标点(中文态输出 ,。?! 等)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">2</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_learning">
+                    <property name="visible">True</property>
+                    <property name="label">词频学习(记录上屏习惯并调整排序)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">3</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_autostart">
+                    <property name="visible">True</property>
+                    <property name="label">开机自启动(写入 ~/.config/autostart)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">4</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
               </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">0</property>
-              </packing>
             </child>
+            <child type="tab">
+              <object class="GtkLabel" id="lbl_tab_general">
+                <property name="visible">True</property>
+                <property name="label">常规</property>
+              </object>
+            </child>
+
+            <!-- ===== 页 2:输入 ===== -->
             <child>
-              <object class="GtkSpinButton" id="spin_page_size">
+              <object class="GtkGrid" id="grid_input">
                 <property name="visible">True</property>
-                <property name="adjustment">adj_page_size</property>
-                <property name="numeric">True</property>
-                <property name="width-chars">4</property>
+                <property name="margin-top">8</property>
+                <property name="row-spacing">8</property>
+                <property name="column-spacing">12</property>
+                <child>
+                  <object class="GtkCheckButton" id="chk_mixed_english">
+                    <property name="visible">True</property>
+                    <property name="label">中英混合(无中文候选时给出英文词)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">0</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_auto_commit_english">
+                    <property name="visible">True</property>
+                    <property name="label">英文词自动直通(高置信词遇标点/空格直接上屏)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">1</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_commit_after_four">
+                    <property name="visible">True</property>
+                    <property name="label">四码顶屏(满四码后继续输入字母先上屏当前词)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">2</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_commit_unique_four">
+                    <property name="visible">True</property>
+                    <property name="label">四码唯一上屏(满四码且仅一个候选时免空格直接上屏)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">3</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_phrase_hint">
+                    <property name="visible">True</property>
+                    <property name="label">词组效率提示(上屏后最近几字有更省键的词组时候选条提示)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">4</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
               </object>
-              <packing>
-                <property name="left-attach">1</property>
-                <property name="top-attach">0</property>
-              </packing>
             </child>
+            <child type="tab">
+              <object class="GtkLabel" id="lbl_tab_input">
+                <property name="visible">True</property>
+                <property name="label">输入</property>
+              </object>
+            </child>
+
+            <!-- ===== 页 3:快捷键 ===== -->
             <child>
-              <object class="GtkLabel" id="lbl_font">
+              <object class="GtkGrid" id="grid_hotkey">
                 <property name="visible">True</property>
-                <property name="halign">start</property>
-                <property name="label">候选窗字体大小</property>
+                <property name="margin-top">8</property>
+                <property name="row-spacing">8</property>
+                <property name="column-spacing">12</property>
+                <child>
+                  <object class="GtkLabel" id="lbl_coin_hotkey">
+                    <property name="visible">True</property>
+                    <property name="label">造词快捷键:</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">0</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_coin_hotkey">
+                    <property name="visible">True</property>
+                    <property name="tooltip-text">上屏汉字后按此键进入造词:方向键 →/↑ 多选一字、←/↓ 少选一字,回车存词,Esc 取消。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+equal、alt+comma、ctrl+f2。与截屏快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
+                    <property name="halign">start</property>
+                    <property name="width-chars">18</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">0</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_shot_hotkey">
+                    <property name="visible">True</property>
+                    <property name="label">截屏快捷键:</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_shot_hotkey">
+                    <property name="visible">True</property>
+                    <property name="tooltip-text">按下拉起框选截屏:拖拽选区(存图片目录并复制剪贴板),Esc 取消、Enter 确认、双击整屏。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+alt+a、ctrl+shift+x。与造词快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
+                    <property name="halign">start</property>
+                    <property name="width-chars">18</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_quick_actions">
+                    <property name="visible">True</property>
+                    <property name="label">快速功能键(输入触发词时候选条提示,数字键/鼠标点击执行)</property>
+                    <property name="tooltip-text">输入与触发词完全相同的字母时候选条追加功能候选,数字键或鼠标点击即执行,不上屏文本。默认:peizhi/shezhi=设置、jietu=截图(候选注释直接显示截屏热键,执行后也会提示)、bangzhu=帮助。触发词/名称/命令可在 config.toml 的 [[quick_actions]] 块中增删,command 支持 @settings、@shot、@help 或任意 shell 命令</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">2</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
               </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">1</property>
-              </packing>
             </child>
-            <child>
-              <object class="GtkSpinButton" id="spin_font_size">
+            <child type="tab">
+              <object class="GtkLabel" id="lbl_tab_hotkey">
                 <property name="visible">True</property>
-                <property name="adjustment">adj_font_size</property>
-                <property name="numeric">True</property>
-                <property name="width-chars">4</property>
+                <property name="label">快捷键</property>
               </object>
-              <packing>
-                <property name="left-attach">1</property>
-                <property name="top-attach">1</property>
-              </packing>
             </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_mixed_english">
-                <property name="visible">True</property>
-                <property name="label">中英混合(无中文候选时给出英文词)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">2</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_auto_commit_english">
-                <property name="visible">True</property>
-                <property name="label">英文词自动直通(高置信词遇标点/空格直接上屏)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">3</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_chinese_punct">
-                <property name="visible">True</property>
-                <property name="label">中文标点(中文态输出 ,。?! 等)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">4</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_learning">
-                <property name="visible">True</property>
-                <property name="label">词频学习(记录上屏习惯并调整排序)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">5</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_commit_after_four">
-                <property name="visible">True</property>
-                <property name="label">四码顶屏(满四码后继续输入字母先上屏当前词)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">6</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_commit_unique_four">
-                <property name="visible">True</property>
-                <property name="label">四码唯一上屏(满四码且仅一个候选时免空格直接上屏)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">7</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_phrase_hint">
-                <property name="visible">True</property>
-                <property name="label">词组效率提示(上屏后最近几字有更省键的词组时候选条提示)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">8</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_autostart">
-                <property name="visible">True</property>
-                <property name="label">开机自启动(写入 ~/.config/autostart)</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">9</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkLabel" id="lbl_coin_hotkey">
-                <property name="visible">True</property>
-                <property name="label">造词快捷键:</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">10</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkEntry" id="ent_coin_hotkey">
-                <property name="visible">True</property>
-                <property name="tooltip-text">上屏汉字后按此键进入造词:方向键 →/↑ 多选一字、←/↓ 少选一字,回车存词,Esc 取消。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+equal、alt+comma、ctrl+f2。与截屏快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
-                <property name="halign">start</property>
-                <property name="width-chars">18</property>
-              </object>
-              <packing>
-                <property name="left-attach">1</property>
-                <property name="top-attach">10</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkLabel" id="lbl_shot_hotkey">
-                <property name="visible">True</property>
-                <property name="label">截屏快捷键:</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">11</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkEntry" id="ent_shot_hotkey">
-                <property name="visible">True</property>
-                <property name="tooltip-text">按下拉起框选截屏:拖拽选区(存图片目录并复制剪贴板),Esc 取消、Enter 确认、双击整屏。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+alt+a、ctrl+shift+x。与造词快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
-                <property name="halign">start</property>
-                <property name="width-chars">18</property>
-              </object>
-              <packing>
-                <property name="left-attach">1</property>
-                <property name="top-attach">11</property>
-              </packing>
-            </child>
-            <child>
-              <object class="GtkCheckButton" id="chk_quick_actions">
-                <property name="visible">True</property>
-                <property name="label">快速功能键(输入触发词时候选条提示,数字键/鼠标点击执行;触发词表在 config.toml 的 [[quick_actions]])</property>
-                <property name="tooltip-text">输入与触发词完全相同的字母(如默认的 peizhi=打开配置、bangzhu=帮助)时候选条追加功能候选,数字键或鼠标点击即执行,不上屏文本。触发词/名称/命令可在 config.toml 的 [[quick_actions]] 块中增删,command 支持 @settings、@help 或任意 shell 命令</property>
-                <property name="halign">start</property>
-              </object>
-              <packing>
-                <property name="left-attach">0</property>
-                <property name="top-attach">12</property>
-                <property name="width">2</property>
-              </packing>
-            </child>
-          </object>
-        </child>
-        <child>
-          <object class="GtkSeparator" id="sep_ai">
-            <property name="visible">True</property>
-          </object>
-          <packing>
-            <property name="expand">False</property>
-            <property name="fill">True</property>
-            <property name="position">1</property>
-          </packing>
-        </child>
-        <child>
-          <object class="GtkFrame" id="frame_ai">
-            <property name="visible">True</property>
-            <property name="label">AI 助手(中文态输入 /AI+提示词,回车调用自定义大模型)</property>
-            <property name="label-xalign">0</property>
+
+            <!-- ===== 页 4:AI 助手 ===== -->
             <child>
               <object class="GtkGrid" id="grid_ai">
                 <property name="visible">True</property>
-                <property name="margin">6</property>
+                <property name="margin-top">8</property>
                 <property name="row-spacing">6</property>
                 <property name="column-spacing">10</property>
                 <child>
                   <object class="GtkCheckButton" id="chk_ai_enabled">
                     <property name="visible">True</property>
-                    <property name="label">启用 AI 助手(需兼容 OpenAI 接口的服务:DeepSeek/千问/智谱/Ollama 等)</property>
+                    <property name="label">启用 AI 助手(中文态输入 /AI+提示词,回车调用大模型;需兼容 OpenAI 接口的服务:DeepSeek/千问/智谱/Ollama 等)</property>
                     <property name="halign">start</property>
                   </object>
                   <packing>
@@ -403,12 +451,102 @@
                 </child>
               </object>
             </child>
+            <child type="tab">
+              <object class="GtkLabel" id="lbl_tab_ai">
+                <property name="visible">True</property>
+                <property name="label">AI 助手</property>
+              </object>
+            </child>
+
+            <!-- ===== 页 5:输入统计 ===== -->
+            <child>
+              <object class="GtkGrid" id="grid_stats">
+                <property name="visible">True</property>
+                <property name="margin-top">8</property>
+                <property name="row-spacing">8</property>
+                <property name="column-spacing">12</property>
+                <child>
+                  <object class="GtkCheckButton" id="chk_stats_enabled">
+                    <property name="visible">True</property>
+                    <property name="label">启用输入统计(打字停顿后在悬浮窗状态行显示今日字数与速度)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">0</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_stats_pause">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">停顿多少秒后显示</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="spin_stats_pause">
+                    <property name="visible">True</property>
+                    <property name="adjustment">adj_stats_pause</property>
+                    <property name="numeric">True</property>
+                    <property name="width-chars">5</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">1</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_stats_idle">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">计入速度的最长停顿(秒)</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkSpinButton" id="spin_stats_idle">
+                    <property name="visible">True</property>
+                    <property name="adjustment">adj_stats_idle</property>
+                    <property name="numeric">True</property>
+                    <property name="width-chars">5</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_stats_hint">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">统计为全局数据(~/.local/share/lyyime/stats/),各输入模式共用同一份;
+速度 = 今日字数 ÷ 活跃打字时长,超过「最长停顿」的空隙(思考、离开)不计入时长。
+保存后悬浮窗即时生效,无需重启。</property>
+                    <property name="valign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">3</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+              </object>
+            </child>
+            <child type="tab">
+              <object class="GtkLabel" id="lbl_tab_stats">
+                <property name="visible">True</property>
+                <property name="label">输入统计</property>
+              </object>
+            </child>
           </object>
-          <packing>
-            <property name="expand">False</property>
-            <property name="fill">True</property>
-            <property name="position">2</property>
-          </packing>
         </child>
         <child>
           <object class="GtkButtonBox" id="btnbox">
@@ -442,7 +580,7 @@
           <packing>
             <property name="expand">False</property>
             <property name="fill">False</property>
-            <property name="position">3</property>
+            <property name="position">1</property>
           </packing>
         </child>
       </object>

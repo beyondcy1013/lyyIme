@@ -70,6 +70,11 @@ typedef struct {
     int quick_actions_enabled;               /* 功能总开关(默认开) */
     LyyQuickAction quick_actions[LYY_QA_MAX]; /* 条目表 */
     int quick_actions_count;                 /* 0..LYY_QA_MAX */
+    /* 输入统计(全局数据,各输入模式共用;显示端=悬浮窗状态行)。
+     * config.toml 顶层 stats_* 键,悬浮窗经文件监视即时生效 */
+    int stats_enabled;           /* 停顿显示今日统计总开关(默认开) */
+    int stats_pause_secs;        /* 停顿多少秒后显示(3..300,默认 10) */
+    int stats_idle_exclude_secs; /* 计入速度的最长停顿(5..600,默认 30) */
 } LyyConfig;
 
 void lyy_config_defaults(LyyConfig *c);

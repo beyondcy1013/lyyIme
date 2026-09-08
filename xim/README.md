@@ -15,8 +15,10 @@ xim/
 │   ├── effects_json.c  §3 JSON 效果流迷你解析器(固定 schema)
 │   ├── keysym_map.c    keysym→LKey 映射(§6)
 │   ├── candidate_window.c  GTK3 override-redirect 候选窗(跟随光标 xcb_query_pointer)
-│   ├── tray.c          Gtk.StatusIcon 托盘 + 工具菜单(exec lyyime-doctor)
+│   ├── tray.c          Gtk.StatusIcon 托盘 + 右键菜单(主窗口/设置/工具)
+│   ├── mainwin.c       主窗口:状态行 + 输入设置/直输模式/工具箱入口(--mainwin/SIGUSR2 唤起)
 │   ├── settings.c      GtkBuilder 设置对话框(保存即生效:重建引擎+刷 CSS)
+│   ├── tools.c         工具动作(主窗口与托盘共用;含直输模式窗口 lyyime-float 拉起)
 │   ├── config.c        ~/.config/lyyime/config.toml 平面键值 TOML 子集(保留未知行与注释)
 │   └── common.c/.h log.c
 ├── res/                zh/en 托盘 SVG、settings.ui、candidate.css

@@ -13,7 +13,7 @@
 
 /* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键。
  * 追加新键放表尾(索引 clamp_key/apply_value/write_value_buf 三处同步)。 */
-#define LYY_CFG_KEYS 19
+#define LYY_CFG_KEYS 22
 typedef enum { LYY_VT_INT, LYY_VT_BOOL, LYY_VT_STR } LyyValType;
 static const struct {
     const char *section;
@@ -48,11 +48,19 @@ static const struct {
       "截屏快捷键(按下拉起框选截屏,存图片目录并复制剪贴板;ctrl/alt/super/shift+键名)" },
     { NULL, "quick_actions_enabled", LYY_VT_BOOL,
       "快速功能键总开关(输入触发词如 peizhi 时候选条提示,数字/点击执行)" },
+    { NULL, "stats_enabled", LYY_VT_BOOL,
+      "输入停顿显示今日统计(全局,悬浮窗状态行;各输入模式共用同一份数据)" },
+    { NULL, "stats_pause_secs", LYY_VT_INT,
+      "停顿多少秒后显示今日统计 3..300" },
+    { NULL, "stats_idle_exclude_secs", LYY_VT_INT,
+      "计入速度的最长停顿秒数,超时的空隙不计时长 5..600" },
 };
 
 /* 内置默认功能键表(合同 §14;与 core Config::default 一致) */
 static const LyyQuickAction g_qa_defaults[] = {
     { "peizhi", "打开配置", "@settings" },
+    { "shezhi", "设置", "@settings" },
+    { "jietu", "截图", "@shot" },
     { "bangzhu", "帮助", "@help" },
 };
 /* 行尾注释(# 之后)与布尔值写法缓存:load 时记下,save 时复用 */
@@ -87,6 +95,10 @@ void lyy_config_defaults(LyyConfig *c)
     c->quick_actions_count = (int)(sizeof(g_qa_defaults) / sizeof(g_qa_defaults[0]));
     for (int i = 0; i < c->quick_actions_count; i++)
         c->quick_actions[i] = g_qa_defaults[i];
+    /* 输入统计(设置窗统一管理;与悬浮窗默认一致) */
+    c->stats_enabled = 1;
+    c->stats_pause_secs = 10;
+    c->stats_idle_exclude_secs = 30;
 }
 
 int lyy_config_ai_active(const LyyConfig *c)
@@ -265,6 +277,17 @@ static void clamp_key(LyyConfig *c, int idx)
     case 18:
         /* 布尔无钳制;总开关缺省由 defaults 给 1 */
         break;
+    case 19:
+        /* 布尔无钳制;总开关缺省由 defaults 给 1 */
+        break;
+    case 20:
+        if (c->stats_pause_secs < 3 || c->stats_pause_secs > 300)
+            c->stats_pause_secs = 10;
+        break;
+    case 21:
+        if (c->stats_idle_exclude_secs < 5 || c->stats_idle_exclude_secs > 600)
+            c->stats_idle_exclude_secs = 30;
+        break;
     default:
         break;
     }
@@ -302,6 +325,9 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
     case 18:
         c->quick_actions_enabled = parse_bool(v, c->quick_actions_enabled);
         break;
+    case 19: c->stats_enabled = parse_bool(v, c->stats_enabled); break;
+    case 20: c->stats_pause_secs = atoi(v); break;
+    case 21: c->stats_idle_exclude_secs = atoi(v); break;
     default: break;
     }
     clamp_key(c, idx);
@@ -553,6 +579,9 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     case 16: val = c->phrase_hint; break;
     case 17: sval = c->shot_hotkey; break;
     case 18: val = c->quick_actions_enabled; break;
+    case 19: val = c->stats_enabled; break;
+    case 20: val = c->stats_pause_secs; break;
+    case 21: val = c->stats_idle_exclude_secs; break;
     default: return 0;
     }
     if (g_keys[idx].type == LYY_VT_STR) {

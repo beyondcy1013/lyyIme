@@ -255,9 +255,16 @@ int main(int argc, char *argv[])
             xcb_aux_get_screen(app->xim.conn, app->xim.screen_no);
         lyy_candwin_init(&app->candwin, app->xim.conn, screen->root,
                          res_dir_default, app->config.font_size);
-        /* 候选窗行点击(§14 鼠标点选):桥到 core select_candidate */
+        /* 候选窗行点击(§14 鼠标点选):桥到 core select_candidate;
+         * 右键菜单(§15):状态查询 + 操作回调桥到 core cand_op */
         app->candwin.on_click = lyy_candwin_row_clicked;
         app->candwin.click_user_data = app;
+        lyy_candwin_set_op_fns(&app->candwin, lyy_candwin_op_state,
+                               lyy_candwin_op, app);
+        /* §15 自定义查询(菜单第 4 项):启动注入;设置保存后 settings.c
+         * 再调一次即时生效 */
+        lyy_candwin_set_query(&app->candwin, app->config.custom_query_label,
+                              app->config.custom_query_url);
     }
     {
         /* 图标目录:安装位 SVG 在 icons/(res/ 只放 settings.ui/candidate.css);

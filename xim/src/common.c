@@ -30,7 +30,34 @@ int lyy_engine_ensure(App *app)
     }
     app->core.lyyime_set_commit_after_four(app->engine, app->config.commit_after_four);
     app->core.lyyime_set_commit_unique_four(app->engine, app->config.commit_unique_four);
+    /* 四码首选上屏(§6,可选符号):旧 core 库缺符号时沿用 core 默认(开)。 */
+    if (app->core.first_four_ok) {
+        app->core.lyyime_set_commit_first_at_four(app->engine,
+                                                  app->config.commit_first_at_four);
+    } else {
+        lyy_log(&app->log, "INFO core 库无四码首选上屏符号,"
+                           "commit_first_at_four 不生效(请更新 liblyyime_core.so)");
+    }
     app->core.lyyime_set_phrase_hint(app->engine, app->config.phrase_hint);
+    /* 精确单字按词频排位(§5,可选符号):旧 core 库缺符号时沿用 core 默认。 */
+    if (app->core.freq_rank_ok) {
+        app->core.lyyime_set_exact_char_freq_rank(app->engine,
+                                                  app->config.exact_char_freq_rank);
+    } else {
+        lyy_log(&app->log, "INFO core 库无精确单字频率排位符号(§5),"
+                           "exact_char_freq_rank 不生效(请更新 liblyyime_core.so)");
+    }
+    /* 英文上屏去向(§6,可选符号组):回车/Shift 上屏英文原串后的模式去向;
+     * 旧 core 库缺符号时沿用 core 各自默认,不降级。 */
+    if (app->core.en_mode_ok) {
+        app->core.lyyime_set_enter_english(
+            app->engine, !strcmp(app->config.enter_english, "en"));
+        app->core.lyyime_set_shift_english(
+            app->engine, !strcmp(app->config.shift_english, "en"));
+    } else {
+        lyy_log(&app->log, "INFO core 库无英文上屏去向符号(§6),"
+                           "enter_english/shift_english 不生效(请更新 liblyyime_core.so)");
+    }
     /* 快速功能键(合同 §14):总开关 + 触发词表注入(可选符号组,旧库跳过) */
     if (app->core.qa_ok) {
         app->core.lyyime_set_quick_actions_enabled(

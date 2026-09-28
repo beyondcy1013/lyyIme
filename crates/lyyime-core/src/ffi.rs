@@ -23,9 +23,9 @@
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
-use crate::config::QuickAction;
+use crate::config::{EnCommit, QuickAction};
 use crate::engine::Engine;
-use crate::types::{Effect, LKey, Mode};
+use crate::types::{CandOp, Effect, LKey, Mode};
 
 // ---- key_id 枚举(python 侧同名常量,合同 §3)----
 pub const LKEY_CHAR: c_int = 0;
@@ -132,13 +132,16 @@ pub fn effects_json(effects: &[Effect], page: usize, pages: usize) -> String {
 }
 
 /// key_id + 码点 → 抽象键;非法组合按 `Other` 处理。
+///
+/// Char 接受小写(普通组词)与大写(Shift+字母 原样传入,全大写输入候选,
+/// 2026-09-28 需求);core 内部自行小写化并镜像敲入原形。
 fn key_from(key_id: c_int, chr: u32) -> LKey {
     match key_id {
         LKEY_CHAR => char::from_u32(chr)
-            .filter(|c| c.is_ascii_lowercase())
+            .filter(|c| c.is_ascii_lowercase() || c.is_ascii_uppercase())
             .map_or(LKey::Other, LKey::Char),
         LKEY_DIGIT => {
-            if (u32::from(b'1')..=u32::from(b'9')).contains(&chr) {
+            if (u32::from(b'0')..=u32::from(b'9')).contains(&chr) {
                 LKey::Digit((chr - u32::from(b'0')) as u8)
             } else {
                 LKey::Other
@@ -259,7 +262,31 @@ pub unsafe extern "C" fn lyyime_set_commit_after_four(eng: *mut Engine, enabled:
     }
 }
 
-/// 设置“四码唯一自动上屏”(恰好四码且候选唯一时免空格直接上屏)。
+/// 设置“四码首选自动上屏”(恰好四码且首选是五笔命中时免空格直接上屏
+/// 首选,有重码也上屏第一个;首选是拼音/英文不触发)。
+///
+/// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_commit_first_at_four(
+    eng: *mut Engine,
+    enabled: c_int,
+) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.commit_first_at_four = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().commit_first_at_four)
+        }
+        None => 0,
+    }
+}
+
+/// 设置“四码唯一自动上屏”(恰好四码且中文候选唯一时免空格直接上屏;
+/// 唯一候选是英文词不触发;`lyyime_set_commit_first_at_four` 开启时被覆盖)。
 ///
 /// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。
 ///
@@ -300,11 +327,67 @@ pub unsafe extern "C" fn lyyime_set_phrase_hint(eng: *mut Engine, enabled: c_int
     }
 }
 
+/// 设置“回车上屏英文原串后的模式去向”(§6):0 = temp 临时(默认,保持
+/// 中文模式),非 0 = en(上屏并切英文模式)。NULL 引擎忽略,返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_enter_english(eng: *mut Engine, en_mode: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.enter_english = if en_mode != 0 { EnCommit::English } else { EnCommit::Temp };
+            e.set_config(cfg);
+            c_int::from(e.config().enter_english == EnCommit::English)
+        }
+        None => 0,
+    }
+}
+
+/// 设置“Shift 上屏英文原串后的模式去向”(§6):非 0 = en(默认,上屏并进入
+/// 英文模式),0 = temp(仅上屏,保持中文模式)。NULL 引擎忽略,返回生效后 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_shift_english(eng: *mut Engine, en_mode: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.shift_english = if en_mode != 0 { EnCommit::English } else { EnCommit::Temp };
+            e.set_config(cfg);
+            c_int::from(e.config().shift_english == EnCommit::English)
+        }
+        None => 0,
+    }
+}
+
+/// 设置"精确层单字按词频排位"(§5):非 0 = 开(默认,低频/生僻全码单字按
+/// 语料词频降档让位高频词组),0 = 关(恢复恒居首位旧行为)。
+/// NULL 引擎忽略,返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_exact_char_freq_rank(eng: *mut Engine, enabled: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.exact_char_freq_rank = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().exact_char_freq_rank)
+        }
+        None => 0,
+    }
+}
+
 /// 喂一个键,把效果流 JSON 写入 `buf`。
 ///
 /// 返回所需字节数(含 `\0`);容量不足时不写入并返回 `-needed`;
 /// `eng` 为 NULL 返回 0。`chr` 为 `Char`/`Digit`/`Punct` 的码点,其余键填 0
-/// (Digit 传 '1'..'9' 的 ASCII 码点,core 按 chr-'0' 解码取数字)。
+/// (Digit 传 '0'..'9' 的 ASCII 码点,core 按 chr-'0' 解码取数字,
+/// 0 = 选第 10 个候选)。
 ///
 /// 重试纪律(§3 v1.1):按键先纯读取规划,效果流 JSON 确认能写入 buf 后
 /// 才落内部状态(学习/清缓冲/翻页等);返回 -needed 时引擎状态保持按键前,
@@ -488,6 +571,65 @@ pub unsafe extern "C" fn lyyime_select_candidate(
 ) -> i64 {
     let Some(e) = eng.as_mut() else { return 0 };
     let (effects, plan) = e.plan_select_candidate(idx.max(0) as usize);
+    let json = effects_json(
+        &effects,
+        plan.page,
+        Engine::pages_for(plan.cands.len(), e.page_size()),
+    );
+    let n = put_cstr(buf, buf_cap, &json);
+    if n >= 0 {
+        e.apply_plan(plan);
+    }
+    n
+}
+
+// ---- §15 候选右键操作(可选符号组;旧库缺符号时宿主禁用右键菜单即可) ----
+
+/// `lyyime_cand_op` 的 op 编码:1=固定首位/取消固定,2=删除词组,3=反查英文。
+pub const LYY_CAND_OP_PIN: c_int = 1;
+pub const LYY_CAND_OP_DELETE: c_int = 2;
+pub const LYY_CAND_OP_EN: c_int = 3;
+
+/// 当前页第 `idx` 个候选的固定状态:1=已固定,0=未固定,-1=非法
+/// (功能键候选/越界/NULL 引擎)。宿主据此决定菜单文案"固定首位/取消固定",
+/// -1 时应禁用整个操作菜单。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_cand_pinned(eng: *mut Engine, idx: c_int) -> c_int {
+    let Some(e) = eng.as_ref() else {
+        return -1;
+    };
+    match e.cand_pinned(idx.max(0) as usize) {
+        Some(true) => 1,
+        Some(false) => 0,
+        None => -1,
+    }
+}
+
+/// 对当前页第 `idx` 个候选执行右键操作(合同 §15),效果流 JSON 写入 `buf`;
+/// 返回值与两段式重试纪律同 [`lyyime_process_key`](固定/删除仅在 JSON
+/// 确认写入后才落盘)。`op` 见 `LYY_CAND_OP_*`;非法 op 回 `[{"t":"consumed"}]`。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针;`buf` 可写 `buf_cap` 字节(可为 NULL)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_cand_op(
+    eng: *mut Engine,
+    idx: c_int,
+    op: c_int,
+    buf: *mut c_char,
+    buf_cap: i64,
+) -> i64 {
+    let Some(e) = eng.as_mut() else { return 0 };
+    let op = match op {
+        LYY_CAND_OP_PIN => CandOp::PinToggle,
+        LYY_CAND_OP_DELETE => CandOp::Delete,
+        LYY_CAND_OP_EN => CandOp::EnLookup,
+        _ => return put_cstr(buf, buf_cap, "[{\"t\":\"consumed\"}]"),
+    };
+    let (effects, plan) = e.plan_cand_op(idx.max(0) as usize, op);
     let json = effects_json(
         &effects,
         plan.page,

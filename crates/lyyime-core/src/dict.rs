@@ -76,6 +76,9 @@ pub(crate) struct DictIndex {
     /// 词 → 词频名次(1 起),用于 en_freq_top_n 判定。
     pub en_rank: HashMap<String, u32>,
     pub en_max: u64,
+    /// 英译中翻译词典(en_trans.tsv,词 → 常用序译法列表;
+    /// 全大写输入候选用,缺失文件 = 空表,功能降级为仅大小写变体)。
+    pub en_trans: HashMap<String, Vec<String>>,
 
     // ---- 兜底词频 ----
     /// 词 → 通用词频(排序同分兜底,合同 §5.5"排序兜底")。
@@ -129,6 +132,7 @@ impl DictIndex {
             en_prefix: HashMap::new(),
             en_rank: HashMap::new(),
             en_max: 0,
+            en_trans: HashMap::new(),
             suggestion: HashMap::new(),
             char_corpus: HashMap::new(),
             char_corpus_max: 0,
@@ -139,6 +143,7 @@ impl DictIndex {
         d.load_pinyin_char(&dir.join("pinyin_char.tsv"));
         d.load_pinyin_phrase(&dir.join("pinyin_phrase.tsv"));
         d.load_english(&dir.join("english.tsv"));
+        d.load_en_trans(&dir.join("en_trans.tsv"));
         d.load_suggestion(&dir.join("suggestion.tsv"));
         d.load_char_tier(&dir.join("char_tier.tsv"));
         // meta.json 仅作元信息校验,损坏/缺失直接忽略(不影响任何通道)。
@@ -444,6 +449,28 @@ impl DictIndex {
         self.english = rows;
         self.en_max = self.english.iter().map(|(_, f)| *f).max().unwrap_or(0);
         self.loaded_channels += 1;
+    }
+
+    /// en_trans.tsv:`词 \t 译1 \t 译2 …`(词必须小写;译法已由 dicttool 按常用序
+    /// 清洗排序)。全大写输入候选(2026-09-28 需求)的中文翻译来源;文件缺失
+    /// (如测试夹具未带)时静默降级为仅大小写变体,不参与 loaded_channels 计数。
+    fn load_en_trans(&mut self, path: &Path) {
+        const EN_TRANS_MAX: usize = 8;
+        for cols in read_rows(path, 2) {
+            let word = cols[0].to_lowercase();
+            if word != cols[0] || word.is_empty() {
+                continue; // 词列必须已是小写,防生成侧漏大写
+            }
+            let trans: Vec<String> = cols[1..]
+                .iter()
+                .filter(|t| !t.is_empty() && !t.contains(['\t', '\n']))
+                .take(EN_TRANS_MAX)
+                .cloned()
+                .collect();
+            if !trans.is_empty() {
+                self.en_trans.insert(word, trans);
+            }
+        }
     }
 
     /// 加载 GB2312 单字分档表(dicttool tier 产物);缺失/损坏 → 空表(降级纯语料排序)。

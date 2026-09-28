@@ -42,6 +42,8 @@ pub enum Action {
     Shot,
     /// 快速功能键命中(§14):值 = quick_actions 下标,调用方单独执行
     QuickRun(usize),
+    /// 自定义查询(§15 菜单第 4 项):xdg-open 打开已代入词的网址,调用方单独执行
+    OpenUrl(String),
 }
 
 impl logic::Host for CollectingHost {
@@ -82,6 +84,9 @@ impl logic::Host for CollectingHost {
     }
     fn on_action(&mut self, index: usize) {
         self.actions.push(Action::QuickRun(index));
+    }
+    fn on_open_url(&mut self, url: &str) {
+        self.actions.push(Action::OpenUrl(url.to_string()));
     }
 }
 
@@ -355,6 +360,7 @@ impl EngineService {
             Action::AiSubmit(_) => Ok(()), // 由调用方单独处理
             Action::Shot => Ok(()),        // 由调用方单独处理
             Action::QuickRun(_) => Ok(()), // 由调用方单独处理(§14)
+            Action::OpenUrl(_) => Ok(()),  // 由调用方单独处理(§15 自定义查询)
         }
     }
 
@@ -569,6 +575,20 @@ impl EngineService {
         }
     }
 
+    /// 自定义查询(§15 菜单第 4 项):xdg-open 拉起浏览器(与 Mode B/C
+    /// 同一执行方式;异步,不阻塞按键流)。
+    fn open_query_url(&self, url: &str) {
+        crate::logger::info(&format!("自定义查询:xdg-open {url}"));
+        if let Err(e) = std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            crate::logger::error(&format!("自定义查询打开失败(xdg-open):{e}"));
+        }
+    }
+
     fn launch_setup(&self) {
         // 拉起设置窗:lyyime-app 缺失时回退 lyyime-xim --settings(共用 config.toml)
         let argv: Option<Vec<String>> = which("lyyime-app")
@@ -637,6 +657,7 @@ impl EngineService {
         let mut ai_prompt: Option<String> = None;
         let mut shot = false;
         let mut quick: Option<usize> = None;
+        let mut open_url: Option<String> = None;
         let consumed = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
@@ -646,6 +667,7 @@ impl EngineService {
                     Action::AiSubmit(p) => ai_prompt = Some(p),
                     Action::Shot => shot = true,
                     Action::QuickRun(i) => quick = Some(i),
+                    Action::OpenUrl(u) => open_url = Some(u),
                     other => actions.push(other),
                 }
             }
@@ -665,13 +687,31 @@ impl EngineService {
         if let Some(i) = quick {
             self.run_quick_action(i);
         }
+        if let Some(u) = open_url {
+            self.open_query_url(&u);
+        }
         consumed
     }
 
-    async fn candidate_clicked(&self, index: u32, _button: u32, _state: u32) {
+    async fn candidate_clicked(&self, index: u32, button: u32, _state: u32) {
+        // §15 右键候选(button=3):候选区换成操作行(固定/删除/反查英文),
+        // 数字 1-3 或再点选执行——ibus 面板无弹菜单 API,行内替换成操作行。
+        if button == 3 {
+            let actions = {
+                let mut logic = self.0.logic.lock().unwrap();
+                let mut host = CollectingHost::default();
+                let _ = logic.cand_menu_open(&mut host, index as usize);
+                host.actions
+            };
+            for a in &actions {
+                let _ = self.emit_action(a).await;
+            }
+            return;
+        }
         // 候选点击(合同 §14 鼠标点选):与数字选词同一条 core 路径
         let mut actions = Vec::new();
         let mut quick: Option<usize> = None;
+        let mut open_url: Option<String> = None;
         {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
@@ -679,6 +719,7 @@ impl EngineService {
             for a in host.actions {
                 match a {
                     Action::QuickRun(i) => quick = Some(i),
+                    Action::OpenUrl(u) => open_url = Some(u),
                     other => actions.push(other),
                 }
             }
@@ -688,6 +729,9 @@ impl EngineService {
         }
         if let Some(i) = quick {
             self.run_quick_action(i);
+        }
+        if let Some(u) = open_url {
+            self.open_query_url(&u);
         }
     }
 
@@ -700,6 +744,8 @@ impl EngineService {
         let (actions, mode) = {
             let mut logic = self.0.logic.lock().unwrap();
             logic.set_ai_cfg(cfg);
+            // §15 自定义查询同样热读(config.toml custom_query_*)
+            logic.set_custom_query(crate::read_custom_query());
             let mut host = CollectingHost::default();
             logic.reset_session(&mut host);
             (host.actions, logic.mode)
@@ -846,7 +892,8 @@ impl FactoryService {
         let core_cfg = crate::read_core_config();
         let ai_cfg = lyyime_ai::load_config();
         // FFI/核心初始化失败不退出:EngineLogic 进入降级英文直通(合同 §7)
-        let logic = EngineLogic::new(data_dir, Some(ai_cfg), core_cfg);
+        let mut logic = EngineLogic::new(data_dir, Some(ai_cfg), core_cfg);
+        logic.set_custom_query(crate::read_custom_query());
         let svc = EngineService::new(self.conn.clone(), path.clone(), logic, self.icon_dir.clone());
         self.conn
             .object_server()
@@ -933,22 +980,35 @@ pub async fn run(
         engine_state_publish();
     });
     // ibus-daemon 退出/重启时，zbus 4 没有 Connection::closed() API。
-    // 定期调用总线 Ping 监测断线；否则引擎会被孤儿化并长期占用 swap，
+    // 定期探测总线存活；否则引擎会被孤儿化并长期占用 swap，
     // 其子进程也无法被回收（典型于隔离 E2E 会话结束后）。
+    // 注:ibus 私有总线的 dbus 子集没有 org.freedesktop.DBus.Ping,也没有
+    // org.freedesktop.Peer.Ping(实测均 UnknownMethod,引擎会在 5s 后误退),
+    // 故用标准 NameHasOwner(org.freedesktop.IBus) 兼做存活探测 ——
+    // daemon 退出时连接关闭调用即报错,或名字消失返回 false。
     let watchdog_conn = conn.clone();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            let ping = zbus::block_on(watchdog_conn.call_method(
+            let probe = watchdog_conn.call_method(
                 Some("org.freedesktop.DBus"),
                 "/org/freedesktop/DBus",
                 Some("org.freedesktop.DBus"),
-                "Ping",
-                &(),
-            ));
-            if let Err(err) = ping {
-                logger::warn(&format!("ibus 总线已断开,退出引擎: {err}"));
-                std::process::exit(0);
+                "NameHasOwner",
+                &("org.freedesktop.IBus",),
+            );
+            match zbus::block_on(probe) {
+                Ok(reply) => {
+                    let owned: bool = reply.body().deserialize().unwrap_or(false);
+                    if !owned {
+                        logger::warn("ibus 总线已断开(org.freedesktop.IBus 名字消失),退出引擎");
+                        std::process::exit(0);
+                    }
+                }
+                Err(err) => {
+                    logger::warn(&format!("ibus 总线已断开,退出引擎: {err}"));
+                    std::process::exit(0);
+                }
             }
         }
     });

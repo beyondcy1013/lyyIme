@@ -23,39 +23,30 @@ void lyy_keysym_map(uint32_t keysym, int *key, uint32_t *chr)
     *key = LKEY_OTHER;
     *chr = 0;
 
-    /* 小写字母:chr=码点(§6 宿主负责小写化) */
+    /* 小写字母:chr=码点 */
     if (keysym >= (uint32_t)'a' && keysym <= (uint32_t)'z') {
         *key = LKEY_CHAR;
         *chr = keysym;
         return;
     }
     /* 大写字母(Shift 进入;CapsLock 大写态已在 xim_server 直通,
-     * 走不到这里):小写化后仍按字母缓冲 */
+     * 走不到这里):原样传入,core 自行小写化组词并镜像敲入原形,
+     * 全大写敲入走大写候选通道(2026-09-28 需求) */
     if (keysym >= (uint32_t)'A' && keysym <= (uint32_t)'Z') {
         *key = LKEY_CHAR;
-        *chr = (uint32_t)tolower((int)keysym);
+        *chr = keysym;
         return;
     }
-    /* 数字 1–9 选候选;0 无选词语义,交 core 当标点处理 */
+    /* 数字 1–9 选候选;0 = 第 10 个(page_size=10 时;页不足 10 条 core 吞键) */
     if (keysym >= (uint32_t)'0' && keysym <= (uint32_t)'9') {
-        if (keysym == (uint32_t)'0') {
-            *key = LKEY_PUNCT;
-            *chr = '0';
-        } else {
-            *key = LKEY_DIGIT;
-            *chr = keysym;
-        }
+        *key = LKEY_DIGIT;
+        *chr = keysym;
         return;
     }
     /* 小键盘数字(NumLock 开启时) */
     if (keysym >= XK_KP_0 && keysym <= XK_KP_9) {
-        if (keysym == XK_KP_0) {
-            *key = LKEY_PUNCT;
-            *chr = '0';
-        } else {
-            *key = LKEY_DIGIT;
-            *chr = (uint32_t)('1' + (keysym - XK_KP_1));
-        }
+        *key = LKEY_DIGIT;
+        *chr = (uint32_t)('0' + (keysym - XK_KP_0));
         return;
     }
 

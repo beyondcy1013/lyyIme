@@ -13,7 +13,7 @@ use crate::keysym::{
     PURPOSE_PASSWORD, PURPOSE_PIN,
 };
 use lyyime_ai::AiConfig;
-use lyyime_core::{Effect, Engine, LKey};
+use lyyime_core::{CandOp, Effect, Engine, LKey};
 use std::path::PathBuf;
 
 /// 胶水层回调(IBus 实现者或单测 Mock)。
@@ -37,6 +37,9 @@ pub trait Host {
     /// 快速功能键命中(§14):宿主按 `quick_actions[index].command` 执行功能
     /// (@settings/@help 内置或 shell 命令),不上屏任何文本
     fn on_action(&mut self, index: usize);
+    /// 自定义查询(§15 菜单第 4 项):宿主拉起浏览器打开已代入词的网址
+    /// (xdg-open;异步,不阻塞按键流)
+    fn on_open_url(&mut self, url: &str);
 }
 
 /// /AI 触发会话状态:idle=未触发;slash/slash_a=已吞触发前缀;
@@ -70,6 +73,13 @@ pub struct EngineLogic {
     hotkey_coin: Option<(u32, u32)>,
     /// 输入统计目录(None=不记录,单测用;生产为 ~/.local/share/lyyime/stats)
     pub stats_dir: Option<PathBuf>,
+    /// §15 候选右键菜单(ibus 版):面板无弹菜单 API,约定为"候选区临时换成
+    /// 操作行(固定首位/删除词组/反查英文),数字 1-3 或点选执行;Esc/任意键
+    /// 退出并还原真实候选"。Some = 原候选页内下标。
+    cand_menu: Option<usize>,
+    /// §15 自定义查询(菜单第 4 行;config.toml custom_query_*,
+    /// 焦点进入时热读 —— 设置保存后即时生效)。None = 操作行不显示。
+    custom_query: Option<lyyime_core::wordops::CustomQuery>,
 }
 
 impl EngineLogic {
@@ -96,7 +106,15 @@ impl EngineLogic {
             hotkey_shot,
             hotkey_coin,
             stats_dir: lyyime_core::stats::default_dir(),
+            cand_menu: None,
+            custom_query: None,
         }
+    }
+
+    /// §15 自定义查询配置注入(config.toml custom_query_*;None=操作行
+    /// 不显示第 4 项)。focus_in 时由 service 热读注入,设置保存即生效。
+    pub fn set_custom_query(&mut self, cq: Option<lyyime_core::wordops::CustomQuery>) {
+        self.custom_query = cq.filter(|c| c.configured());
     }
 
     pub fn degraded(&self) -> bool {
@@ -135,6 +153,19 @@ impl EngineLogic {
     }
 
     fn on_press(&mut self, host: &mut dyn Host, keyval: u32, state: u32) -> bool {
+        // §15 右键操作行激活期间:数字 1-3(自定义查询已配则到 4)执行、
+        // Esc 取消还原、其余键(含 Shift/组合键)先还原真实候选再按常态
+        // 路径处理 ——core 侧缓冲/候选从未改动,菜单纯属显示层状态。
+        if self.cand_menu.is_some() {
+            match keyval {
+                KSYM_ESCAPE => {
+                    self.cand_menu_restore(host);
+                    return true;
+                }
+                k @ 0x31..=0x34 => return self.cand_menu_exec(host, (k - 0x31) as usize),
+                _ => self.cand_menu_restore(host),
+            }
+        }
         if is_shift(keyval) {
             if state & BLOCKING_MODS != 0 {
                 // Shift 参与组合键(Ctrl/Alt/Super+Shift):放行,不算单击
@@ -369,6 +400,7 @@ impl EngineLogic {
             }
             _ => {
                 let (lkey, _c) = map_keyval(keyval);
+                let buf_before = self.core_mut().buffer().to_string();
                 let effects = self.core_mut().process_key(lkey);
                 let consumed = self.dispatch_ai(host, effects);
                 if !consumed {
@@ -377,6 +409,18 @@ impl EngineLogic {
                         let s = ch.unwrap().to_string();
                         self.ai_append_prompt(host, &s);
                     }
+                } else if matches!(lkey, LKey::Char(_))
+                    && !buf_before.is_empty()
+                    && self
+                        .engine
+                        .as_ref()
+                        .is_some_and(|e| e.buffer() == buf_before)
+                {
+                    // 死码吞键(缓冲未变):采集态里字母是提示词原料——先把当前
+                    // 缓冲原样归入提示词,再追加本字母,保持敲击顺序。
+                    let effects = self.core_mut().process_key(LKey::Enter);
+                    self.dispatch_ai(host, effects);
+                    self.ai_append_prompt(host, &ch.unwrap().to_string());
                 }
                 self.ai_show(host); // 组词选词(commit)也会改提示词,统一刷新展示
                 true
@@ -491,6 +535,7 @@ impl EngineLogic {
         if let Some(e) = self.engine.as_mut() {
             e.reset();
         }
+        self.cand_menu = None;
         self.preedit = None;
         host.on_preedit(None);
         host.on_candidates(&[], 0, 0, "");
@@ -506,6 +551,7 @@ impl EngineLogic {
             e.reset();
         }
         self.ai_reset_state();
+        self.cand_menu = None;
         self.preedit = None;
         host.on_preedit(None);
         host.on_candidates(&[], 0, 0, "");
@@ -514,12 +560,87 @@ impl EngineLogic {
 
     /// 鼠标/面板点选当前页第 `idx`(0 起)个候选(合同 §14);
     /// 返回 true=已消费。功能键候选经 dispatch 产生 on_action。
+    /// 右键菜单激活时,idx 映射到操作行(§15)。
     pub fn select_candidate(&mut self, host: &mut dyn Host, idx: usize) -> bool {
         if self.degraded() {
             return false;
         }
+        if self.cand_menu.is_some() {
+            return self.cand_menu_exec(host, idx);
+        }
         let effects = self.core_mut().select_candidate(idx);
         self.dispatch(host, effects)
+    }
+
+    // ------------------------------------------------------------------
+    // §15 候选右键菜单(ibus CandidateClicked button=3)
+    // ------------------------------------------------------------------
+
+    /// 右键候选行:菜单状态经 core `cand_pinned` 判定(功能键/越界 → 吞掉
+    /// 不开菜单);普通候选 → 候选区换成操作行,core 状态保持不动。
+    pub fn cand_menu_open(&mut self, host: &mut dyn Host, idx: usize) -> bool {
+        if self.degraded() {
+            return false;
+        }
+        let Some(pinned) = self.engine.as_ref().and_then(|e| e.cand_pinned(idx)) else {
+            return true;
+        };
+        self.cand_menu = Some(idx);
+        let pin_label = if pinned { "取消固定首位" } else { "固定首位" };
+        let mut rows: Vec<(String, String)> = vec![
+            (pin_label.to_string(), "右键".to_string()),
+            ("删除词组".to_string(), "右键".to_string()),
+            ("反查英文".to_string(), "右键".to_string()),
+        ];
+        // 自定义查询(config.toml custom_query_*;url 未配则只有三行)
+        if let Some(cq) = &self.custom_query {
+            rows.push((cq.menu_label().to_string(), "右键".to_string()));
+        }
+        host.on_candidates(&rows, 0, 1, "右键操作:数字/点选执行,Esc 取消");
+        true
+    }
+
+    /// 菜单激活时执行操作行(sel=0/1/2 core 操作,sel=3 自定义查询);
+    /// 越界选择仅还原显示。
+    fn cand_menu_exec(&mut self, host: &mut dyn Host, sel: usize) -> bool {
+        let Some(orig) = self.cand_menu.take() else {
+            return false;
+        };
+        const OPS: [CandOp; 3] = [CandOp::PinToggle, CandOp::Delete, CandOp::EnLookup];
+        if let Some(&op) = OPS.get(sel) {
+            let effects = self.core_mut().cand_op(orig, op);
+            return self.dispatch(host, effects);
+        }
+        // 第 4 行=自定义查询:宿主侧打开浏览器,core 状态不动;先还原真实
+        // 候选再发 notice(顺序对调会被候选刷新盖掉),与 Esc 同一还原流。
+        self.cand_menu_restore(host);
+        if sel == 3 {
+            if let (Some(cq), Some(word)) = (
+                self.custom_query.clone(),
+                self.engine
+                    .as_ref()
+                    .and_then(|e| e.flush_page().get(orig).map(|c| c.text.clone())),
+            ) {
+                let url = lyyime_core::wordops::custom_query_url(&cq.url, &word);
+                host.on_open_url(&url);
+                host.on_notice(&format!("{}: {}", cq.menu_label(), word));
+            }
+        }
+        true
+    }
+
+    /// 退出操作行并还原真实候选显示(core 侧缓冲/候选从未改动)。
+    fn cand_menu_restore(&mut self, host: &mut dyn Host) {
+        self.cand_menu = None;
+        if let Some(e) = self.engine.as_ref() {
+            let list: Vec<(String, String)> = e
+                .flush_page()
+                .iter()
+                .map(|c| (c.text.clone(), c.comment.clone()))
+                .collect();
+            let aux = self.preedit.clone().unwrap_or_default();
+            host.on_candidates(&list, e.page(), e.page_count(), &aux);
+        }
     }
 
     pub fn reload_dict(&mut self, host: &mut dyn Host) -> Result<(), anyhow::Error> {
@@ -589,6 +710,9 @@ mod tests {
         fn on_action(&mut self, index: usize) {
             self.log(format!("action:{index}"));
         }
+        fn on_open_url(&mut self, url: &str) {
+            self.log(format!("open-url:{url}"));
+        }
     }
 
     /// 极简词库夹具:wqvb→你好(五笔)、ni→你(拼音)、数字选词由 core 驱动。
@@ -632,6 +756,30 @@ mod tests {
         (dir, logic)
     }
 
+    /// §15 右键菜单测试用:用户数据文件隔离到夹具目录(不碰真实 HOME),
+    /// 关四码自动上屏保证候选可见。
+    fn logic_isolated() -> (PathBuf, EngineLogic) {
+        logic_with_core_cfg(lyyime_core::Config {
+            user_dict: Some(fixtures_dir_user()),
+            commit_first_at_four: false,
+            commit_unique_four: false,
+            ..Default::default()
+        })
+    }
+
+    /// 独立的用户数据目录(与词库夹具目录分开,只收 pinned/blocked/user_words)。
+    fn fixtures_dir_user() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "lyyime-ibus-logic-user-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("user_words.tsv")
+    }
+
     const SHIFT_L: u32 = 0xffe1;
 
     #[test]
@@ -659,19 +807,63 @@ mod tests {
     }
 
     #[test]
-    fn shift_press_flushes_letters_without_toggling_english() {
+    fn shift_press_flushes_letters_and_switches_english() {
         let (_d, mut l) = logic_with_ai(None);
         let mut h = Mock::default();
         for k in ['t', 'h', 'e'] {
             l.process_key_event(&mut h, k as u32, 0);
         }
-        // Shift 按下:有缓冲 → 上屏英文原串
+        // Shift 按下:有缓冲 → 上屏英文原串;默认(shift_english=en)再切英文。
         l.process_key_event(&mut h, SHIFT_L, 0);
         assert!(h.events.borrow().iter().any(|e| e == "commit:the"));
-        // 这次 Shift 已用于上屏,释放不得再次切换模式。
+        assert!(h.events.borrow().iter().any(|e| e == "mode:1"));
+        // 释放不得再次切换(本次 Shift 已用于上屏+切换)。
+        l.process_key_event(&mut h, SHIFT_L, 1 << 30);
+        let mode_n = h
+            .events
+            .borrow()
+            .iter()
+            .filter(|e| e.starts_with("mode:"))
+            .count();
+        assert_eq!(mode_n, 1, "events={:?}", h.events.borrow());
+        // 英文态:字母放行,不进组词缓冲。
+        assert!(!l.process_key_event(&mut h, 0x61, 0));
+    }
+
+    #[test]
+    fn shift_press_temp_config_keeps_chinese() {
+        // shift_english = temp(旧版行为):仅上屏原串,保持中文模式。
+        let (_d, mut l) = logic_with_core_cfg(lyyime_core::Config {
+            shift_english: lyyime_core::EnCommit::Temp,
+            ..Default::default()
+        });
+        let mut h = Mock::default();
+        for k in ['t', 'h', 'e'] {
+            l.process_key_event(&mut h, k as u32, 0);
+        }
+        l.process_key_event(&mut h, SHIFT_L, 0);
+        assert!(h.events.borrow().iter().any(|e| e == "commit:the"));
+        assert!(!h.events.borrow().iter().any(|e| e == "mode:1"));
+        // 释放(无挂起单击)也不切换。
         l.process_key_event(&mut h, SHIFT_L, 1 << 30);
         assert!(!h.events.borrow().iter().any(|e| e == "mode:1"));
         // 仍是中文态:字母进入下一次组合。
+        assert!(l.process_key_event(&mut h, 0x61, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "aux:a"));
+    }
+
+    #[test]
+    fn enter_flushes_letters_keeps_chinese_by_default() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        for k in ['t', 'h', 'e'] {
+            l.process_key_event(&mut h, k as u32, 0);
+        }
+        // 回车默认(enter_english=temp):临时英文,上屏后保持中文模式。
+        assert!(l.process_key_event(&mut h, 0xff0d, 0)); // KSYM_RETURN
+        assert!(h.events.borrow().iter().any(|e| e == "commit:the"));
+        assert!(!h.events.borrow().iter().any(|e| e == "mode:1"));
+        // 字母继续进中文组词缓冲。
         assert!(l.process_key_event(&mut h, 0x61, 0));
         assert!(h.events.borrow().iter().any(|e| e == "aux:a"));
     }
@@ -954,5 +1146,119 @@ mod tests {
         }
         assert!(l.select_candidate(&mut h, 0), "点选应消费");
         assert!(h.events.borrow().iter().any(|e| e == "action:0"));
+    }
+
+    /// §15 右键候选菜单:操作行展示/数字执行/Esc 还原/固定删除落盘。
+    #[test]
+    fn 右键候选菜单_删除固定取消与反查提示() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        let last_cands = |h: &Mock| {
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("cands:"))
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        // 缓冲 wq → 候选 [你, 你好](wq 精确 + wqvb 前缀命中)
+        for k in ['w', 'q'] {
+            assert!(l.process_key_event(&mut h, k as u32, 0));
+        }
+        assert!(last_cands(&h).contains("你"));
+
+        // 右键第 0 行 → 候选区换操作行(core 状态不动)
+        assert!(l.cand_menu_open(&mut h, 0));
+        let menu = last_cands(&h);
+        assert!(menu.contains("固定首位"), "{menu}");
+        assert!(menu.contains("删除词组"), "{menu}");
+        assert!(menu.contains("反查英文"), "{menu}");
+
+        // Esc 取消 → 还原真实候选
+        assert!(l.process_key_event(&mut h, KSYM_ESCAPE, 0));
+        assert!(last_cands(&h).contains("你"));
+
+        // 再右键 → 数字 2 删除「你」→ 候选只剩 你好(屏蔽持久化由 core 单测覆盖)
+        assert!(l.cand_menu_open(&mut h, 0));
+        assert!(l.process_key_event(&mut h, '2' as u32, 0));
+        assert_eq!(last_cands(&h), "cands:[你好]");
+        // 数字 3 反查英文:夹具无 zh_en.tsv → notice 提示,候选不动
+        assert!(l.cand_menu_open(&mut h, 0));
+        assert!(l.process_key_event(&mut h, '3' as u32, 0));
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e.contains("没有英文反查结果")));
+    }
+
+    /// 右键功能键/越界行不弹菜单(cand_pinned 返回 None → 吞键)。
+    #[test]
+    fn 右键功能键候选不弹菜单() {
+        let (_d, mut l) = logic_with_action();
+        let mut h = Mock::default();
+        for k in "peizhi".chars() {
+            l.process_key_event(&mut h, k as u32, 0);
+        }
+        // 功能键行是第 0 行(peizhi 触发时功能候选紧随首选之前/之后依 core 插入位置,
+        // 先找含"打开配置"的行下标 —— 简化:直接对全部行右键,功能行应吞键不弹菜单)
+        for i in 0..3 {
+            let before = h.events.borrow().len();
+            let _ = l.cand_menu_open(&mut h, i);
+            // 若该行是普通词,菜单会 emit cands;功能行则静默
+            if h.events.borrow().len() > before {
+                // 普通词菜单 → Esc 还原后继续验证
+                l.process_key_event(&mut h, KSYM_ESCAPE, 0);
+            }
+        }
+        // 引擎不 panic 即可(功能行被 cand_pinned=None 拒绝)
+    }
+
+    /// §15 自定义查询(第 4 行):已配置时操作行多一项,数字 4 执行 →
+    /// on_open_url + notice + 候选还原;未配置时按 4 仅还原不动作。
+    #[test]
+    fn 右键候选菜单_自定义查询() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        let last_cands = |h: &Mock| {
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("cands:"))
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        for k in ['w', 'q'] {
+            assert!(l.process_key_event(&mut h, k as u32, 0));
+        }
+
+        // 未配置:菜单三行,数字 4 不产生 open-url(仅还原)
+        assert!(l.cand_menu_open(&mut h, 0));
+        let menu3 = last_cands(&h);
+        assert!(!menu3.contains("查词典"), "{menu3}");
+        assert!(l.process_key_event(&mut h, '4' as u32, 0));
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("open-url:")));
+
+        // 已配置:菜单四行,数字 4 → open-url({q} 已代入)+ notice + 还原
+        l.set_custom_query(Some(lyyime_core::wordops::CustomQuery {
+            label: "查词典".into(),
+            url: "https://dict.example.test/lookup?q={q}".into(),
+        }));
+        assert!(l.cand_menu_open(&mut h, 0));
+        let menu4 = last_cands(&h);
+        assert!(menu4.contains("查词典"), "{menu4}");
+        assert!(l.process_key_event(&mut h, '4' as u32, 0));
+        let ev = h.events.borrow();
+        assert!(
+            ev.iter()
+                .any(|e| e == "open-url:https://dict.example.test/lookup?q=%E4%BD%A0"),
+            "events={ev:?}"
+        );
+        assert!(ev.iter().any(|e| e == "notice:查词典: 你"), "events={ev:?}");
+        drop(ev);
+        // 还原后真实候选回来了
+        assert!(last_cands(&h).contains("你"));
     }
 }

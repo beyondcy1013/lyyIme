@@ -343,7 +343,13 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
             }
             break;
         case LYY_EFF_MODE:
-            lyy_app_update_mode_ui(app);
+            /* core 在键处理中切了模式(§6:回车/Shift 上屏英文原串后按
+             * enter_english/shift_english 配置转英文):m=1 关 trigger 转
+             * 英文直通,m=0 开 trigger 回中文。core 模式已在效果流返回前
+             * apply,set_trigger 内部不会再 toggle;托盘/主窗状态随之刷新。 */
+            lyy_log(&app->log, "mode 效果:core 切%s(trigger 同步)",
+                    e->m == 1 ? "英文" : "中文");
+            lyy_xim_set_trigger(app, e->m == 1 ? 0 : 1);
             break;
         case LYY_EFF_ACTION:
             /* §14 快速功能键命中:执行功能,不上屏文本
@@ -375,7 +381,9 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
 void lyy_candwin_row_clicked(int idx, void *user_data)
 {
     App *app = user_data;
-    if (!lyy_core_ready(app) || !app->xim.focused_ic || !app->core.qa_ok)
+    xcb_im_input_context_t *ic =
+        app->xim.focused_ic ? app->xim.focused_ic : app->xim.cand_op_ic;
+    if (!lyy_core_ready(app) || !ic || !app->core.qa_ok)
         return;
     char json[4096];
     if (lyy_core_select_candidate_json(&app->core, app->engine, idx, json,
@@ -385,7 +393,46 @@ void lyy_candwin_row_clicked(int idx, void *user_data)
         return;
     }
     int had = 0, passed = 0;
-    apply_effects(app, app->xim.focused_ic, NULL, 0, json, &had, &passed);
+    apply_effects(app, ic, NULL, 0, json, &had, &passed);
+}
+
+/* ---- 候选窗右键菜单(§15 候选管理:固定首位/删除词组/反查英文) ----
+ * 右键不触发上屏:core cand_op 效果流只含 candidates/preedit/notice。
+ * 功能键/空行 core 返回 <0 → 菜单不弹出;旧 core 库缺符号 → 回调不注册。 */
+int lyy_candwin_op_state(int idx, void *user_data)
+{
+    App *app = user_data;
+    if (!lyy_core_ready(app) || !app->core.cand_ops_ok)
+        return -1;
+    int pinned = app->core.lyyime_cand_pinned(app->engine, idx);
+    /* 菜单即将弹出:记住当前 IC —— 菜单 grab 期间客户端 focus-out,
+       focused_ic 会被清空,activate 时用这份回投效果 */
+    if (pinned >= 0)
+        app->xim.cand_op_ic = app->xim.focused_ic;
+    return pinned;
+}
+
+void lyy_candwin_op(int idx, int op, void *user_data)
+{
+    App *app = user_data;
+    xcb_im_input_context_t *ic =
+        app->xim.focused_ic ? app->xim.focused_ic : app->xim.cand_op_ic;
+    if (!lyy_core_ready(app) || !ic || !app->core.cand_ops_ok) {
+        lyy_log(&app->log,
+                "WARN 候选右键操作被跳过(idx=%d,op=%d,ready=%d,ic=%p,ops=%d)",
+                idx, op, lyy_core_ready(app), (void *)ic,
+                app->core.cand_ops_ok);
+        return;
+    }
+    lyy_log(&app->log, "候选右键操作 idx=%d op=%d", idx, op);
+    char json[4096];
+    if (lyy_core_cand_op_json(&app->core, app->engine, idx, op, json,
+                              (int)sizeof(json)) != 0) {
+        lyy_log(&app->log, "WARN 候选右键操作失败(idx=%d,op=%d)", idx, op);
+        return;
+    }
+    int had = 0, passed = 0;
+    apply_effects(app, ic, NULL, 0, json, &had, &passed);
 }
 
 /* ---- forward event 主处理(§6 按键行为 + Shift 单击/组合判定) ---- */
@@ -550,15 +597,10 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         return;
     }
 
-    /* 中文态 Shift+字母:大写字母无组词语义,原样直通(主流输入法行为) */
-    if (is_press && (ev->state & XCB_MOD_MASK_SHIFT) &&
-        (((sym >= (uint32_t)'A') && (sym <= (uint32_t)'Z')) ||
-         ((sym >= (uint32_t)'a') && (sym <= (uint32_t)'z')))) {
-        lyy_log(&app->log, "Shift+字母原样直通 keysym=0x%lx",
-                (unsigned long)sym);
-        xcb_im_forward_event(xs->im, ic, ev);
-        return;
-    }
+    /* 中文态 Shift+字母(2026-09-28 需求):不再原样直通,大写键值进组词
+     * 缓冲 —— 全大写敲入走大写候选通道(候选 1=原样大写、2=首字母大写、
+     * 3=全小写、4+=中文翻译),单一大写与混合大小写由 core 按既有通道处理。
+     * 与 Mode A(ibus)行为对齐:大写键值原样传给 core,继续走下方常态路径。 */
 
     if (!is_press) {
         /* 普通键 release 一律回放(应用需要配对事件) */
@@ -590,8 +632,9 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
     int had_content = 0;
     apply_effects(app, ic, ev, (uint32_t)sym, json, &had_content, NULL);
 
-    /* Shift:core 已按合同处理。有缓冲时 had_content=1,原串已上屏且本次
-     * Shift 到此消费完毕;只有空缓冲 Shift 才挂起单击判定并允许切英文。 */
+    /* Shift:core 已按合同处理。有缓冲时 had_content=1,原串已上屏且
+     * (shift_english=en 时)mode 效果已在 apply_effects 内关 trigger 转英文,
+     * 本次 Shift 到此消费完毕;只有空缓冲 Shift 才挂起单击判定并允许切英文。 */
     if (key == LKEY_SHIFTPRESS && !had_content && !st->shift_pending) {
         st->shift_pending = 1;
         app->shift_pending = 1;
@@ -645,6 +688,11 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         hide_preedit(app);
         break;
     case XCB_XIM_SET_IC_FOCUS: {
+        /* §15 菜单会话恢复:右键菜单期间被假焦的同一 IC 回来,
+           不重置引擎(候选右键操作的效果/缓冲需要保留) */
+        gboolean resume_menu =
+            app->xim.cand_op_ic && app->xim.cand_op_ic == ic;
+        app->xim.cand_op_ic = NULL;
         app->xim.focused_ic = ic;
         cancel_shift_pending(app);
         lyy_ai_reset(app); /* 新焦点:AI 会话不跨上下文延续 */
@@ -654,12 +702,14 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
                 st->shift_pending = 0;
                 st->combo_guard = 0;
             }
-            /* 新焦点:进入中文态(trigger on)并复位 core 缓冲(§6 reset) */
-            app->core.lyyime_reset(app->engine);
-            if (app->core.lyyime_mode(app->engine) != 0)
-                app->core.lyyime_toggle_mode(app->engine);
-            xcb_im_preedit_start(im, ic);
-            lyy_log(&app->log, "输入上下文获得焦点 → trigger on(中文态)");
+            if (!resume_menu) {
+                /* 新焦点:进入中文态(trigger on)并复位 core 缓冲(§6 reset) */
+                app->core.lyyime_reset(app->engine);
+                if (app->core.lyyime_mode(app->engine) != 0)
+                    app->core.lyyime_toggle_mode(app->engine);
+                xcb_im_preedit_start(im, ic);
+                lyy_log(&app->log, "输入上下文获得焦点 → trigger on(中文态)");
+            }
         }
         lyy_app_update_mode_ui(app);
         break;
@@ -667,11 +717,19 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
     case XCB_XIM_UNSET_IC_FOCUS:
         cancel_shift_pending(app);
         lyy_ai_reset(app);
-        if (app->xim.focused_ic == ic)
+        if (app->xim.focused_ic == ic) {
             app->xim.focused_ic = NULL;
-        if (lyy_core_ready(app))
-            app->core.lyyime_reset(app->engine);
-        hide_preedit(app);
+            /* §15 候选右键菜单的 GTK grab 会让客户端发 UNSET focus
+               (假焦):保留引擎缓冲与候选窗,记下 IC 供菜单 activate 回投 */
+            if (app->candwin.menu_open)
+                app->xim.cand_op_ic = ic;
+        }
+        if (!app->candwin.menu_open) {
+            app->xim.cand_op_ic = NULL; /* 真失焦:菜单会话标记失效 */
+            if (lyy_core_ready(app))
+                app->core.lyyime_reset(app->engine);
+            hide_preedit(app);
+        }
         break;
     case XCB_XIM_TRIGGER_NOTIFY: {
         xcb_im_trigger_notify_fr_t *nf = frame;

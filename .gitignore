@@ -19,3 +19,6 @@ __pycache__/
 # vendor 内的生成文件(Makefile 有生成兜底)
 /xim/vendor/xcb-imdkit/libxcb-imdkit.a
 /xim/vendor/xcb-imdkit/src/xcbimdkit_export.h
+
+# target 符号链接(CARGO_TARGET_DIR 重定向,.cargo/config.toml)
+/target

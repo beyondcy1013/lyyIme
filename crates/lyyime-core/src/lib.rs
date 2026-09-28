@@ -55,13 +55,14 @@ mod pinyin;
 mod rank;
 mod types;
 mod user_words;
+pub mod wordops;
 
-pub use config::{default_quick_actions, Config, QuickAction, QUICK_ACTIONS_MAX};
+pub use config::{default_quick_actions, Config, EnCommit, QuickAction, QUICK_ACTIONS_MAX};
 pub use engine::Engine;
 pub use error::Error;
 pub use ffi::effects_json;
 pub use punct::{to_chinese, QuoteState};
-pub use types::{CandKind, Candidate, Effect, LKey, Mode};
+pub use types::{CandKind, CandOp, Candidate, Effect, LKey, Mode};
 
 #[cfg(test)]
 mod tests {

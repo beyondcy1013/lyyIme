@@ -6,11 +6,13 @@ mod common;
 
 use common::{fixtures, TempDir};
 use lyyime_core::ffi::{
-    lyyime_cand, lyyime_cand_comment, lyyime_free, lyyime_mode, lyyime_new, lyyime_process_key,
-    lyyime_reset, lyyime_set_commit_after_four, lyyime_set_commit_unique_four,
-    lyyime_set_phrase_hint, lyyime_toggle_mode, LKEY_BACKSPACE, LKEY_CHAR,
-    LKEY_DIGIT, LKEY_ENTER, LKEY_ESC, LKEY_OTHER, LKEY_PAGEDOWN, LKEY_PAGEUP, LKEY_PUNCT,
-    LKEY_SHIFTPRESS, LKEY_SPACE,
+    lyyime_cand, lyyime_cand_comment, lyyime_free, lyyime_mode, lyyime_new,
+    lyyime_set_enter_english, lyyime_set_exact_char_freq_rank, lyyime_set_shift_english,
+    lyyime_process_key, lyyime_reset, lyyime_set_commit_after_four,
+    lyyime_set_commit_first_at_four, lyyime_set_commit_unique_four,
+    lyyime_set_phrase_hint, lyyime_toggle_mode,
+    LKEY_BACKSPACE, LKEY_CHAR, LKEY_DIGIT, LKEY_ENTER, LKEY_ESC, LKEY_OTHER, LKEY_PAGEDOWN,
+    LKEY_PAGEUP, LKEY_PUNCT, LKEY_SHIFTPRESS, LKEY_SPACE,
 };
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
@@ -228,6 +230,95 @@ fn ffi_模式切换与reset() {
 }
 
 #[test]
+fn ffi_英文上屏去向_回车临时与shift切模式() {
+    let mut eng = FfiEngine::new(&fixtures());
+    // 回车默认临时(enter_english = temp):上屏原串,无 mode 效果。
+    for c in "nihao".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_ENTER, 0);
+    assert!(json.contains("{\"t\":\"commit\",\"s\":\"nihao\"}"), "{json}");
+    assert!(!json.contains("\"t\":\"mode\""), "{json}");
+    assert_eq!(unsafe { lyyime_mode(eng.0) }, 0);
+
+    // Shift 默认 en(shift_english = en):上屏原串并切英文,效果流附 mode。
+    for c in "nihao".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_SHIFTPRESS, 0);
+    assert!(json.contains("{\"t\":\"commit\",\"s\":\"nihao\"}"), "{json}");
+    assert!(json.contains("{\"t\":\"mode\",\"m\":1}"), "{json}");
+    assert_eq!(unsafe { lyyime_mode(eng.0) }, 1);
+    assert_eq!(eng.key_char('n'), "[{\"t\":\"pass\"}]");
+    assert_eq!(unsafe { lyyime_toggle_mode(eng.0) }, 0);
+
+    // setter 回环:Shift 配成 temp 恢复"仅上屏"。
+    assert_eq!(unsafe { lyyime_set_shift_english(eng.0, 0) }, 0);
+    for c in "nihao".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_SHIFTPRESS, 0);
+    assert!(json.contains("{\"t\":\"commit\",\"s\":\"nihao\"}"), "{json}");
+    assert!(!json.contains("\"t\":\"mode\""), "{json}");
+    assert_eq!(unsafe { lyyime_mode(eng.0) }, 0);
+
+    // 回车配成 en:上屏并切英文。
+    assert_eq!(unsafe { lyyime_set_enter_english(eng.0, 1) }, 1);
+    for c in "nihao".chars() {
+        eng.key_char(c);
+    }
+    let json = eng.key(LKEY_ENTER, 0);
+    assert!(json.contains("{\"t\":\"mode\",\"m\":1}"), "{json}");
+    assert_eq!(unsafe { lyyime_mode(eng.0) }, 1);
+    // NULL 引擎:安全忽略,返回 0。
+    assert_eq!(unsafe { lyyime_set_enter_english(std::ptr::null_mut(), 1) }, 0);
+    assert_eq!(unsafe { lyyime_set_shift_english(std::ptr::null_mut(), 1) }, 0);
+}
+
+#[test]
+fn ffi_精确单字频率排位开关() {
+    // 带 char_tier.tsv + 语料的临时词库:低频「氢」(aaa 全码)默认降档,
+    // 首选是 aaaa 前缀词组「恭恭敬敬」;关掉开关恢复首选氢。
+    let td = TempDir::new();
+    for f in [
+        "wubi.tsv",
+        "pinyin_char.tsv",
+        "pinyin_phrase.tsv",
+        "suggestion.tsv",
+        "english.tsv",
+        "meta.json",
+    ] {
+        let src = fixtures().join(f);
+        if src.exists() {
+            std::fs::copy(&src, td.join(f)).unwrap();
+        }
+    }
+    let mut py = std::fs::read_to_string(fixtures().join("pinyin_char.tsv")).unwrap();
+    py.push_str("qing\t氢\t500\n");
+    std::fs::write(td.join("pinyin_char.tsv"), py).unwrap();
+    std::fs::write(td.join("char_tier.tsv"), "氢\t1\n").unwrap();
+    let mut wb = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wb.push_str("aaa\t氢\t3000\n");
+    std::fs::write(td.join("wubi.tsv"), wb).unwrap();
+
+    let mut eng = FfiEngine::new(&td.path);
+    for c in "aaa".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(eng.cand(0).0, "恭恭敬敬", "默认开:低频氢让位词组");
+    // 关闭(setter 回环返回 0):恢复精确单字恒居首位。
+    assert_eq!(unsafe { lyyime_set_exact_char_freq_rank(eng.0, 0) }, 0);
+    eng.key(LKEY_ESC, 0);
+    for c in "aaa".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(eng.cand(0).0, "氢", "关闭后恢复首选氢");
+    // 重新打开返回 1;NULL 引擎安全忽略。
+    assert_eq!(unsafe { lyyime_set_exact_char_freq_rank(eng.0, 1) }, 1);
+    assert_eq!(unsafe { lyyime_set_exact_char_freq_rank(std::ptr::null_mut(), 1) }, 0);
+}
+
+#[test]
 fn ffi_四码顶屏开关() {
     let eng = FfiEngine::new(&fixtures());
     let mut eng = eng;
@@ -239,7 +330,8 @@ fn ffi_四码顶屏开关() {
     assert!(!json.contains("{\"t\":\"commit\"}"), "{json}");
 
     eng.key(LKEY_ESC, 0);
-    // 本测单独验证四码顶屏:先关掉四码唯一上屏,缓冲才能停在四码。
+    // 本测单独验证四码顶屏:先关掉四码自动上屏,缓冲才能停在四码。
+    assert_eq!(unsafe { lyyime_set_commit_first_at_four(eng.0, 0) }, 0);
     assert_eq!(unsafe { lyyime_set_commit_unique_four(eng.0, 0) }, 0);
     assert_eq!(unsafe { lyyime_set_commit_after_four(eng.0, 1) }, 1);
     for c in ['a', 'a', 'a', 'a'] {
@@ -268,8 +360,9 @@ fn ffi_四码唯一上屏开关() {
         "第 4 键应直接上屏:{json}"
     );
     assert!(json.contains("\"t\":\"preedit\""), "上屏应伴随预编辑清除");
-    // 关闭后第 4 键保持组合,仍由空格顶屏。
+    // 四码自动上屏全关:第 4 键保持组合,仍由空格顶屏。
     eng.key(LKEY_ESC, 0);
+    assert_eq!(unsafe { lyyime_set_commit_first_at_four(eng.0, 0) }, 0);
     assert_eq!(unsafe { lyyime_set_commit_unique_four(eng.0, 0) }, 0);
     for c in "wqvb".chars() {
         eng.key_char(c);
@@ -316,8 +409,10 @@ fn ffi_key_id映射_其余控制键() {
     assert_eq!(eng.key(LKEY_SHIFTPRESS, 0), "[{\"t\":\"consumed\"}]");
     // 未知 key_id 按 Other 处理。
     assert_eq!(eng.key(99, 0), "[{\"t\":\"pass\"}]");
-    // 大写字母宿主必须先小写化;core 防御性直通。
-    assert_eq!(eng.key(LKEY_CHAR, 'A' as u32), "[{\"t\":\"pass\"}]");
+    // 大写字母:core 接收并走"全大写输入"候选通道(2026-09-28 需求;
+    // preedit 保留敲入原形,候选为大写/首字母大写/小写变体)。
+    let j = eng.key(LKEY_CHAR, 'A' as u32);
+    assert!(j.contains("\"t\":\"preedit\",\"s\":\"A\""), "{j}");
 }
 
 #[test]
@@ -525,4 +620,17 @@ impl FfiEngine {
         }
         out
     }
+}
+
+#[test]
+fn ffi_大写字母原样进入大写候选() {
+    let mut eng = FfiEngine::new(&fixtures());
+    for c in "WHO".chars() {
+        eng.key_char(c);
+    }
+    assert_eq!(eng.cand(0), ("WHO".to_string(), "en".to_string()));
+    assert_eq!(eng.cand(1), ("Who".to_string(), "en".to_string()));
+    assert_eq!(eng.cand(2), ("who".to_string(), "en".to_string()));
+    assert_eq!(eng.cand(3), ("世界卫生组织".to_string(), "WHO".to_string()));
+    assert_eq!(eng.cand(4), ("谁".to_string(), "WHO".to_string()));
 }

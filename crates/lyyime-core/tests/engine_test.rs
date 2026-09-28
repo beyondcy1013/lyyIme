@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use lyyime_core::{CandKind, Config, Effect, Engine, LKey, Mode};
+use lyyime_core::{CandKind, Config, Effect, EnCommit, Engine, LKey, Mode};
 use std::path::Path;
 
 // ======================================================================
@@ -43,7 +43,8 @@ fn 单文件缺失_只降级英文通道() {
     }
     let mut eng = Engine::new(&td.path).unwrap();
     assert!(eng.is_loaded(), "其余通道仍在");
-    type_str(&mut eng, "hello");
+    // "thex" 全程无中文命中(英文通道缺失时也就没有任何候选)。
+    type_str(&mut eng, "thex");
     assert!(page_texts(&eng).is_empty(), "英文通道应被降级");
     let mut eng2 = Engine::new(&td.path).unwrap();
     type_str(&mut eng2, "a");
@@ -92,7 +93,8 @@ fn 五笔精确_优先于前缀() {
 fn 四码后续字母_开启后先上屏当前选中() {
     let mut eng = engine_with(Config {
         commit_on_extra_after_four: true,
-        // 本测单独验证“四码顶屏”:关掉四码唯一上屏,保证缓冲能停在四码。
+        // 本测单独验证“四码后首字母顶屏”:关掉四码自动上屏,保证缓冲能停在四码。
+        commit_first_at_four: false,
         commit_unique_four: false,
         ..Config::default()
     });
@@ -106,12 +108,75 @@ fn 四码后续字母_开启后先上屏当前选中() {
 }
 
 #[test]
-fn 四码后续字母_默认继续前缀组词() {
+fn 四码后续字母_仍有中文命中则继续组词() {
+    // 四码顶屏默认关闭:只要扩展后仍有中文命中(拼音/简拼渐进),
+    // 缓冲照常加长——"nihaoma" 逐键命中 ni/niha/nihao/nihaoma 一路成词。
     let mut eng = engine();
-    type_str(&mut eng, "wgli");
+    type_str(&mut eng, "nihaoma");
+    assert_eq!(eng.buffer(), "nihaoma");
+    assert!(page_texts(&eng).contains(&"你好吗".to_string()));
+    // 而死码扩展("wgli" 在 "w" 之后即无中文命中)不进缓冲,见
+    // 四码后继续输入死码_吞键保留候选。
+}
+
+#[test]
+fn 四码后继续输入死码_吞键保留候选() {
+    // "aaaa" 在夹具中只有唯一候选,关掉四码自动上屏让缓冲停在四码;
+    // 此后敲 'g' 把缓冲推进完全无候选的死胡同 → 吞键,候选状态原样保留。
+    let mut eng = engine_with(Config {
+        commit_first_at_four: false,
+        commit_unique_four: false,
+        ..Config::default()
+    });
+    type_str(&mut eng, "aaaa");
+    let before = page_texts(&eng);
+    assert_eq!(before.first().map(String::as_str), Some("恭恭敬敬"));
     let fx = eng.process_key(LKey::Char('g'));
+    assert!(commits(&fx).is_empty(), "死码字母不得产生上屏");
+    assert!(fx.iter().any(|e| matches!(e, Effect::Consumed)), "fx={fx:?}");
+    assert_eq!(eng.buffer(), "aaaa", "死码字母不进缓冲");
+    assert_eq!(page_texts(&eng), before, "死码字母不得清空中文候选");
+    // 连敲仍是吞键;空格照旧顶屏四码首选。
+    eng.process_key(LKey::Char('x'));
+    assert_eq!(eng.buffer(), "aaaa");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["恭恭敬敬".to_string()]);
+}
+
+#[test]
+fn 不足四码的死码字母同样保留候选() {
+    // 死码保护按"是否还有中文命中"判定,不限于四码:"wq" 有中文命中,
+    // 'x' 使缓冲无候选 → 吞键;回退一格仍可选词。
+    let mut eng = engine_with(Config {
+        commit_unique_four: false,
+        ..Config::default()
+    });
+    type_str(&mut eng, "wq");
+    let before = page_texts(&eng);
+    assert!(before.contains(&"你".to_string()));
+    let fx = eng.process_key(LKey::Char('x'));
     assert!(commits(&fx).is_empty());
-    assert_eq!(eng.buffer(), "wglig");
+    assert_eq!(eng.buffer(), "wq");
+    assert_eq!(page_texts(&eng), before);
+    // Backspace 后正常回退组合。
+    eng.process_key(LKey::Backspace);
+    assert_eq!(eng.buffer(), "w");
+}
+
+#[test]
+fn 四码唯一_英文候选不自动上屏() {
+    // "hell" 在夹具中唯一命中英文词 hello:英文候选不参与四码唯一上屏,
+    // 第 4 键保持组合展示候选,继续敲完 hello 后空格照常顶屏。
+    let mut eng = engine();
+    let fx = type_str(&mut eng, "hell");
+    assert!(commits(&fx).is_empty(), "英文唯一候选不得自动上屏");
+    assert_eq!(eng.buffer(), "hell");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("hello"));
+    let fx = eng.process_key(LKey::Char('o'));
+    assert!(commits(&fx).is_empty());
+    assert_eq!(eng.buffer(), "hello");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["hello".to_string()]);
 }
 
 // ----------------------------------------------------------------------
@@ -133,8 +198,61 @@ fn 四码唯一_免空格直接上屏() {
 }
 
 #[test]
-fn 四码唯一_关闭后保持渐进组合() {
+fn 四码首选_有重码也直接上屏() {
+    // wqvb 有两个候选(你好/您好):默认四码首选上屏,第 4 键直接上屏首选,
+    // 有重码不再等空格。
+    let mut eng = engine();
+    type_str(&mut eng, "wqv");
+    let fx = eng.process_key(LKey::Char('b'));
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
+    assert!(eng.buffer().is_empty());
+    assert!(eng.flush_page().is_empty(), "上屏后候选一并清空");
+}
+
+#[test]
+fn 四码首选_拼音与英文中间态不打断() {
+    // "niha" 是 nihao 的中间态、首选来自拼音通道:四码首选上屏只对
+    // 五笔命中触发,拼音长码不被劫持;"hell" 首选英文候选同样不触发。
+    let mut eng = engine();
+    let fx = type_str(&mut eng, "niha");
+    assert!(commits(&fx).is_empty(), "拼音中间态不得四码上屏");
+    assert_eq!(eng.buffer(), "niha");
+    eng.process_key(LKey::Char('o'));
+    assert_eq!(eng.buffer(), "nihao", "继续打完 nihao 正常组词");
+    assert!(page_texts(&eng).contains(&"你好".to_string()));
+}
+
+#[test]
+fn 四码首选_关闭后回退唯一上屏判定() {
+    // 关掉 commit_first_at_four:多候选四码保留组合;候选唯一时仍由
+    // commit_unique_four 上屏(两个开关独立的回退关系)。
+    // 私有夹具:gcft 同时命中「致」与「死难者」两个重码。
+    let td = TempDir::new();
+    let mut wubi = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wubi.push_str("gcft\t致\t900\ngcft\t死难者\t1200\n");
+    std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            commit_first_at_four: false,
+            ..Config::default()
+        },
+    );
+    let fx = type_str(&mut eng, "gcft");
+    assert!(commits(&fx).is_empty(), "重码四码不上屏:{fx:?}");
+    assert_eq!(eng.buffer(), "gcft");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["致".to_string()]);
+    // 唯一候选仍走唯一上屏:wqiy 在夹具中只有一个候选「你」。
+    let fx = type_str(&mut eng, "wqiy");
+    assert_eq!(commits(&fx), vec!["你".to_string()], "唯一候选四码仍自动上屏");
+}
+
+#[test]
+fn 四码自动上屏_全关后保持渐进组合() {
+    // commit_first_at_four 与 commit_unique_four 都关掉,四码后缓冲保留候选。
     let mut eng = engine_with(Config {
+        commit_first_at_four: false,
         commit_unique_four: false,
         ..Config::default()
     });
@@ -186,8 +304,9 @@ fn 词组提示_同码词组打过不再提示() {
     let fx = type_str(&mut eng, "wqvb");
     assert_eq!(commits(&fx), vec!["你好".to_string()]);
     assert!(hints(&fx).is_empty(), "同码打过不应提示:{:?}", hints(&fx));
-    // 空格确认路径同样不提示。
+    // 空格确认路径同样不提示(关四码自动上屏,缓冲才能停在四码等空格)。
     let mut eng2 = engine_with(Config {
+        commit_first_at_four: false,
         commit_unique_four: false,
         ..Config::default()
     });
@@ -242,9 +361,10 @@ fn 词组提示_关闭后无提示() {
 fn 词组提示_字母直通不提示() {
     let mut eng = engine();
     // 原始字母上屏不含汉字:不进造词/提示历史。
-    type_str(&mut eng, "abc");
+    // ("abc" 在 "a" 处即有中文命中,'b' 属死码会被吞;改用全程无命中的 "thex"。)
+    type_str(&mut eng, "thex");
     let fx = eng.process_key(LKey::Enter);
-    assert_eq!(commits(&fx), vec!["abc".to_string()]);
+    assert_eq!(commits(&fx), vec!["thex".to_string()]);
     assert!(hints(&fx).is_empty());
 }
 
@@ -283,8 +403,9 @@ fn 五笔前缀渐进_词组出现() {
 
 #[test]
 fn 五笔四码词组_完全命中第一() {
-    // 本测验证四码词组排序本身:关掉四码唯一上屏,缓冲才能停在四码展示候选。
+    // 本测验证四码词组排序本身:关掉四码自动上屏,缓冲才能停在四码展示候选。
     let mut eng = engine_with(Config {
+        commit_first_at_four: false,
         commit_unique_four: false,
         ..Config::default()
     });
@@ -293,9 +414,107 @@ fn 五笔四码词组_完全命中第一() {
     assert_eq!(page.first().map(String::as_str), Some("恭恭敬敬"));
 }
 
+// ======================================================================
+// 精确层单字按词频排位(exact_char_freq_rank,默认开;§5)
+// ======================================================================
+
+/// 带 GB2312 分档表与语料增补的临时词库:工(高频,语料 ~5e6)、
+/// 氢(低频,语料 500;wubi aaa 全码 3000),验证低频全码单字让位词组。
+fn engine_with_tier() -> Engine {
+    let td = TempDir::new();
+    for f in [
+        "wubi.tsv",
+        "pinyin_char.tsv",
+        "pinyin_phrase.tsv",
+        "suggestion.tsv",
+        "english.tsv",
+        "meta.json",
+    ] {
+        let src = fixtures().join(f);
+        if src.exists() {
+            std::fs::copy(&src, td.join(f)).unwrap();
+        }
+    }
+    let mut py = std::fs::read_to_string(fixtures().join("pinyin_char.tsv")).unwrap();
+    py.push_str("gong\t工\t5000000\nqing\t氢\t500\n");
+    std::fs::write(td.join("pinyin_char.tsv"), py).unwrap();
+    std::fs::write(td.join("char_tier.tsv"), "工\t1\n氢\t1\n").unwrap();
+    let mut wb = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wb.push_str("aaa\t氢\t3000\n");
+    std::fs::write(td.join("wubi.tsv"), wb).unwrap();
+    engine_with_fixtures(&td.path, Config::default())
+}
+
+#[test]
+fn 精确单字频率排位_低频字让位词组() {
+    // 默认开:aaa 全码精确命中「氢」(语料 f≈0.4 < 0.5)按频率降档,
+    // 首选让位 aaaa 前缀词组「恭恭敬敬」;氢仍在页内可翻选。
+    let mut eng = engine_with_tier();
+    type_str(&mut eng, "aaa");
+    let page = page_texts(&eng);
+    assert_eq!(page.first().map(String::as_str), Some("恭恭敬敬"), "{page:?}");
+    assert!(page.contains(&"氢".to_string()), "氢应保留在候选页:{page:?}");
+}
+
+#[test]
+fn 精确单字频率排位_高频字保持恒居首位() {
+    // 语料常用字「工」(f≈0.99 ≥ 0.5)不经降档:a 的首选仍是工。
+    let mut eng = engine_with_tier();
+    type_str(&mut eng, "a");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("工"));
+}
+
+#[test]
+fn 精确单字频率排位_关闭恢复恒居首位() {
+    // 关闭开关:氢回到精确层顶部,aaa 首选恢复为氢(旧行为)。
+    let td = TempDir::new();
+    for f in [
+        "wubi.tsv",
+        "pinyin_char.tsv",
+        "pinyin_phrase.tsv",
+        "suggestion.tsv",
+        "english.tsv",
+        "meta.json",
+    ] {
+        let src = fixtures().join(f);
+        if src.exists() {
+            std::fs::copy(&src, td.join(f)).unwrap();
+        }
+    }
+    let mut py = std::fs::read_to_string(fixtures().join("pinyin_char.tsv")).unwrap();
+    py.push_str("qing\t氢\t500\n");
+    std::fs::write(td.join("pinyin_char.tsv"), py).unwrap();
+    std::fs::write(td.join("char_tier.tsv"), "氢\t1\n").unwrap();
+    let mut wb = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wb.push_str("aaa\t氢\t3000\n");
+    std::fs::write(td.join("wubi.tsv"), wb).unwrap();
+    let mut eng = engine_with_fixtures(&td.path, Config {
+        exact_char_freq_rank: false,
+        ..Config::default()
+    });
+    type_str(&mut eng, "aaa");
+    let page = page_texts(&eng);
+    assert_eq!(page.first().map(String::as_str), Some("氢"), "{page:?}");
+}
+
+#[test]
+fn 精确单字频率排位_无分档表不触发() {
+    // 默认 fixtures 无 char_tier.tsv(旧数据目录):开关开也不降档(回退路径)。
+    let mut eng = engine();
+    type_str(&mut eng, "a");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("工"));
+    let top = &eng.flush_page()[0];
+    assert!(
+        (60.0..70.0).contains(&top.score),
+        "无分档表应保持精确层,实为 {}",
+        top.score
+    );
+}
+
 #[test]
 fn 五笔空格顶屏首选() {
     let mut eng = engine_with(Config {
+        commit_first_at_four: false,
         commit_unique_four: false,
         ..Config::default()
     });
@@ -316,6 +535,9 @@ fn 四码单字_优先于同码词组与用户词() {
     let mut eng = engine_with_fixtures(
         &td.path,
         Config {
+            // 本测验证四码候选排序:关掉自动上屏,缓冲才能停在四码。
+            commit_first_at_four: false,
+            commit_unique_four: false,
             user_dict: Some(td.join("user.tsv")),
             ..Config::default()
         },
@@ -346,7 +568,19 @@ fn 四码生僻单字_按GB2312分档沉到词组后() {
     wubi.push_str("thgj\t牏\t1000\nthgj\t㸟\t95\nthgj\t处理\t500\nxxyy\t引\t1000\nxxyy\t引子\t1500\n");
     std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
     std::fs::write(td.join("char_tier.tsv"), "引\t1\n").unwrap();
-    let mut eng = engine_with_fixtures(&td.path, Config::default());
+    // 词频序下"常用字压词组"需要语料佐证:给引补一条高频语料(f→满值)。
+    let mut py = std::fs::read_to_string(fixtures().join("pinyin_char.tsv")).unwrap();
+    py.push_str("yin\t引\t900000000\n");
+    std::fs::write(td.join("pinyin_char.tsv"), py).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            // 本测验证四码候选排序:关掉自动上屏,缓冲才能停在四码。
+            commit_first_at_four: false,
+            commit_unique_four: false,
+            ..Config::default()
+        },
+    );
 
     type_str(&mut eng, "thgj");
     let texts = page_texts(&eng);
@@ -365,7 +599,7 @@ fn 四码生僻单字_按GB2312分档沉到词组后() {
     assert_eq!(
         texts.first().map(String::as_str),
         Some("引"),
-        "一级常用字压过词组:{texts:?}"
+        "语料高频字按词频序压过词组:{texts:?}"
     );
 }
 
@@ -382,7 +616,15 @@ fn 四码单字_按语料频次排_生僻字沉底() {
         "yin\t引\t900000000\nyin\t靷\t5000\n",
     )
     .unwrap();
-    let mut eng = engine_with_fixtures(&td.path, Config::default());
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            // 本测验证四码候选排序:关掉自动上屏,缓冲才能停在四码。
+            commit_first_at_four: false,
+            commit_unique_four: false,
+            ..Config::default()
+        },
+    );
 
     type_str(&mut eng, "xxyy");
     let texts = page_texts(&eng);
@@ -749,6 +991,46 @@ fn 数字选词_越界吞掉不提交() {
 }
 
 #[test]
+fn 数字0_选第10个候选() {
+    // 临时词库:音节 "a" 给 12 个单字(拼音通道),页大小 10 → 首页满 10 条。
+    let td = TempDir::new();
+    for f in [
+        "wubi.tsv",
+        "pinyin_phrase.tsv",
+        "suggestion.tsv",
+        "english.tsv",
+        "meta.json",
+    ] {
+        let src = fixtures().join(f);
+        if src.exists() {
+            std::fs::copy(&src, td.join(f)).unwrap();
+        }
+    }
+    let mut py = String::new();
+    for (i, ch) in ['啊', '阿', '吖', '腌', '锕', '嗄', '垯', '怛', '妲', '汏', '垚', '炏']
+        .iter()
+        .enumerate()
+    {
+        py.push_str(&format!("a\t{}\t{}\n", ch, 1000 - i as u64));
+    }
+    std::fs::write(td.join("pinyin_char.tsv"), py).unwrap();
+    let mut eng = engine_with_fixtures(&td.path, Config::default());
+    type_str(&mut eng, "a");
+    let page = page_texts(&eng);
+    assert_eq!(page.len(), 10, "页大小默认 10:{page:?}");
+    let tenth = page[9].clone();
+    // 0 选中第 10 个;页内第 11 个不存在(翻页后另测)。
+    let fx = eng.process_key(LKey::Digit(0));
+    assert_eq!(commits(&fx), vec![tenth], "0 应选第 10 个候选");
+    // 候选不足 10 条:0 无对象,吞键不提交。
+    let mut eng2 = engine();
+    type_str(&mut eng2, "ni"); // 2 个候选
+    let fx = eng2.process_key(LKey::Digit(0));
+    assert!(is_consumed(&fx));
+    assert_eq!(commits(&fx), Vec::<String>::new());
+}
+
+#[test]
 fn 数字键_无候选放行() {
     let mut eng = engine();
     assert!(is_pass(&eng.process_key(LKey::Digit(1))));
@@ -768,7 +1050,12 @@ fn select_candidate_api_选中与越界() {
 
 #[test]
 fn 翻页_等号下一页减号上一页() {
-    let mut eng = engine();
+    // 显式 5 条/页(h 开头的音节:ha/hao/hai/han/hei/he → 9 个单字,分两页);
+    // 默认页大小 10 的翻页语义相同,不在此重复。
+    let mut eng = engine_with(Config {
+        page_size: 5,
+        ..Config::default()
+    });
     type_str(&mut eng, "h"); // h 开头的音节:ha/hao/hai/han/hei/he → 9 个单字
     assert_eq!(eng.page_count(), 2, "page_size=5,9 个候选应有两页");
     // 同层按归一频率排序:和(6000000)第一,好(5000)随其后。
@@ -811,7 +1098,29 @@ fn enter_有缓冲上屏原字母() {
     type_str(&mut eng, "nihao");
     let fx = eng.process_key(LKey::Enter);
     assert_eq!(commits(&fx), vec!["nihao".to_string()]);
+    // 默认(enter_english = temp):临时英文,上屏后保持中文模式。
+    assert!(!fx.iter().any(|e| matches!(e, Effect::ModeChanged(_))));
+    assert_eq!(eng.mode(), Mode::Chinese);
     assert!(eng.buffer().is_empty());
+    // 后续字母仍进中文组词缓冲(单个英文词输入完毕,继续打中文)。
+    type_str(&mut eng, "ni");
+    assert!(!page_texts(&eng).is_empty());
+}
+
+#[test]
+fn enter_配置en_上屏并切英文模式() {
+    let mut eng = engine_with(Config {
+        enter_english: EnCommit::English,
+        ..Config::default()
+    });
+    type_str(&mut eng, "nihao");
+    let fx = eng.process_key(LKey::Enter);
+    assert_eq!(commits(&fx), vec!["nihao".to_string()]);
+    assert!(fx
+        .iter()
+        .any(|e| matches!(e, Effect::ModeChanged(Mode::English))));
+    assert_eq!(eng.mode(), Mode::English);
+    assert!(is_pass(&eng.process_key(LKey::Char('n'))));
 }
 
 #[test]
@@ -851,11 +1160,12 @@ fn backspace_空缓冲放行() {
 #[test]
 fn 缓冲上限12字母_超出吞掉() {
     let mut eng = engine();
-    type_str(&mut eng, "abcdefghijkl"); // 12 个
-    assert_eq!(eng.buffer(), "abcdefghijkl");
+    // "qwertyuioplk" 全程无中文命中("a" 起头的串会在死码处被吞键)。
+    type_str(&mut eng, "qwertyuioplk"); // 12 个
+    assert_eq!(eng.buffer(), "qwertyuioplk");
     let fx = eng.process_key(LKey::Char('m'));
     assert!(is_consumed(&fx));
-    assert_eq!(eng.buffer(), "abcdefghijkl");
+    assert_eq!(eng.buffer(), "qwertyuioplk");
 }
 
 #[test]
@@ -869,10 +1179,14 @@ fn 其它键_有缓冲先清缓冲再放行() {
 }
 
 #[test]
-fn 大写字母_防御性直通() {
+fn 大写字母_进入大写候选通道() {
+    // 2026-09-28 需求:Shift 敲入的大写不再防御性直通,进入大写候选通道
+    // (core 内部小写化组词,buf_raw 镜像原形;候选 = 大写 → 首字母大写 → 小写)。
     let mut eng = engine();
-    assert!(is_pass(&eng.process_key(LKey::Char('A'))));
-    assert!(eng.buffer().is_empty());
+    let fx = eng.process_key(LKey::Char('A'));
+    assert!(!is_pass(&fx), "大写字母应被消费进入大写候选");
+    assert_eq!(eng.buffer(), "a", "内部以小写组词");
+    assert_eq!(page_texts(&eng), ["A", "a"]);
 }
 
 #[test]
@@ -885,16 +1199,38 @@ fn shiftpress_吞键_切模式由宿主调_toggle_mode() {
 }
 
 #[test]
-fn shift_有缓冲先上屏英文原串() {
+fn shift_有缓冲上屏并切英文模式() {
     let mut eng = engine();
     type_str(&mut eng, "nihao");
     let fx = eng.process_key(LKey::ShiftPress);
     assert_eq!(commits(&fx), vec!["nihao".to_string()]);
+    // 新默认(shift_english = en):上屏即进入英文模式,效果流附 mode。
+    assert!(fx
+        .iter()
+        .any(|e| matches!(e, Effect::ModeChanged(Mode::English))));
+    assert_eq!(eng.mode(), Mode::English);
     assert!(eng.buffer().is_empty());
     assert!(page_texts(&eng).is_empty());
+    // 英文态:后续字母直通。
+    assert!(is_pass(&eng.process_key(LKey::Char('n'))));
     // 空缓冲的 Shift 仍由宿主判定单击后切模式;core 只吞键。
     assert!(is_consumed(&eng.process_key(LKey::ShiftPress)));
+}
+
+#[test]
+fn shift_配置temp_仅上屏保持中文() {
+    let mut eng = engine_with(Config {
+        shift_english: EnCommit::Temp,
+        ..Config::default()
+    });
+    type_str(&mut eng, "nihao");
+    let fx = eng.process_key(LKey::ShiftPress);
+    assert_eq!(commits(&fx), vec!["nihao".to_string()]);
+    assert!(!fx.iter().any(|e| matches!(e, Effect::ModeChanged(_))));
     assert_eq!(eng.mode(), Mode::Chinese);
+    // 后续字母仍进中文组词缓冲。
+    type_str(&mut eng, "ni");
+    assert!(!page_texts(&eng).is_empty());
 }
 
 #[test]

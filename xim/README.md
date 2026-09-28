@@ -39,7 +39,8 @@ xim/
    —— trigger on 时 client 转发 KeyPress;KeyRelease 是否转发依赖
    `SET_EVENT_MASK.forward_event_mask`,server 必须在 `xcb_im_create` 显式传
    `KEY_PRESS|KEY_RELEASE`(默认仅 PRESS)。
-3. **Shift 行为**:按下即喂 core——有缓冲立即上屏英文原串;空缓冲吞键并挂起
+3. **Shift 行为**:按下即喂 core——有缓冲立即上屏英文原串,且(默认
+   `shift_english=en`,§6)mode 效果即时关 trigger 转英文直通;空缓冲吞键并挂起
    单击判定,优先用 Shift release 确认(到达即判定);若客户端不转发 release,
    退化为 280ms 时间窗(窗内无其它键即单击)。off→on 切换后 400ms 内到达的
    Shift 掩码键判定为组合并回退英文(键事件自带 ShiftMask,应用侧无感)。

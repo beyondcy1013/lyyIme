@@ -33,7 +33,22 @@ STUB
 chmod +x "$WORK/stub-shot"
 export LYYIME_SHOT="$WORK/stub-shot"
 
-export DISPLAY=:98
+# 自定义查询(场景 G4):config.toml 预写桩网址({q} 占位符),PATH 前置桩
+# xdg-open 记录被拉起的网址 → 断言 {q} 已代入候选词(宿主侧动作)
+QUERY_MARKER="$WORK/query-marker"
+mkdir -p "$WORK/bin" "$HOME/.config/lyyime"
+cat > "$WORK/bin/xdg-open" <<STUB
+#!/usr/bin/env bash
+echo "\$1" >>"$QUERY_MARKER"
+STUB
+chmod +x "$WORK/bin/xdg-open"
+export PATH="$WORK/bin:$PATH"
+cat > "$HOME/.config/lyyime/config.toml" <<'CFG'
+custom_query_label = "查词典"
+custom_query_url = "https://dict.example.test/lookup?q={q}"
+CFG
+
+export DISPLAY="${LYYIME_E2E_DISPLAY:-:98}"
 export XMODIFIERS=@im=lyyime
 export GTK_IM_MODULE=xim
 export LANG=zh_CN.utf8 LC_ALL=zh_CN.utf8
@@ -84,16 +99,19 @@ echo "== [1/9] 构建 =="
 make -C "$XIM_DIR" all test >/dev/null
 [[ -f "$STUB_LIB" ]] || fail "桩库未生成:$STUB_LIB"
 
-echo "== [2/9] 清理并启动 Xvfb :98 =="
-if [[ -f /tmp/.X98-lock ]]; then
-    oldpid="$(cat /tmp/.X98-lock 2>/dev/null || true)"
+echo "== [2/9] 清理并启动 Xvfb $DISPLAY =="
+XDNUM="${DISPLAY%%.*}"; XDNUM="${XDNUM#:}"
+XSOCK="/tmp/.X11-unix/X${XDNUM}"
+XLOCK="/tmp/.X${XDNUM}-lock"
+if [[ -f "$XLOCK" ]]; then
+    oldpid="$(cat "$XLOCK" 2>/dev/null || true)"
     [[ -n "$oldpid" ]] && kill "$oldpid" 2>/dev/null || true
-    rm -f /tmp/.X98-lock
+    rm -f "$XLOCK"
 fi
-rm -f /tmp/.X11-unix/X98
-Xvfb :98 -screen 0 1024x768x24 -nolisten tcp &
+rm -f "$XSOCK"
+Xvfb "$DISPLAY" -screen 0 1024x768x24 -nolisten tcp &
 XVFB_PID=$!
-for _ in $(seq 1 50); do [[ -S /tmp/.X11-unix/X98 ]] && break; sleep 0.1; done
+for _ in $(seq 1 50); do [[ -S "$XSOCK" ]] && break; sleep 0.1; done
 
 echo "== [3/9] 启动 lyyime-xim(桩库) =="
 LYYIME_CORE_LIB="$STUB_LIB" "$XIM_DIR/build/bin/lyyime-xim" >"$WORK/xim.stdout" 2>&1 &
@@ -102,7 +120,7 @@ wait_log "XIM server ready"
 echo "[e2e] XIM server 就绪(pid=$XIM_PID)"
 
 echo "== [4/9] 启动 GTK Entry 客户端 =="
-"$XIM_DIR/build/tests/e2e_client" "$BUFFER" 30 >"$CLIENT_LOG" 2>"$WORK/client.stderr" &
+"$XIM_DIR/build/tests/e2e_client" "$BUFFER" 120 >"$CLIENT_LOG" 2>"$WORK/client.stderr" &
 CLIENT_PID=$!
 wait_log "XIM client 已连接"
 sleep 0.8
@@ -180,7 +198,7 @@ xdotool key space
 wait_buffer "你号abc候选1拟好候选1ABn候选1" 8
 echo "PASS E:CapsLock 大写态直通 AB/Shift→n,关闭后组词恢复"
 
-echo "== [10/11] F:截屏热键(Ctrl+Alt+A)拉起 lyyime-shot(合同 §13) =="
+echo "== [10/12] F:截屏热键(Ctrl+Alt+A)拉起 lyyime-shot(合同 §13) =="
 rm -f "$SHOT_MARKER"
 xdotool key ctrl+alt+a
 for _ in $(seq 1 50); do [[ -f "$SHOT_MARKER" ]] && break; sleep 0.1; done
@@ -191,9 +209,116 @@ wait_log "已拉起截屏助手" 5
 wait_buffer "你号abc候选1拟好候选1ABn候选1" 2
 echo "PASS F:截屏热键命中 → 拉起桩助手并吞键(缓冲不变)"
 
-echo "== [11/11] 汇总 =="
+echo "== [11/12] G:候选右键菜单(§15):悬停冻结+菜单三项(桩确定性) =="
+# 交互模型(实测):候选窗跟随指针 → 把指针移进窗内 → 悬停冻结 →
+# 右键行 → GTK 菜单在指针处弹出 → 指针点菜单项(方向键会被转发给引擎,
+# 不走菜单导航,故必须点选)。
+# 行几何:窗口顶部 ≈38px 头部,其下等分候选行;行 i 中心 ≈ Y+38+(H-38)(i+0.5)/N。
+# 菜单:宽 ~114,高 ~95,三项中心 ≈ MY+16 / MY+47 / MY+79。
+
+candwin_geom() { # → "X Y W H"(取最宽的 lyyime-xim 顶层窗)
+    xwininfo -root -children | grep '"lyyime-xim"' | awk '{print $1}' \
+    | while read -r w; do
+        xwininfo -id "$w" -stats 2>/dev/null | awk \
+            -v id="$w" '/Absolute upper-left X/{x=$4}
+                        /Absolute upper-left Y/{y=$4}
+                        /Width/{wd=$2}
+                        /Height/{h=$2}
+                        END{print wd, id, x, y, h}'
+      done | sort -rn | awk 'NR==1{print $3, $4, $1, $5}'
+}
+
+menu_geom() { # → "X Y W H"(~114x95(3项)~126(4项) 的 lyyime-xim 窗,且非候选窗)
+    xwininfo -root -children | grep '"lyyime-xim"' | awk '{print $1}' \
+    | while read -r w; do
+        xwininfo -id "$w" -stats 2>/dev/null | awk \
+            -v id="$w" '/Absolute upper-left X/{x=$4}
+                        /Absolute upper-left Y/{y=$4}
+                        /Width/{wd=$2}
+                        /Height/{h=$2}
+                        END{print wd, id, x, y, h}'
+      done | awk '$1>=100 && $1<150 && $5>=80 && $5<160 {print $3, $4, $1, $5}' \
+      | head -1
+}
+
+# 悬停冻结并右键第 row 行(0 基),随后点菜单第 item 项(0 基)
+right_click_row_menu_item() {
+    local row="$1" item="$2" g X Y W H i
+    for i in 1 2 3; do
+        g="$(candwin_geom)"; read -r X Y W H <<<"$g"
+        [[ -n "$X" ]] || fail "候选窗未出现(G 场景)"
+        local ry=$((Y + 38 + (H - 38) * (2 * row + 1) / 10))
+        xdotool mousemove $((X + 40)) "$ry"
+        sleep 0.4
+        # 进窗后重读几何:跟随应在悬停后冻结
+        g="$(candwin_geom)"; read -r X Y W H <<<"$g"
+        ry=$((Y + 38 + (H - 38) * (2 * row + 1) / 10))
+        xdotool mousemove $((X + 40)) "$ry"; sleep 0.2
+        xdotool click 3; sleep 0.5
+        g="$(menu_geom)"
+        [[ -n "$g" ]] && break
+    done
+    [[ -n "$g" ]] || fail "右键第 $row 行未弹出菜单(尝试 $i 次)"
+    read -r X Y W H <<<"$g"
+    xdotool mousemove $((X + 40)) $((Y + 16 + 31 * item))
+    sleep 0.3
+    xdotool click 1; sleep 0.7
+}
+
+BASE="你号abc候选1拟好候选1ABn候选1"
+
+# G1:右键第 0 行(你好)→ 第 3 项反查英文 → 候选页换 hello/hi → 数字 1 = hello
+xdotool type --delay 90 "nihao"
+sleep 0.5
+right_click_row_menu_item 0 2
+wait_log "候选右键操作 idx=0 op=3" 5
+xdotool key 1; sleep 0.3
+wait_buffer "${BASE}hello" 8
+echo "PASS G1:右键→反查英文 → 候选页替换 → 数字选 hello 上屏"
+
+# G2:重敲 nihao → 右键第 0 行(你好)→ 第 2 项删除 →
+# 候选收缩为 [你号,拟好,泥嚎,倪豪] → 数字 1 = 你号
+xdotool key Escape; sleep 0.3
+xdotool type --delay 90 "nihao"
+sleep 0.5
+right_click_row_menu_item 0 1
+wait_log "候选右键操作 idx=0 op=2" 5
+xdotool key 1; sleep 0.3
+wait_buffer "${BASE}hello你号" 8
+echo "PASS G2:右键→删除词组 → 候选重排 → 数字 1 = 你号"
+
+# G3:右键第 1 行(拟好;你好已删,行序=[你号,拟好,…])→ 第 1 项固定 →
+# 拟好置顶 → 数字 1 = 拟好
+xdotool key Escape; sleep 0.3
+xdotool type --delay 90 "nihao"
+sleep 0.5
+right_click_row_menu_item 1 0
+wait_log "候选右键操作 idx=1 op=1" 5
+xdotool key 1; sleep 0.3
+wait_buffer "${BASE}hello你号拟好" 8
+echo "PASS G3:右键→固定首位 → 拟好置顶 → 数字 1 = 拟好"
+
+# G4:重敲 nihao → 右键第 0 行(拟好,已固定居首)→ 第 4 项自定义查询 →
+# 桩 xdg-open 收到 {q} 代入后的网址(宿主侧动作,不经 core op_fn)
+xdotool key Escape; sleep 0.3
+xdotool type --delay 90 "nihao"
+sleep 0.5
+right_click_row_menu_item 0 3
+for _ in $(seq 1 50); do
+    [[ -f "$QUERY_MARKER" ]] && grep -q "lookup?q=" "$QUERY_MARKER" && break
+    sleep 0.1
+done
+if ! { [[ -f "$QUERY_MARKER" ]] \
+    && grep -qF "https://dict.example.test/lookup?q=%E6%8B%9F%E5%A5%BD" \
+        "$QUERY_MARKER"; }; then
+    echo "---- query-marker ----"; cat "$QUERY_MARKER" 2>/dev/null || echo "(空)"
+    fail "自定义查询未拉起 xdg-open 或网址未代入词(拟好)"
+fi
+echo "PASS G4:右键→自定义查询(查词典)→ xdg-open 收到 {q} 代入网址"
+
+echo "== [12/12] 汇总 =="
 wait_buffer "你号abc候选1" 2
 echo "最终缓冲: $(cat "$BUFFER")"
 echo "---- xim.log 关键行 ----"
 grep -E "XIM server ready|client 已连接|trigger|Shift 单击|CapsLock|commit|LKey" "$XIM_LOG" | head -40 || true
-echo "E2E PASS: Mode B 全链路(XIM 连接/组合拦截/数字选词/Shift 切换/顶屏/造词/CapsLock 直通/截屏热键)全绿"
+echo "E2E PASS: Mode B 全链路(XIM 连接/组合拦截/数字选词/Shift 切换/顶屏/造词/CapsLock 直通/截屏热键/候选右键菜单)全绿"

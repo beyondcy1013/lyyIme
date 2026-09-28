@@ -27,6 +27,7 @@
 #define LYY_CFG_STR_TRIGGER 64
 #define LYY_CFG_STR_LABEL 128
 #define LYY_CFG_STR_CMD 512
+#define LYY_CFG_STR_ENMODE 16
 
 /* 快速功能键条目上限(合同 §14;对齐 core QUICK_ACTIONS_MAX) */
 #define LYY_QA_MAX 8
@@ -40,14 +41,21 @@ typedef struct {
 } LyyQuickAction;
 
 typedef struct {
-    int page_size;           /* 候选数(1..9),对齐 core Config */
+    int page_size;           /* 候选数(1..10;数字键 1-9/0,0=第 10 个),对齐 core Config */
     int mixed_english;       /* 中英混合(无中文候选时给英文词) */
     int auto_commit_english; /* 高置信英文词标点/空格自动直通 */
     int chinese_punct;       /* 中文态使用中文标点 */
     int learning;            /* 用户词学习开关 */
     int commit_after_four;   /* 满足四码后,继续输入字母先顶屏当前选中 */
-    int commit_unique_four;  /* 恰好四码且候选唯一时,免空格直接上屏 */
+    int commit_first_at_four;/* 恰好四码且首选是五笔命中时,免空格直接上屏首选(有重码也上屏第一个) */
+    int commit_unique_four;  /* 恰好四码且候选唯一时,免空格直接上屏(first_at_four 开时被覆盖) */
     int phrase_hint;         /* 词组效率提示(上屏后提示更省键的词组与编码) */
+    int exact_char_freq_rank; /* 精确单字按词频排位(默认开;关=恒居首位旧行为) */
+    /* 英文上屏去向(§6,与 core Config::enter_english/shift_english 同名同值):
+     * 回车/Shift 上屏英文原串后 "temp"=临时(仅上屏,保持中文模式)、
+     * "en"=长久(上屏并切入英文模式)。取值经 lyy_en_mode_canon 归一。 */
+    char enter_english[LYY_CFG_STR_ENMODE]; /* 默认 temp(单个英文词输入) */
+    char shift_english[LYY_CFG_STR_ENMODE]; /* 默认 en(上屏即转英文) */
     int font_size;           /* 候选窗字体大小(10..28) */
     int autostart;           /* 开机自启(写 ~/.config/autostart) */
     /* AI 助手([ai] 段;触发/调用实现见 ibus-engine/engine/lyyime_ai.py,
@@ -75,6 +83,11 @@ typedef struct {
     int stats_enabled;           /* 停顿显示今日统计总开关(默认开) */
     int stats_pause_secs;        /* 停顿多少秒后显示(3..300,默认 10) */
     int stats_idle_exclude_secs; /* 计入速度的最长停顿(5..600,默认 30) */
+    /* §15 候选右键·自定义查询(菜单第 4 项;宿主侧 xdg-open 打开,
+     * 不动引擎状态):url 模板中 {q} 占位符替换为百分号编码的候选词,
+     * url 为空 = 菜单不显示此项;label 为空 = 显示「自定义查询」 */
+    char custom_query_label[LYY_CFG_STR_LABEL];
+    char custom_query_url[LYY_CFG_STR_CMD];
 } LyyConfig;
 
 void lyy_config_defaults(LyyConfig *c);
@@ -94,6 +107,10 @@ int lyy_config_save(const char *path, const LyyConfig *c);
 
 /* AI 功能是否已配齐可用(启用 + api_base + model;key 本地服务可空) */
 int lyy_config_ai_active(const LyyConfig *c);
+
+/* 英文上屏去向取值归一(§6):temp/temporary → "temp",en/english/persist
+ * → "en",空/未知 → def(宽恕手写拼写,与 core EnCommit::from_toml 同义) */
+const char *lyy_en_mode_canon(const char *v, const char *def);
 
 /* 按配置落/删开机自启项 ~/.config/autostart/lyyime-xim.desktop */
 int lyy_config_apply_autostart(int enable);

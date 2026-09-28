@@ -28,8 +28,20 @@ static void ui_from_config(SettingsUi *ui)
                                  c->commit_after_four);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_commit_unique_four),
                                  c->commit_unique_four);
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(ui->chk_commit_first_at_four),
+        c->commit_first_at_four);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint),
                                  c->phrase_hint);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_exact_freq_rank),
+                                 c->exact_char_freq_rank);
+    /* 英文上屏去向(§6):0=临时 temp,1=切英文模式 en(两行同一映射) */
+    gtk_combo_box_set_active(
+        GTK_COMBO_BOX(ui->combo_enter_en),
+        strcmp(c->enter_english, "en") == 0 ? 1 : 0);
+    gtk_combo_box_set_active(
+        GTK_COMBO_BOX(ui->combo_shift_en),
+        strcmp(c->shift_english, "en") == 0 ? 1 : 0);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_autostart),
                                  c->autostart);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_quick_actions),
@@ -52,6 +64,9 @@ static void ui_from_config(SettingsUi *ui)
                               c->stats_pause_secs);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_stats_idle),
                               c->stats_idle_exclude_secs);
+    /* 自定义查询(§15 候选右键菜单第 4 项) */
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_cq_label), c->custom_query_label);
+    gtk_entry_set_text(GTK_ENTRY(ui->ent_cq_url), c->custom_query_url);
 }
 
 static void config_from_ui(SettingsUi *ui, LyyConfig *c)
@@ -72,8 +87,20 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_commit_four));
     c->commit_unique_four = gtk_toggle_button_get_active(
         GTK_TOGGLE_BUTTON(ui->chk_commit_unique_four));
+    c->commit_first_at_four = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_commit_first_at_four));
     c->phrase_hint =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint));
+    c->exact_char_freq_rank = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_exact_freq_rank));
+    snprintf(c->enter_english, sizeof(c->enter_english), "%s",
+             gtk_combo_box_get_active(GTK_COMBO_BOX(ui->combo_enter_en)) == 1
+                 ? "en"
+                 : "temp");
+    snprintf(c->shift_english, sizeof(c->shift_english), "%s",
+             gtk_combo_box_get_active(GTK_COMBO_BOX(ui->combo_shift_en)) == 1
+                 ? "en"
+                 : "temp");
     c->autostart =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_autostart));
     c->quick_actions_enabled = gtk_toggle_button_get_active(
@@ -107,6 +134,13 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_stats_pause));
     c->stats_idle_exclude_secs = (int)gtk_spin_button_get_value(
         GTK_SPIN_BUTTON(ui->spin_stats_idle));
+    /* 自定义查询(§15);留空 = 菜单不显示此项 */
+    snprintf(c->custom_query_label, sizeof(c->custom_query_label), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_cq_label)));
+    g_strstrip(c->custom_query_label);
+    snprintf(c->custom_query_url, sizeof(c->custom_query_url), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->ent_cq_url)));
+    g_strstrip(c->custom_query_url);
 }
 
 /* ---- 快捷键弹窗提示(写法非法/冲突避让结果,人话) ---- */
@@ -227,11 +261,16 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     lyy_engine_reload(app);
     lyy_app_reload_hotkey(app); /* 造词/截屏热键即时生效 */
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
+    /* §15 自定义查询(候选右键菜单第 4 项)即时生效 */
+    lyy_candwin_set_query(&app->candwin, c.custom_query_label,
+                          c.custom_query_url);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d unique4=%d hint=%d font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s stats=%d pause=%d idle=%d",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d first4=%d unique4=%d hint=%d freq_rank=%d enter_en=%s shift_en=%s font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s stats=%d pause=%d idle=%d",
             c.page_size, c.mixed_english, c.auto_commit_english,
             c.chinese_punct, c.learning, c.commit_after_four,
-            c.commit_unique_four, c.phrase_hint, c.font_size, c.autostart,
+            c.commit_first_at_four, c.commit_unique_four, c.phrase_hint,
+            c.exact_char_freq_rank,
+            c.enter_english, c.shift_english, c.font_size, c.autostart,
             c.quick_actions_enabled, c.quick_actions_count, c.ai_enabled,
             c.ai_api_base, c.ai_model, c.coin_hotkey, c.shot_hotkey,
             c.stats_enabled, c.stats_pause_secs, c.stats_idle_exclude_secs);
@@ -426,8 +465,16 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         gtk_builder_get_object(builder, "chk_commit_after_four"));
     ui->chk_commit_unique_four = GTK_WIDGET(
         gtk_builder_get_object(builder, "chk_commit_unique_four"));
+    ui->chk_commit_first_at_four = GTK_WIDGET(
+        gtk_builder_get_object(builder, "chk_commit_first_at_four"));
     ui->chk_phrase_hint =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_phrase_hint"));
+    ui->chk_exact_freq_rank =
+        GTK_WIDGET(gtk_builder_get_object(builder, "chk_exact_freq_rank"));
+    ui->combo_enter_en =
+        GTK_WIDGET(gtk_builder_get_object(builder, "combo_enter_en"));
+    ui->combo_shift_en =
+        GTK_WIDGET(gtk_builder_get_object(builder, "combo_shift_en"));
     ui->chk_autostart =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_autostart"));
     ui->chk_quick_actions =
@@ -448,6 +495,10 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         GTK_WIDGET(gtk_builder_get_object(builder, "ent_ai_prompt"));
     ui->spin_ai_timeout =
         GTK_WIDGET(gtk_builder_get_object(builder, "spin_ai_timeout"));
+    ui->ent_cq_label =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_cq_label"));
+    ui->ent_cq_url =
+        GTK_WIDGET(gtk_builder_get_object(builder, "ent_cq_url"));
     ui->btn_ai_test =
         GTK_WIDGET(gtk_builder_get_object(builder, "btn_ai_test"));
     ui->chk_stats_enabled =
@@ -460,12 +511,16 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
     if (!ui->window || !ui->spin_page || !ui->spin_font || !ui->chk_mixed ||
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
         !ui->chk_commit_four || !ui->chk_commit_unique_four ||
-        !ui->chk_phrase_hint || !ui->chk_autostart ||
+        !ui->chk_commit_first_at_four ||
+        !ui->chk_phrase_hint || !ui->chk_exact_freq_rank ||
+        !ui->combo_enter_en || !ui->combo_shift_en ||
+        !ui->chk_autostart ||
         !ui->chk_quick_actions || !ui->chk_ai_enabled ||
         !ui->ent_ai_base || !ui->ent_ai_key || !ui->ent_ai_model ||
         !ui->ent_ai_prompt || !ui->spin_ai_timeout || !ui->btn_ai_test ||
         !ui->ent_coin_hotkey || !ui->chk_stats_enabled ||
-        !ui->spin_stats_pause || !ui->spin_stats_idle) {
+        !ui->spin_stats_pause || !ui->spin_stats_idle ||
+        !ui->ent_cq_label || !ui->ent_cq_url) {
         lyy_log(&lyy_app()->log, "ERROR 设置界面缺少控件(%s)", file);
         g_object_unref(builder);
         return;

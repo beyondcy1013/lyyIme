@@ -16,8 +16,10 @@
 //! fcitx5/libime(拼音切分思路,见 pinyin.rs)。
 
 /// 五笔完全同码(code == buffer,含简码;简码奖励已并入本层;
-/// 层内 spec 单字按 GB2312 分档:一级 3.0 > 二级 2.5 > 词组 1.0 > 表外生僻 0.5,
-/// 档内按真实语料频次归一,语料外/生僻档按表频;无分档表时单字 2.0)。
+/// 层内 spec:`exact_char_freq_rank` 开时单字与词组同档 1.0、由词频定次序
+/// (表外生僻 0.5 沉底);关闭时单字按 GB2312 分档恒居词组前:
+/// 一级 3.0 > 二级 2.5 > 词组 1.0 > 表外生僻 0.5;档内按真实语料频次归一,
+/// 语料外/生僻档按表频;无分档表时单字 2.0)。
 pub(crate) const TIER_WUBI_EXACT: f32 = 60.0;
 /// 英文:无中文命中时的前缀候选(合同修订 §5.4/§5.C)。
 pub(crate) const TIER_ENGLISH_NO_CN: f32 = 55.0;
@@ -34,6 +36,20 @@ pub(crate) const TIER_PINYIN_ABBREV: f32 = 20.0;
 
 /// 用户词(学习过)层内加成乘子(合同 §5.6:×1.5)。
 pub(crate) const USER_BOOST: f32 = 1.5;
+
+/// 精确层单字的频率感知档位(可配置 `exact_char_freq_rank`,默认开):
+/// 因子 `f`∈[0,1] 取真实语料归一词频/10(表外生僻字 0.15、表内未覆盖 0.5),
+/// 仅 f < 0.5 的低频字调用本函数,在 `[TIER_WUBI_PREFIX − 间隔, TIER_WUBI_EXACT]`
+/// 线性插值降档——f=0.5 与前缀层持平、f→0 沉到前缀词组层之下(仍高于拼音
+/// 简拼层,翻页可达);f ≥ 0.5 的语料常用字不经此函数,保持精确层恒居首位。
+///
+/// 动机:固定 60 档会让低频/生僻的全码单字无条件压在更高频的前缀词组之上
+/// (用户反馈"4 码符合的单字始终在前,即使权重不符合");改为按词频参与排位,
+/// 关闭开关即恢复"精确单字恒居首位"的旧行为。
+pub(crate) fn exact_char_tier(f: f32) -> f32 {
+    let lo = TIER_WUBI_PREFIX - (TIER_WUBI_EXACT - TIER_WUBI_PREFIX);
+    lo + (TIER_WUBI_EXACT - lo) * f.clamp(0.0, 1.0)
+}
 
 /// 同文件词频归一 ×10:`log10(1+freq) / log10(1+maxf_file) × 10 ∈ [0,10]`。
 ///
@@ -63,6 +79,24 @@ mod tests {
     fn 空文件归一化为满值() {
         assert_eq!(norm10(0, 0), 10.0);
         assert_eq!(norm10(999, 0), 10.0);
+    }
+
+    #[test]
+    fn 精确单字频率档位_端点与单调() {
+        // f=1 → 精确层顶部;f=0.5 → 前缀层持平;f=0 → 前缀层下方一个间隔。
+        assert_eq!(exact_char_tier(1.0), TIER_WUBI_EXACT);
+        assert_eq!(exact_char_tier(0.5), TIER_WUBI_PREFIX);
+        assert_eq!(
+            exact_char_tier(0.0),
+            TIER_WUBI_PREFIX - (TIER_WUBI_EXACT - TIER_WUBI_PREFIX)
+        );
+        // 单调递增 + 越界钳制。
+        assert!(exact_char_tier(0.3) < exact_char_tier(0.6) && exact_char_tier(0.6) < exact_char_tier(0.9));
+        assert_eq!(exact_char_tier(1.7), TIER_WUBI_EXACT);
+        assert_eq!(exact_char_tier(-0.5), exact_char_tier(0.0));
+        // 低频字(f<0.5)沉到前缀层之下,高频字(f>0.5)保持其上。
+        assert!(exact_char_tier(0.25) < TIER_WUBI_PREFIX);
+        assert!(exact_char_tier(0.9) > TIER_WUBI_PREFIX);
     }
 
     #[test]

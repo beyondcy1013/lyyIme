@@ -1,0 +1,3 @@
+[build]
+# Keep Cargo artifacts outside /home/codes per project policy.
+target-dir = "/data/cargo-target/local/codes_apps_lyyIme-93ecbcd94ded0a75"

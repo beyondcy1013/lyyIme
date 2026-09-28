@@ -4,16 +4,18 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
-use lyyime_dicttool::{convert, fetch, query, tier, verify};
+use lyyime_dicttool::{convert, entrans, fetch, query, tier, verify, zhen};
 
 const USAGE: &str = "用法:
   dicttool convert [--wubi-db <path>] [--out <dir>]      ibus-table sqlite -> wubi/pinyin_char/suggestion/goucima TSV
   dicttool fetch   [--out <dir>] [--cache <dir>]         下载拼音词组与英文词频 -> pinyin_phrase/english TSV
   dicttool verify  [<dir>]                               行数/格式/排序/抽样断言
   dicttool tier    [--out <dir>]                         生成 GB2312 单字分档表 char_tier.tsv
-  dicttool query   wubi|pinyin|en <query> [--out <dir>]  对 TSV 做前缀查询,打印前 9 个候选
+  dicttool zhen    [--stardict <db>] [--out <dir>]       ECDICT(en→zh)反生成 zh_en.tsv(右键反查英文)
+  dicttool entrans [--stardict <db>] [--out <dir>]       ECDICT(en→zh)生成 en_trans.tsv(全大写输入候选的中文翻译)
+  dicttool query   wubi|pinyin|en|zh_en <query> [--out <dir>]  对 TSV 做前缀查询,打印前 9 个候选
 
-默认:wubi-db=/usr/share/ibus-table/tables/wubi-haifeng86.db,out=data/runtime,cache=dicts/raw";
+默认:wubi-db=/usr/share/ibus-table/tables/wubi-haifeng86.db,out=data/runtime,cache=dicts/raw,stardict=dicts/cache/stardict.db";
 
 /// 解析结果:剩余位置参数 + 各路径选项。
 struct Parsed {
@@ -21,17 +23,22 @@ struct Parsed {
     out: PathBuf,
     cache: PathBuf,
     wubi_db: PathBuf,
+    stardict: PathBuf,
 }
 
-/// 摘除 `--out/--cache/--wubi-db <value>` 选项(可出现在任意位置),其余为位置参数。
+/// 摘除 `--out/--cache/--wubi-db/--stardict <value>` 选项(可出现在任意位置),其余为位置参数。
 fn parse_args(args: Vec<String>) -> Result<Parsed> {
     let mut positionals = Vec::new();
-    let (mut out, mut cache, mut wubi_db): (Option<String>, Option<String>, Option<String>) =
-        (None, None, None);
+    let (mut out, mut cache, mut wubi_db, mut stardict): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = (None, None, None, None);
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        if matches!(a, "--out" | "--cache" | "--wubi-db") {
+        if matches!(a, "--out" | "--cache" | "--wubi-db" | "--stardict") {
             if i + 1 >= args.len() {
                 bail!("{} 缺少取值", a);
             }
@@ -40,6 +47,7 @@ fn parse_args(args: Vec<String>) -> Result<Parsed> {
                 "--out" => out = Some(val),
                 "--cache" => cache = Some(val),
                 "--wubi-db" => wubi_db = Some(val),
+                "--stardict" => stardict = Some(val),
                 _ => unreachable!(),
             }
             i += 2;
@@ -55,6 +63,7 @@ fn parse_args(args: Vec<String>) -> Result<Parsed> {
         out: PathBuf::from(out.unwrap_or_else(|| "data/runtime".into())),
         cache: PathBuf::from(cache.unwrap_or_else(|| "dicts/raw".into())),
         wubi_db: PathBuf::from(wubi_db.unwrap_or_else(|| convert::DEFAULT_WUBI_DB.into())),
+        stardict: PathBuf::from(stardict.unwrap_or_else(|| zhen::DEFAULT_STARDICT_DB.into())),
     })
 }
 
@@ -95,6 +104,18 @@ fn dispatch(args: Vec<String>) -> Result<()> {
                 bail!("tier 不接受位置参数:{:?}", parsed.positionals);
             }
             tier::run(&parsed.out)
+        }
+        "zhen" => {
+            if !parsed.positionals.is_empty() {
+                bail!("zhen 不接受位置参数:{:?}", parsed.positionals);
+            }
+            zhen::run(zhen::ZhenOpts { stardict: parsed.stardict, out: parsed.out })
+        }
+        "entrans" => {
+            if !parsed.positionals.is_empty() {
+                bail!("entrans 不接受位置参数:{:?}", parsed.positionals);
+            }
+            entrans::run(entrans::EntransOpts { stardict: parsed.stardict, out: parsed.out })
         }
         "verify" => {
             let mut pos = parsed.positionals;

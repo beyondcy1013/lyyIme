@@ -44,6 +44,8 @@ pub fn run(dir: PathBuf) -> Result<()> {
     check_goucima(&dir, &mut checks);
     check_meta(&dir, &mut checks)?;
     check_char_tier(&dir, &mut checks);
+    check_en_trans(&dir, &mut checks);
+    check_zh_en(&dir, &mut checks);
 
     // 摘要表
     eprintln!("\n===== dicttool verify 摘要({:?}) =====", dir);
@@ -76,6 +78,69 @@ fn exists_check(dir: &Path, file: &str, checks: &mut Vec<Check>) -> Option<PathB
     ok.then_some(p)
 }
 
+/// en_trans.tsv(全大写输入候选的中文翻译,`dicttool entrans` 产物):
+/// 格式 `词 \t 译1 \t 译2 …`(词必须小写、升序),行数下限 1000
+/// ——低于该值几乎必然是 ECDICT 缺库(仅 60 条内置缩略语兜底),给出下载提示。
+fn check_en_trans(dir: &Path, checks: &mut Vec<Check>) {
+    const EN_TRANS_MIN: u64 = 1000;
+    let Some(path) = exists_check(dir, "en_trans.tsv", checks) else { return };
+    let mut rows = 0u64;
+    let mut cols_ok = true;
+    let mut sort_ok = true;
+    let mut prev: Option<String> = None;
+    let mut has_cpu = false;
+    match scan_lines(&path, 0, |i, f| {
+        rows = i;
+        let word = f[0];
+        if word.is_empty() || !word.chars().all(|c| c.is_ascii_lowercase()) {
+            cols_ok = false;
+        }
+        if f.len() < 2 || f.iter().any(|c| c.is_empty()) {
+            cols_ok = false;
+        }
+        if let Some(p) = &prev {
+            if p.as_str() >= word {
+                sort_ok = false;
+            }
+        }
+        prev = Some(word.to_string());
+        if word == "cpu" {
+            has_cpu = true;
+        }
+    }) {
+        Ok((_, ok)) => {
+            if !ok {
+                cols_ok = false;
+            }
+        }
+        Err(e) => {
+            checks.push(Check::new("en_trans.tsv 可读", false, format!("{e}")));
+            return;
+        }
+    }
+    checks.push(Check::new(
+        "en_trans.tsv 格式",
+        cols_ok && sort_ok,
+        format!(
+            "词小写+译法非空:{};词升序:{}",
+            if cols_ok { "ok" } else { "FAIL" },
+            if sort_ok { "ok" } else { "FAIL" }
+        ),
+    ));
+    checks.push(Check::new(
+        "en_trans.tsv 规模",
+        rows >= EN_TRANS_MIN,
+        format!(
+            "{rows} 行(下限 {EN_TRANS_MIN};若远低于此,多为 dicts/cache/stardict.db 缺失,请下载 ECDICT 后重跑 dicttool entrans)"
+        ),
+    ));
+    checks.push(Check::new(
+        "en_trans.tsv 抽样",
+        has_cpu,
+        if has_cpu { "cpu ✓".into() } else { "缺 cpu 词条".into() },
+    ));
+}
+
 /// 逐行检查列数并执行回调;返回 (行数, 是否全 UTF-8/列数正确)。
 fn scan_lines(
     path: &Path,
@@ -104,7 +169,8 @@ fn scan_lines(
             cols_ok = false;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != expect_cols {
+        // expect_cols=0:调用方在回调里自行判列数(en_trans 为"词+1..N 译法"变长表)
+        if expect_cols > 0 && fields.len() != expect_cols {
             cols_ok = false;
         }
         n += 1;
@@ -458,6 +524,72 @@ fn check_char_tier(dir: &Path, checks: &mut Vec<Check>) {
         )),
         Err(e) => checks.push(Check::new("char_tier.tsv 可读", false, e.to_string())),
     }
+}
+
+/// zh_en.tsv(§15 反查英文):可选产物——缺失仅提示不判失败
+/// (旧数据目录按无反查表降级);存在则校验 zh 列为 CJK 词、en 列为
+/// ASCII 可打印且含字母(允许短语/连字符/撇号)、zh 升序无重复。
+fn check_zh_en(dir: &Path, checks: &mut Vec<Check>) {
+    let path = dir.join("zh_en.tsv");
+    if !path.is_file() {
+        checks.push(Check::new(
+            "zh_en.tsv 存在",
+            true,
+            "缺失(旧数据目录,右键\"反查英文\"将提示无结果;可 dicttool zhen 补齐)".into(),
+        ));
+        return;
+    }
+    let mut rows = 0u64;
+    let mut bad = 0u64;
+    let mut sort_ok = true;
+    let mut prev = String::new();
+    let mut has_nihao = false;
+    let f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            checks.push(Check::new("zh_en.tsv 可读", false, e.to_string()));
+            return;
+        }
+    };
+    for line in BufReader::new(f).lines() {
+        let Ok(line) = line else { bad += 1; continue };
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        rows += 1;
+        let mut it = line.split('\t');
+        let zh = it.next().unwrap_or("");
+        let ens: Vec<&str> = it.collect();
+        if zh.is_empty()
+            || !zh.chars().all(crate::util::is_cjk_char)
+            || ens.is_empty()
+            || ens.iter().any(|e| {
+                // 英文译法允许短语/连字符/撇号(如 "be granted"、"A-I"):
+                // 只要求 ASCII 可打印(含空格)且至少含一个字母
+                e.is_empty()
+                    || !e
+                        .chars()
+                        .all(|c| c.is_ascii_graphic() || c == ' ')
+                    || !e.chars().any(|c| c.is_ascii_alphabetic())
+            })
+        {
+            bad += 1;
+        }
+        if !prev.is_empty() && prev.as_str() >= zh {
+            sort_ok = false;
+        }
+        prev = zh.to_string();
+        if zh == "你好" {
+            has_nihao = true;
+        }
+    }
+    checks.push(Check::new(
+        "zh_en.tsv 行数/格式",
+        rows >= 50_000 && bad == 0,
+        format!("{rows} 词,非法行 {bad}"),
+    ));
+    checks.push(Check::new("zh_en.tsv zh 排序", sort_ok, "zh 升序且无重复".into()));
+    checks.push(Check::new("zh_en.tsv 抽样 你好", has_nihao, "常用词覆盖".into()));
 }
 
 fn fs_scan_tier(path: &Path, rows: &mut u64, bad: &mut u64) -> std::io::Result<()> {

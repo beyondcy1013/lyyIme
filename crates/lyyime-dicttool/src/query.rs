@@ -15,7 +15,8 @@ pub fn run(kind: &str, q: &str, out: &PathBuf) -> Result<()> {
         "wubi" => query_wubi(dir, q),
         "pinyin" => query_pinyin(dir, q),
         "en" | "english" => query_en(dir, q),
-        _ => bail!("未知查询类型 {:?},可用:wubi | pinyin | en", kind),
+        "zh_en" | "zhene" => query_zh_en(dir, q),
+        _ => bail!("未知查询类型 {:?},可用:wubi | pinyin | en | zh_en", kind),
     }
 }
 
@@ -122,6 +123,27 @@ fn pinyin_char_syllables(dir: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(seen)
+}
+
+/// 反查英文:zh_en.tsv 精确命中整行(en 按内置词频序),供 §15 右键菜单联调。
+fn query_zh_en(dir: &Path, q: &str) -> Result<()> {
+    let mut cands = Vec::new();
+    for line in open(dir, "zh_en.tsv")?.lines() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split('\t');
+        let Some(zh) = it.next() else { continue };
+        if zh != q {
+            continue;
+        }
+        for en in it {
+            cands.push(Cand { text: en.into(), comment: zh.into(), freq: 0, tier: 0 });
+        }
+    }
+    print_cands(&q, cands);
+    Ok(())
 }
 
 /// 英文:english.tsv 词前缀,按词频降序。

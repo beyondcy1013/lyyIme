@@ -35,6 +35,9 @@ typedef struct XimServer {
     xcb_key_symbols_t *keysyms;
     xcb_im_t *im;
     xcb_im_input_context_t *focused_ic;
+    /* §15 右键菜单激活时菜单 grab 会引发客户端 focus-out(focused_ic→NULL),
+       开菜单时暂存 IC,供菜单 activate 的效果流回投 */
+    xcb_im_input_context_t *cand_op_ic;
     guint xcb_source_id;
 } XimServer;
 
@@ -65,5 +68,10 @@ void lyy_run_quick_action(App *app, int index);
 /* 候选窗行点击桥(§14 鼠标点选):经 core lyyime_select_candidate 走与
  * 数字选词同一条效果流路径(功能键 → action,普通候选 → commit) */
 void lyy_candwin_row_clicked(int idx, void *user_data);
+
+/* 候选窗右键菜单桥(§15):state 返回行菜单状态(<0 无菜单/0 未固定/1 已固定),
+ * op 把菜单项(op∈{1固定,2删除,3反查英文})转发 core cand_op → 效果流刷新 */
+int lyy_candwin_op_state(int idx, void *user_data);
+void lyy_candwin_op(int idx, int op, void *user_data);
 
 #endif /* LYY_XIM_SERVER_H_ */

@@ -38,6 +38,42 @@ impl QuickAction {
 /// 快速功能键条目上限(每页最多 9 个候选,功能键不该挤占整页)。
 pub const QUICK_ACTIONS_MAX: usize = 8;
 
+/// 回车/Shift 上屏英文原串后的模式去向(两键共用一套取值,§6):
+/// - `Temp`:临时英文——仅本次原样上屏,保持中文模式;
+/// - `English`:长久英文——上屏并切入英文模式(效果流末尾附
+///   [`Effect::ModeChanged`](crate::types::Effect::ModeChanged),宿主同步
+///   中英指示/XIM trigger;切回中文仍走 Shift 单击)。
+///
+/// 取值借鉴主流输入法(搜狗/QQ 拼音)的"回车上屏英文/Shift 切英文"习惯:
+/// 回车天然是"把这一串字母当英文交出去",Shift 天然是"转入英文态"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnCommit {
+    /// 临时:仅本次上屏,保持中文模式。
+    Temp,
+    /// 长久:上屏并切入英文模式。
+    English,
+}
+
+impl EnCommit {
+    /// TOML 取值解析:`temp`/`temporary` → Temp;`en`/`english`/`persist`
+    /// → English;空串或未知值返回 None(调用方按各键默认值回退,宽恕手写)。
+    fn from_toml(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "temp" | "temporary" => Some(Self::Temp),
+            "en" | "english" | "persist" => Some(Self::English),
+            _ => None,
+        }
+    }
+
+    /// 规范写回值(example_toml / C 宿主写盘共用)。
+    fn as_toml(self) -> &'static str {
+        match self {
+            Self::Temp => "temp",
+            Self::English => "en",
+        }
+    }
+}
+
 /// 快速功能键默认表(合同 §14):设置两个触发词、截图(带热键提示)、帮助。
 pub fn default_quick_actions() -> Vec<QuickAction> {
     vec![
@@ -69,7 +105,7 @@ pub fn default_quick_actions() -> Vec<QuickAction> {
 pub struct Config {
     /// 启动时的默认模式(cn/en);`Engine::set_config` 会把当前模式重置为该值。
     pub mode: Mode,
-    /// 候选窗每页条数,1–9(数字键选词)。
+    /// 候选窗每页条数,1–10(数字键 1–9/0 选词,0 = 第 10 个;页不足 10 条时 0 吞键)。
     pub page_size: usize,
     /// 中英混合:缓冲无任何中文命中时,给出英文词候选。
     pub mixed_en: bool,
@@ -90,9 +126,27 @@ pub struct Config {
     pub mixed_auto_commit_top_n: usize,
     /// 满足四码后,再输入字母先上屏当前选中,剩余字母开启新组合。
     pub commit_on_extra_after_four: bool,
-    /// 四码唯一上屏:恰好输入四码且候选唯一时,免空格直接上屏该候选
-    /// (主流五笔的"四码唯一自动上屏"习惯);多候选不触发,保持混打渐进。
+    /// 四码首选上屏(默认开,借鉴极点/QQ 五笔的"四码自动上屏"):恰好输入
+    /// 四码且首选是五笔命中时,免空格直接上屏首选——有重码也上屏第一个;
+    /// 首选是拼音/英文/功能键时不触发(拼音长码的中间态不被打断,"hell"
+    /// 这类英文前缀词不会四键即上屏)。关闭后回退 [`Config::commit_unique_four`]
+    /// 的"仅候选唯一才上屏"判定。
+    pub commit_first_at_four: bool,
+    /// 四码唯一上屏:恰好输入四码、有中文命中且候选唯一时,免空格直接上屏
+    /// 该候选(主流五笔的"四码唯一自动上屏"习惯);多候选或唯一候选是
+    /// 英文词时不触发,保持混打渐进。`commit_first_at_four` 开启时本项
+    /// 被覆盖(四码首选直接上屏,无需判唯一)。
     pub commit_unique_four: bool,
+    /// 回车上屏英文原串后的模式去向(默认 [`EnCommit::Temp`]:临时英文,
+    /// 单个英文词的输入方式,上屏后保持中文模式)。
+    pub enter_english: EnCommit,
+    /// Shift 上屏英文原串后的模式去向(默认 [`EnCommit::English`]:上屏并
+    /// 进入英文模式;临时英文走回车,或把本键配成 Temp 恢复旧版"仅上屏")。
+    pub shift_english: EnCommit,
+    /// 精确层单字按词频参与排位(默认开):全码/简码精确命中的单字不再
+    /// 无条件恒居首位——按真实语料词频取频率档位,低频/生僻字可被更高频的
+    /// 前缀词组反超(高频字仍居精确层顶部);关闭则恢复"恒居首位"旧行为。
+    pub exact_char_freq_rank: bool,
     /// 词组效率提示:上屏后最近几个字若存在更省键的五笔词组,在候选条
     /// 提示「词 + 编码」,直到下一次输入才清除(借鉴万能五笔的高效词提示)。
     pub phrase_hint: bool,
@@ -113,7 +167,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Chinese,
-            page_size: 5,
+            page_size: 10,
             mixed_en: true,
             mixed_auto_commit: true,
             cn_punct: true,
@@ -123,7 +177,11 @@ impl Default for Config {
             en_freq_top_n: 2000,
             mixed_auto_commit_top_n: 500,
             commit_on_extra_after_four: false,
+            commit_first_at_four: true,
             commit_unique_four: true,
+            enter_english: EnCommit::Temp,
+            shift_english: EnCommit::English,
+            exact_char_freq_rank: true,
             phrase_hint: true,
             coin_hotkey: "ctrl+equal".to_string(),
             shot_hotkey: "ctrl+alt+a".to_string(),
@@ -150,7 +208,11 @@ struct ConfigToml {
     en_freq_top_n: usize,
     mixed_auto_commit_top_n: usize,
     commit_on_extra_after_four: bool,
+    commit_first_at_four: bool,
     commit_unique_four: bool,
+    enter_english: String,
+    shift_english: String,
+    exact_char_freq_rank: bool,
     phrase_hint: bool,
     coin_hotkey: String,
     shot_hotkey: String,
@@ -187,7 +249,11 @@ impl From<&Config> for ConfigToml {
             en_freq_top_n: c.en_freq_top_n,
             mixed_auto_commit_top_n: c.mixed_auto_commit_top_n,
             commit_on_extra_after_four: c.commit_on_extra_after_four,
+            commit_first_at_four: c.commit_first_at_four,
             commit_unique_four: c.commit_unique_four,
+            enter_english: c.enter_english.as_toml().to_string(),
+            shift_english: c.shift_english.as_toml().to_string(),
+            exact_char_freq_rank: c.exact_char_freq_rank,
             phrase_hint: c.phrase_hint,
             coin_hotkey: c.coin_hotkey.clone(),
             shot_hotkey: c.shot_hotkey.clone(),
@@ -238,7 +304,7 @@ impl Config {
             "mode = \"{}\"",
             if d.mode == Mode::Chinese { "cn" } else { "en" }
         );
-        let _ = writeln!(s, "\n# 候选窗每页条数(1–9,数字键选词)");
+        let _ = writeln!(s, "\n# 候选窗每页条数(1–10,数字键 1–9/0 选词,0 = 第 10 个)");
         let _ = writeln!(s, "page_size = {}", d.page_size);
         let _ = writeln!(s, "\n# 中英混合:输入无中文命中时给出英文词候选");
         let _ = writeln!(s, "mixed_en = {}", d.mixed_en);
@@ -293,9 +359,59 @@ impl Config {
         );
         let _ = writeln!(
             s,
-            "\n# 四码唯一上屏:恰好四码且候选唯一时免空格直接上屏(多候选仍需空格/数字)"
+            "\n# 四码首选上屏(默认开):恰好四码且首选是五笔命中时免空格直接上屏首选,"
         );
+        let _ = writeln!(
+            s,
+            "# 有重码也上屏第一个;首选是拼音/英文时不触发(不打断拼音长码与英文单词)"
+        );
+        let _ = writeln!(
+            s,
+            "commit_first_at_four = {}",
+            d.commit_first_at_four
+        );
+        let _ = writeln!(
+            s,
+            "\n# 四码唯一上屏:恰好四码且候选唯一时免空格直接上屏(commit_first_at_four"
+        );
+        let _ = writeln!(s, "# 开启时本项不生效;关闭后多候选仍需空格/数字选词)");
         let _ = writeln!(s, "commit_unique_four = {}", d.commit_unique_four);
+        let _ = writeln!(
+            s,
+            "\n# 回车上屏英文原串后的去向:temp = 临时(默认,上屏后保持中文模式,"
+        );
+        let _ = writeln!(
+            s,
+            "# 作为单个英文词的输入方式);en = 长久(上屏并切入英文模式)"
+        );
+        let _ = writeln!(
+            s,
+            "enter_english = \"{}\"",
+            d.enter_english.as_toml()
+        );
+        let _ = writeln!(
+            s,
+            "\n# Shift 上屏英文原串后的去向:en = 长久(默认,上屏并进入英文模式,"
+        );
+        let _ = writeln!(
+            s,
+            "# 之后按键直通,Shift 单击切回中文);temp = 临时(仅上屏,保持中文)"
+        );
+        let _ = writeln!(
+            s,
+            "shift_english = \"{}\"",
+            d.shift_english.as_toml()
+        );
+        let _ = writeln!(
+            s,
+            "\n# 精确层单字按词频排位(默认开):四码/简码精确命中的单字不再恒居"
+        );
+        let _ = writeln!(
+            s,
+            "# 首位——按真实语料词频取档,低频/生僻字可被更高频的词组反超;"
+        );
+        let _ = writeln!(s, "# 关闭则恢复\"精确单字恒居首位\"的旧行为");
+        let _ = writeln!(s, "exact_char_freq_rank = {}", d.exact_char_freq_rank);
         let _ = writeln!(
             s,
             "\n# 词组效率提示:上屏后最近几个字有更省键的五笔词组时,候选条提示词组与编码"
@@ -371,9 +487,9 @@ impl ConfigToml {
                 )))
             }
         };
-        if self.page_size == 0 || self.page_size > 9 {
+        if self.page_size == 0 || self.page_size > 10 {
             return Err(Error::new(format!(
-                "配置文件 {} 中 page_size = {} 不合法,需在 1–9 之间(数字键选词)",
+                "配置文件 {} 中 page_size = {} 不合法,需在 1–10 之间(数字键 1–9/0 选词)",
                 path.display(),
                 self.page_size
             )));
@@ -408,7 +524,14 @@ impl ConfigToml {
             en_freq_top_n: self.en_freq_top_n,
             mixed_auto_commit_top_n: self.mixed_auto_commit_top_n,
             commit_on_extra_after_four: self.commit_on_extra_after_four,
+            commit_first_at_four: self.commit_first_at_four,
             commit_unique_four: self.commit_unique_four,
+            // 未知/空取值按各键默认回退(回车 temp / Shift en),不判整份损坏
+            enter_english: EnCommit::from_toml(&self.enter_english)
+                .unwrap_or(EnCommit::Temp),
+            shift_english: EnCommit::from_toml(&self.shift_english)
+                .unwrap_or(EnCommit::English),
+            exact_char_freq_rank: self.exact_char_freq_rank,
             phrase_hint: self.phrase_hint,
             coin_hotkey: {
                 let hk = self.coin_hotkey.trim().to_string();
@@ -468,10 +591,30 @@ mod tests {
     #[test]
     fn example_toml_可被完整解析回默认值() {
         let text = Config::example_toml();
-        assert!(text.contains("page_size = 5"));
+        assert!(text.contains("page_size = 10"));
         let raw: ConfigToml = toml::from_str(&text).unwrap();
         let cfg = raw.into_config(Path::new("x")).unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn page_size_边界与非法值() {
+        // 1 与 10 合法;0 与 11 判损坏(人话错误)。
+        for ok in [1usize, 9, 10] {
+            let text = format!("page_size = {ok}");
+            let cfg: Config = toml::from_str::<ConfigToml>(&text)
+                .unwrap()
+                .into_config(Path::new("x"))
+                .unwrap();
+            assert_eq!(cfg.page_size, ok);
+        }
+        for bad in [0usize, 11, 99] {
+            let text = format!("page_size = {bad}");
+            let r = toml::from_str::<ConfigToml>(&text)
+                .map_err(|e| Error::new(e.to_string()))
+                .and_then(|raw| raw.into_config(Path::new("x")));
+            assert!(r.is_err(), "page_size = {bad} 应判不合法");
+        }
     }
 
     #[test]
@@ -494,6 +637,47 @@ mod tests {
             .into_config(Path::new("x"))
             .unwrap();
         assert_eq!(cfg3.shot_hotkey, "ctrl+shift+x");
+    }
+
+    #[test]
+    fn 英文上屏去向_缺省与解析() {
+        // 默认:回车临时(单个英文词),Shift 切英文模式(§6)。
+        assert_eq!(Config::default().enter_english, EnCommit::Temp);
+        assert_eq!(Config::default().shift_english, EnCommit::English);
+        // 精确单字按词频排位默认开。
+        assert!(Config::default().exact_char_freq_rank);
+        // 缺项/空串/未知值:按各键默认回退,不判整份损坏(宽恕手写拼写)
+        for (text, want_enter, want_shift) in [
+            ("", EnCommit::Temp, EnCommit::English),
+            ("mode = \"cn\"", EnCommit::Temp, EnCommit::English),
+            (
+                "enter_english = \"junk\"\nshift_english = \"\"",
+                EnCommit::Temp,
+                EnCommit::English,
+            ),
+        ] {
+            let cfg: Config = toml::from_str::<ConfigToml>(text)
+                .unwrap()
+                .into_config(Path::new("x"))
+                .unwrap();
+            assert_eq!(cfg.enter_english, want_enter, "text={text}");
+            assert_eq!(cfg.shift_english, want_shift, "text={text}");
+        }
+        // 规范值与同义词(大小写/空白宽容)
+        let cfg: Config = toml::from_str::<ConfigToml>(
+            "enter_english = \" EN \"\nshift_english = \"temporary\"",
+        )
+        .unwrap()
+        .into_config(Path::new("x"))
+        .unwrap();
+        assert_eq!(cfg.enter_english, EnCommit::English);
+        assert_eq!(cfg.shift_english, EnCommit::Temp);
+        // persist 同义词
+        let cfg: Config = toml::from_str::<ConfigToml>("enter_english = \"persist\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert_eq!(cfg.enter_english, EnCommit::English);
     }
 
     #[test]

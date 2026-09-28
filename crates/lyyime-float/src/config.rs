@@ -194,6 +194,27 @@ pub fn load_stats() -> StatsCfg {
     load_stats_from(toml_text.as_deref(), json_text.as_deref())
 }
 
+/// §15 自定义查询(config.toml 顶层 custom_query_label/custom_query_url,
+/// 统一设置窗管理):每次右键弹菜单时读取(设置保存后即时生效);
+/// url 空白 → None(菜单不显示此项)。
+pub fn load_custom_query() -> Option<lyyime_core::wordops::CustomQuery> {
+    let text = fs::read_to_string(config_dir().join("config.toml")).ok()?;
+    let v: toml::Value = toml::from_str(&text).ok()?;
+    let cq = lyyime_core::wordops::CustomQuery {
+        label: v
+            .get("custom_query_label")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        url: v
+            .get("custom_query_url")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    cq.configured().then_some(cq)
+}
+
 pub fn load_user_freq() -> HashMap<String, i64> {
     let path = config_dir().join("user_freq.json");
     fs::read_to_string(path)

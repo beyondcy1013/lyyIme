@@ -48,9 +48,11 @@ int main(void)
     /* 1. 默认值 */
     LyyConfig c;
     lyy_config_defaults(&c);
-    CHECK(c.page_size == 5 && c.mixed_english == 1 &&
+    CHECK(c.page_size == 10 && c.mixed_english == 1 &&
               c.commit_after_four == 0 && c.commit_unique_four == 1 &&
-              c.phrase_hint == 1 && c.font_size == 14 && c.autostart == 0,
+              c.commit_first_at_four == 1 &&
+              c.phrase_hint == 1 && c.exact_char_freq_rank == 1 &&
+              c.font_size == 14 && c.autostart == 0,
           "默认值正确");
 
     /* 2. 加载不存在的文件 */
@@ -62,11 +64,13 @@ int main(void)
     c.autostart = 1;
     c.commit_after_four = 1;
     c.commit_unique_four = 0;
+    c.commit_first_at_four = 0;
     c.phrase_hint = 0;
     CHECK(lyy_config_save(path, &c) == 0, "保存成功");
     char *body = read_all(path);
     CHECK(body && strstr(body, "page_size = 7") && strstr(body, "候选数") &&
               strstr(body, "commit_unique_four = false") &&
+              strstr(body, "commit_first_at_four = false") &&
               strstr(body, "phrase_hint = false"),
           "保存内容含键与注释");
 
@@ -100,7 +104,7 @@ int main(void)
     fprintf(fp, "page_size = 99\nfont_size = 3\n");
     fclose(fp);
     lyy_config_load(path, &c2);
-    CHECK(c2.page_size == 5 && c2.font_size == 14, "越界值钳制回默认");
+    CHECK(c2.page_size == 10 && c2.font_size == 14, "越界值钳制回默认");
 
     /* 7. 布尔值翻转必须落盘:文件已有 false,置 1 后保存必须写回 true */
     fp = fopen(path, "w");
@@ -415,6 +419,67 @@ int main(void)
     CHECK(lyy_config_load(path, &s4) == 0 && s4.stats_enabled == 0 &&
               s4.stats_pause_secs == 15 && s4.stats_idle_exclude_secs == 45,
           "统计键保存后回读一致");
+
+    /* 18. 英文上屏去向(enter_english / shift_english,§6):
+     * 默认值 / 同义词归一 / 未知值回退 / 保存回读 */
+    CHECK(strcmp(c.enter_english, "temp") == 0 &&
+              strcmp(c.shift_english, "en") == 0,
+          "英文上屏去向默认值(回车 temp / Shift en)");
+    CHECK(strcmp(lyy_en_mode_canon("temporary", "en"), "temp") == 0 &&
+              strcmp(lyy_en_mode_canon("english", "temp"), "en") == 0 &&
+              strcmp(lyy_en_mode_canon("persist", "temp"), "en") == 0 &&
+              strcmp(lyy_en_mode_canon("junk", "en"), "en") == 0,
+          "取值归一:同义词识别,未知回退默认");
+    FILE *fen = fopen(path, "w");
+    fprintf(fen,
+            "enter_english = \"en\"\n"
+            "shift_english = \"temporary\"\n");
+    fclose(fen);
+    LyyConfig e1;
+    CHECK(lyy_config_load(path, &e1) == 0 &&
+              strcmp(e1.enter_english, "en") == 0 &&
+              strcmp(e1.shift_english, "temp") == 0,
+          "两键解析并归一(en/temporary)");
+    FILE *fen2 = fopen(path, "w");
+    fprintf(fen2, "enter_english = \"junk\"\nshift_english = \"\"\n");
+    fclose(fen2);
+    LyyConfig e2;
+    CHECK(lyy_config_load(path, &e2) == 0 &&
+              strcmp(e2.enter_english, "temp") == 0 &&
+              strcmp(e2.shift_english, "en") == 0,
+          "未知/空取值按各键默认回退");
+    /* 保存回读:带引号字符串落盘,回读一致 */
+    snprintf(e1.enter_english, sizeof(e1.enter_english), "%s", "en");
+    snprintf(e1.shift_english, sizeof(e1.shift_english), "%s", "temp");
+    CHECK(lyy_config_save(path, &e1) == 0, "保存英文上屏去向");
+    char *ebody = read_all(path);
+    CHECK(ebody && strstr(ebody, "enter_english = \"en\"") &&
+              strstr(ebody, "shift_english = \"temp\""),
+          "两键以带引号字符串写回");
+    g_free(ebody);
+    LyyConfig e3;
+    CHECK(lyy_config_load(path, &e3) == 0 &&
+              strcmp(e3.enter_english, "en") == 0 &&
+              strcmp(e3.shift_english, "temp") == 0,
+          "英文上屏去向保存后回读一致");
+
+    /* 19. 精确单字按词频排位(exact_char_freq_rank,§5):
+     * 默认开 / 文件解析 / 翻转落盘 / 回读一致 */
+    FILE *ffr = fopen(path, "w");
+    fprintf(ffr, "exact_char_freq_rank = false\n");
+    fclose(ffr);
+    LyyConfig f1;
+    CHECK(lyy_config_load(path, &f1) == 0 && f1.exact_char_freq_rank == 0,
+          "exact_char_freq_rank = false 可读");
+    f1.exact_char_freq_rank = 1;
+    CHECK(lyy_config_save(path, &f1) == 0, "翻转后保存成功");
+    char *fbody = read_all(path);
+    CHECK(fbody && strstr(fbody, "exact_char_freq_rank = true"),
+          "翻转后写回 true");
+    g_free(fbody);
+    LyyConfig f2;
+    CHECK(lyy_config_load(path, &f2) == 0 && f2.exact_char_freq_rank == 1,
+          "exact_char_freq_rank 回读一致");
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);

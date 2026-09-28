@@ -37,6 +37,15 @@ fi
 if [ ! -f data/runtime/char_tier.tsv ]; then
   "$DICTTOOL" tier --out data/runtime
 fi
+# 大写输入中文翻译表(`dicttool entrans` 产物,verify 必检项):缺失才重建
+if [ ! -f data/runtime/en_trans.tsv ] && [ -f dicts/cache/stardict.db ]; then
+  "$DICTTOOL" entrans --out data/runtime
+fi
+# 中英反查表(§15 候选右键「反查英文」):ECDICT 反生成 zh_en.tsv;
+# 大表生成耗时,缺失才重建;stardict.db 不在时跳过(反查菜单给"无结果"提示)
+if [ ! -f data/runtime/zh_en.tsv ] && [ -f dicts/cache/stardict.db ]; then
+  "$DICTTOOL" zhen --out data/runtime
+fi
 "$DICTTOOL" verify data/runtime
 
 step "3/6 安装核心库、词库、CLI 工具到 $PREFIX"

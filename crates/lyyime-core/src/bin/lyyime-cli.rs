@@ -81,7 +81,7 @@ fn parse_sequence(seq: &str) -> Result<Vec<Step>, String> {
             }
             ' ' => Step::Key(LKey::Space),
             '\n' | '\r' => Step::Key(LKey::Enter),
-            '1'..='9' => Step::Key(LKey::Digit(c as u8 - b'0')),
+            '0'..='9' => Step::Key(LKey::Digit(c as u8 - b'0')),
             c if c.is_ascii_alphabetic() => Step::Key(LKey::Char(c.to_ascii_lowercase())),
             '-' => Step::Key(LKey::PageUp),
             '=' => Step::Key(LKey::PageDown),

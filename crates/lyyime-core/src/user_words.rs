@@ -89,6 +89,18 @@ impl UserWords {
         self.save()
     }
 
+    /// 移除一条词(右键"删除词组"的造词侧,合同 §15):词表剔除并即时落盘;
+    /// 不在表中返回 Ok(false) 且不落盘。词典内存索引不反删——命中词条由
+    /// 屏蔽表(`blocked.tsv`)统一挡住,避免与内置词重名纠缠。
+    pub(crate) fn remove(&mut self, word: &str) -> Result<bool, Error> {
+        if self.words.remove(word).is_none() {
+            return Ok(false);
+        }
+        self.dirty = true;
+        self.save()?;
+        Ok(true)
+    }
+
     /// 可写性预检:建目录(幂等)+ 以写模式探测打开(不创建文件)。
     /// 在 plan(纯读取)阶段调用,重试安全;返回 false 时造词给人话失败提示。
     pub(crate) fn prepare(&self) -> bool {

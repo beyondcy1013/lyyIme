@@ -46,8 +46,8 @@ impl Engine {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LKey {
-    Char(char),          // 小写字母 a–z(宿主负责小写化)
-    Digit(u8),           // '1'..'9' → 1..9
+    Char(char),          // 字母 a–z/A–Z:小写普通组词;大写=Shift+字母 原样传入(全大写敲入走大写候选通道,2026-09-28,§6)
+    Digit(u8),           // '0'..'9' → 0..9(0 = 选第 10 个候选)
     Space, Enter, Backspace, Esc, PageUp, PageDown,
     Punct(char),         // 标点原字符(半角)
     ShiftPress,          // Shift 按下(宿主用于单击检测,见 §6)
@@ -105,13 +105,20 @@ void  lyyime_clear_quick_actions(void* eng);
 int   lyyime_add_quick_action(void* eng, const char* trigger, const char* label, const char* command);  /* 0 成功 -1 非法/超上限 */
 int   lyyime_action_command(void* eng, int i, char* buf, int cap); /* 第 i 条 command,-needed 同上 */
 int64_t lyyime_select_candidate(void* eng, int idx, char* buf, int64_t buf_cap); /* 点选候选(§14),两段式纪律同 process_key */
+/* §15 候选右键操作(可选符号组:旧库缺失时宿主禁用右键菜单,不影响输入) */
+int   lyyime_cand_pinned(void* eng, int idx);      /* 当前候选是否已固定:0/1;非用户可编辑候选=-1 */
+int64_t lyyime_cand_op(void* eng, int op, int idx, char* buf, int64_t buf_cap);
+                                                 /* op:0=固定/取消固定 1=删除词组 2=反查英文;
+                                                    返回当前页 effects JSON(同 process_key 两段式纪律) */
 ```
+
+`LKEY_CHAR` 的 `chr` 接受小写与大写码点:小写为普通组词,大写为 Shift+字母 原样传入(core 内部小写化组词并以 buf_raw 镜像敲入原形,全大写敲入走大写候选通道,2026-09-28,§6)。
 
 `key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10, LKEY_COIN=11, LKEY_LEFT=12, LKEY_RIGHT=13, LKEY_UP=14, LKEY_DOWN=15`(11–15 见 §12)。
 
-`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。四码唯一上屏默认**开启**(`commit_unique_four = true`):恰好凑满四码且合并排序后候选唯一时,core 直接回 Commit(该候选),免按空格;多候选(拼音/英文通道有共存候选)不触发。**词组效率提示**默认**开启**(`phrase_hint = true`):每次 commit 含汉字后,core 回看最近 2–6 个上屏汉字,若该后缀是词库五笔词组(含用户造词)且词组编码长度**严格小于**这几个字实敲的字母数(多字同屏按均摊计),在同一效果流末尾追加 `{"t":"hint","s":"词组提示:「词」可用 编码 打出"}`;同码词组打过的不重复提示。宿主把 hint 展示在候选条/辅助区且**不做定时清除**,直到下一次输入产生新效果流时自然替换或隐藏。两项均有 FFI 开关:`lyyime_set_commit_after_four` / `lyyime_set_commit_unique_four` / `lyyime_set_phrase_hint`(非 0 启用,返回生效后的 0/1)。
+`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串,再按 `shift_english`(默认 `en`)于效果流末尾追加 `{"t":"mode","m":1}` 切英文模式;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。回车上屏英文原串同理由 `enter_english`(默认 `temp`)决定是否追加 mode 效果——两个键共用 temp/en 取值,一处配置(XIM 设置窗「输入」页 / config.toml `enter_english`、`shift_english`),均有 FFI 开关 `lyyime_set_enter_english` / `lyyime_set_shift_english`(非 0 = en,返回生效后的 0/1)。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。**四码首选上屏默认开启**(`commit_first_at_four = true`,2026-09-27 起默认改为开启):恰好凑满四码且合并排序后首选来自五笔通道(Wubi/User)时,core 直接回 Commit(首选),免按空格——有重码也上屏第一个;首选是拼音/英文候选时不触发(`niha` 是 nihao 的中间态、"hell" 不该四键上屏英文前缀词,拼音长码与英文单词输入不被打断);缓冲恰等于快速功能键触发词(或为其前缀)时同样不触发,功能候选须经用户确认(§14)。四码唯一上屏默认**开启**(`commit_unique_four = true`):`commit_first_at_four` 关闭后回退为本项判定——恰好四码、有中文命中且合并排序后候选唯一时免空格上屏;多候选不触发,唯一候选是英文词时同样不触发(避免四键即把英文前缀词上屏)。**死码保护**:原组合还有中文命中时,新字母若把缓冲推进完全无候选的死胡同(五笔码 ≤4、拼音/简拼索引均前缀单调,加长后不可能救回中文命中),该字母不进缓冲、回 Consumed,候选状态原样保留——四码未选继续敲击不再把候选清空、进而被空格/标点当英文字母直通;快速功能键触发词的前缀(§14)不受此保护,保证触发词总能敲完。**词组效率提示**默认**开启**(`phrase_hint = true`):每次 commit 含汉字后,core 回看最近 2–6 个上屏汉字,若该后缀是词库五笔词组(含用户造词)且词组编码长度**严格小于**这几个字实敲的字母数(多字同屏按均摊计),在同一效果流末尾追加 `{"t":"hint","s":"词组提示:「词」可用 编码 打出"}`;同码词组打过的不重复提示。宿主把 hint 展示在候选条/辅助区且**不做定时清除**,直到下一次输入产生新效果流时自然替换或隐藏。两项均有 FFI 开关:`lyyime_set_commit_after_four` / `lyyime_set_commit_unique_four` / `lyyime_set_phrase_hint`(非 0 启用,返回生效后的 0/1)。
 
-**chr 传值约定(v1.1 实现期确认)**:`chr` 携带 Char/Punct/**Digit** 的码点——Digit 传 `'1'..'9'`(ASCII 0x31..0x39),core 按 `chr-'0'` 取值;其余 key_id 填 0。**有状态纪律**:`lyyime_process_key` 必须先生成完整 effects JSON、确认写入容量足够后才落内部状态变更,保证宿主因 `-needed` 扩容重试时同一键不会二次生效。
+**chr 传值约定(v1.1 实现期确认)**:`chr` 携带 Char/Punct/**Digit** 的码点——Digit 传 `'0'..'9'`(ASCII 0x30..0x39),core 按 `chr-'0'` 取值,0 = 选第 10 个候选;其余 key_id 填 0。**有状态纪律**:`lyyime_process_key` 必须先生成完整 effects JSON、确认写入容量足够后才落内部状态变更,保证宿主因 `-needed` 扩容重试时同一键不会二次生效。
 
 ## 4. 数据文件格式(data/runtime/,UTF-8 TSV,dicttool 产物)
 
@@ -127,6 +134,10 @@ int64_t lyyime_select_candidate(void* eng, int idx, char* buf, int64_t buf_cap);
 
 用户数据:`~/.local/share/lyyime/user.tsv`,格式 `word\tfreq_extra\tlast_used_epoch`;core 定期(每 64 次 commit/退出时)批量落盘。
 用户造词:`~/.local/share/lyyime/user_words.tsv`,格式 `word\tcode\tcount`(与 user.tsv 同目录,随 user_dict 覆盖迁移);启动时整表并入五笔索引,造词即时落盘(临时文件 + rename 原子替换),见 §12。
+候选固定:`~/.local/share/lyyime/pinned.tsv`,格式 `code\tword`(右键「固定首位」产物,§15);引擎启动整表读入,候选重算时把 `code` 精确命中的词置顶、注释追加「固」。
+候选屏蔽:`~/.local/share/lyyime/blocked.tsv`,每行一个词(右键「删除词组」产物,§15);被屏蔽词在任何编码下均不出候选,再造该词自动解屏蔽。
+中英反查:`data/runtime/zh_en.tsv`,格式 `word\ten1\ten2…`(`dicttool zhen` 从 ECDICT/StarDict 生成,§15);缺失时反查菜单项给「没有英文反查结果」提示,不影响其余功能。
+英译中翻译:`data/runtime/en_trans.tsv`,格式 `词\t译1\t译2…`(`dicttool entrans` 从 ECDICT/StarDict 生成、义项按行清洗去重,内置常用缩略语人工校对表义项恒排最前,如 WHO→世界卫生组织;词必须小写、≤6 条);全大写输入候选(§6)的中文翻译来源,缺失时降级为仅大小写变体,不影响其余功能。
 
 输入统计:`~/.local/share/lyyime/stats/YYYY-MM-DD.tsv`(本地日期,按天分文件),每行 `epoch_ms\tchars`——一次上屏一条(chars=非空白字符数)。Mode A(`EngineLogic::dispatch` 的 Commit 效果)与 Mode C(悬浮窗 commit 成功后)各自进程内追加同一目录(单行 O_APPEND,不交错)。查询走 core `stats` 模块(`today_summary`,纯函数、时间由调用方传入):字数 = 当天 chars 之和;速度 = 字数 ÷ 活跃时长,相邻上屏间隔 ≤ 排除阈值才计入时长(超时空隙——思考/离开——不算)。显示端为 lyyime-float:输入停顿 `stats_pause_secs`(默认 10)秒后在状态行显示「今日已输入 N 字 · 约 M 字/分」,重新输入即还原;统计设置为**全局配置**,真源在 config.toml 顶层 `stats_enabled` / `stats_pause_secs` / `stats_idle_exclude_secs`,由设置窗口「输入统计」页统一管理(悬浮窗菜单不再有设置入口),悬浮窗对 config.toml 做文件监视、改动即时生效;悬浮窗旧 config.json 的同名键仅作迁移回退(toml 一个统计键都没有时才读)。统计为旁路功能,任何文件错误静默,绝不影响输入主链路。
 
@@ -134,7 +145,7 @@ Mode C 不抢焦点模式(float config.json `keep_target_focus`,默认关,菜单
 
 Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.rs` 自实现状态栈(每次变更加一个状态,上限 200,回填去重,撤销后输入丢弃重做分支),覆盖编码框/打字板/短语编辑器(Ctrl+Z 撤销、Ctrl+Y/Ctrl+Shift+Z 重做)。编码框历史按词重开(上屏/Esc 即 reset);空缓冲且无可撤销时 Ctrl+Z/Ctrl+Y 直通目标窗口,撤销/重做的是目标应用里刚上屏的文本(与空缓冲退格直通同一合同)。
 
-配置:`~/.config/lyyime/config.toml`(doctor/app/ibus 共用;字段见 core `Config` 默认值,注释中文)。快捷键类:`coin_hotkey`(§12)、`shot_hotkey`(§13),写法均为「修饰(ctrl/alt/super/shift,至少一个)+键名」。
+配置:`~/.config/lyyime/config.toml`(doctor/app/ibus 共用;字段见 core `Config` 默认值,注释中文)。快捷键类:`coin_hotkey`(§12)、`shot_hotkey`(§13),写法均为「修饰(ctrl/alt/super/shift,至少一个)+键名」。英文上屏去向:`enter_english` / `shift_english`(§6,取值 `temp` 临时 / `en` 切英文模式,默认分别为 temp / en;XIM 设置窗「输入」页两行下拉,XIM 宿主经 `lyyime_set_enter_english` / `lyyime_set_shift_english` 下发,取值缺失/未知按各键默认)。排序类:`exact_char_freq_rank`(§5,默认开;XIM 经 `lyyime_set_exact_char_freq_rank` 下发,关闭恢复精确单字恒居首位旧行为)。
 
 ## 5. 匹配与排序算法(v1)
 
@@ -143,10 +154,10 @@ Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.r
 3. **拼音通道**:对 buf 做音节切分(DP,音节表取自 pinyin_char 去重),允许末音节不完整;查 pinyin_phrase(词组)与 pinyin_char(单字);简拼(每音节首字母,≥2 键)低权重参与。
    **注释反查五笔**:候选的 comment 编码提示统一为五笔——拼音命中的词经 wubi.tsv 的词→码反查索引(`wubi_rev`,同词多码取最长全码)显示其五笔编码,便于拼音打字时学习五笔;词不在五笔表时保留拼音注释兜底。五笔候选注释仍为其命中编码,英文候选仍为 `en`。
 4. **英文通道**(修订版细则见第 5 条末"英文通道修订"):无中文命中 → 前缀候选;buffer 是完整高频英文词 → 即使有中文命中也入选;直通上屏按"无中文命中 或 top-500 词"门控。
-5. **合并排序(v1.1,真实词库集成后修订——层级主导词典序)**:排序键为**词典序 (tier, specificity, freq_norm)**——层间不可跨越,层内先按 specificity(词组音节数放大、完整片段>更短片段、完全同码英文词 +0.5,用于压制伪切分;wubi_exact 层内单字按 **GB2312 分档:一级 3.0 > 二级 2.5 > 词组 1.0 > 表外生僻 0.5**——码表 freq 对大量字是默认值、拼音语料对生僻字是填充值(`pinyin_char.tsv` 里 牏/汆 等共享 585000),都回答不了"是不是常用字",分档表(`char_tier.tsv`)是唯一可靠依据;繁体(歟/與/種)、扩展区生僻字沉到词组之后但仍可翻页选出;无分档表时退化为 单字 2.0 > 词组 1.0),再按 `freq_norm ∈ [0,10)`。分档内的单字 freq_norm 用真实语料频次(pinyin_char.tsv 全量、同字取最大)归一,语料未覆盖按码表频 norm ×0.1,生僻档与无语料时按码表频;词组恒按码表频。实现详见 `crates/lyyime-core/src/rank.rs`(模块文档含层级表)。设计动机:各源频率尺度差 4 个数量级以上,加性权重会被大频值跨层碾压。
+5. **合并排序(v1.1,真实词库集成后修订——层级主导词典序)**:排序键为**词典序 (tier, specificity, freq_norm)**——层间不可跨越,层内先按 specificity(词组音节数放大、完整片段>更短片段、完全同码英文词 +0.5,用于压制伪切分;wubi_exact 层内 spec:**`exact_char_freq_rank` 开(默认)时单字与词组同档 1.0,由 freq_norm(词频)定次序——"四码/简码符合的单字"不再无条件置前(2026-09-27 修正:原"单字恒居词组前"让不常用单字压住高频词组);表外生僻字仍取 0.5 沉在词组之后。** 开关关闭时恢复旧分档:单字按 GB2312 分档 一级 3.0 > 二级 2.5 > 词组 1.0 > 表外生僻 0.5——码表 freq 对大量字是默认值、拼音语料对生僻字是填充值(`pinyin_char.tsv` 里 牏/汆 等共享 585000),都回答不了"是不是常用字",分档表(`char_tier.tsv`)是旧分档的依据;繁体(歟/與/種)、扩展区生僻字沉到词组之后但仍可翻页选出;无分档表时退化为 单字 2.0 > 词组 1.0),再按 `freq_norm ∈ [0,10)`。单字 freq_norm 用真实语料频次(pinyin_char.tsv 全量、同字取最大)归一,语料未覆盖按码表频 norm ×0.1,生僻档与无语料时按码表频;词组恒按码表频。**精确单字频率档位(同开关)**:有分档表时,语料常用字(归一频率 f ≥ 0.5)保持 wubi_exact 层,低频/生僻单字(f < 0.5,表外生僻取 0.15、表内未覆盖取 0.5)按频率在 `[wubi_prefix−间隔, 60]` 线性降档(`rank::exact_char_tier`),让位更高频的前缀词组与高频词。实现详见 `crates/lyyime-core/src/rank.rs`(模块文档含层级表)。设计动机:各源频率尺度差 4 个数量级以上,加性权重会被大频值跨层碾压。
    | 层 | tier_base | 说明 |
    |---|---|---|
-   | wubi_exact | 60 | code==buffer(简码奖励并入此层) |
+   | wubi_exact | 60 | code==buffer(简码奖励并入此层);`exact_char_freq_rank` 开启时低频单字按语料频率降档至 [40−间隔, 60) |
    | english_no_cn | 55 | 无任何中文命中时的英文候选 |
    | pinyin_full | 50 | 完整音节切分全命中(词组/单字),同等切分数优先覆盖更多完整音节 |
    | wubi_prefix | 40 | wubi 前缀渐进 |
@@ -154,25 +165,28 @@ Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.r
    | english_with_cn | 30 | buffer 是完整高频英文词但存在中文命中 |
    | pinyin_abbrev | 20 | 简拼 |
    `freq_norm = log10(1+freq) / log10(1+maxf_of_file) × 10`(每文件独立归一,加载时缓存 max)。设计动机:各源频率尺度差 4 个数量级以上(拼音单字 1e9 vs 词组 1e3),加性权重会被大频值跨层碾压;层级化后同层内同源尺度自然一致。用户词加成为层内 freq 乘子(×1.5)。输出前 page_size 条。
-   英文通道修订:完整英文词 ∈ english.tsv 前 mixed_auto_commit_top_n(默认 500)时即使有中文命中也入选(english_with_cn);∈ 前 en_freq_top_n(2000)且无中文命中时进 english_no_cn。**中文态下英文词只作为候选展示;Space 是确认键,始终顶屏当前选中,英文输出先 Shift 单击切换到英文态。**
+   英文通道修订:完整英文词 ∈ english.tsv 前 mixed_auto_commit_top_n(默认 500)时即使有中文命中也入选(english_with_cn);∈ 前 en_freq_top_n(2000)且无中文命中时进 english_no_cn。**中文态下英文词只作为候选展示;Space 是确认键,始终顶屏当前选中;单个英文词用回车临时上屏(默认),整段英文输入用 Shift 上屏并切英文态(§6)。**
 6. **学习**:commit 候选词 → freq_extra += 1,重排时乘 user 权重。
 
 ## 6. 按键行为规范(宿主必须一致实现)
 
 | 输入 | 行为 |
 |---|---|
-| a–z | 缓冲,更新 preedit/候选 |
+| a–z | 缓冲,更新 preedit/候选;有中文命中时若该字母把缓冲推进完全无候选的死胡同,则吞键保留候选(死码保护,§3;功能键触发词前缀例外) |
 | CapsLock 大写态 + 字母 | **原样直通英文,不进组词缓冲**:无 Shift 输出大写字母;Shift+字母由应用按 Caps+Shift 翻译输出小写字母。直通前宿主送 core `Other` 复位可能残留的缓冲(CapsLock 键本身经"其它键"路径清缓冲);数字/标点等非字母键不受 CapsLock 影响,行为同常态 |
-| 四码唯一上屏(可配置) | 恰好输入第 4 个字母且合并候选唯一:core 直接 Commit(该候选),缓冲与候选一并清空;多候选不触发。默认开启(`commit_unique_four`),关闭后第 4 键保持组合(§3) |
+| Shift+字母(中文态,2026-09-28) | 大写字母进组词缓冲(core 内部小写化组词,`buf_raw` 镜像敲入原形,preedit 显示敲入的大小写)。**全大写敲入**(缓冲全部字符为大写)时候选固定为 原样大写 → 首字母大写 → 全小写 → 中文翻译(en_trans.tsv,候选 4 起、常用在前,候选 5、6 后为其它常用翻译),不混入五笔/拼音候选;无翻译词条时仅三个大小写变体,单字母去重。混合大小写一经出现即回退小写普通通道。Space/Enter/标点收尾与 Shift 上屏均保留敲入大小写(空格顶屏=原样大写);全大写四码不触发四码首选/唯一上屏;数字/点选按位选择不变 |
+| 四码首选上屏(可配置) | 恰好输入第 4 个字母且首选是五笔命中(Wubi/User):core 直接 Commit(首选),缓冲与候选一并清空,有重码也上屏第一个;首选为拼音/英文或缓冲命中功能键触发词(前缀)不触发。默认开启(`commit_first_at_four`) |
+| 四码唯一上屏(可配置) | `commit_first_at_four` 关闭后回退判定:恰好四码、有中文命中且合并候选唯一时 core 直接 Commit(该候选);多候选或唯一候选为英文词不触发。默认开启(`commit_unique_four`),两者全关后第 4 键保持组合(§3) |
 | 1–9 | 有候选:选第 N 个上屏;无候选:Pass(数字原样)。选中快速功能键候选(§14)时回 `Action(i)` 而非 Commit |
+| 0 | 有候选且当前页 ≥ 10 条:选第 10 个上屏(`page_size` 默认 10,数字键只到 9,0 补足第 10 个);否则 Consumed(无候选时经"无候选放行"路径 Pass 的是 1–9;0 无候选即吞) |
 | Space | **任何时候都确认当前选中项**:有候选顶屏首选(首选为快速功能键候选时同样回 `Action(i)`,§14);有缓冲无候选 Commit(原字母);无缓冲 Pass(空格) |
-| Enter | 有缓冲:Commit(原字母);无缓冲:Pass |
+| Enter | 有缓冲:Commit(原字母)——单个英文词的输入方式,去向按 `enter_english`(默认 `temp` 临时:保持中文模式;`en` 长久:追加 `ModeChanged(English)` 切英文态);无缓冲:Pass |
 | Backspace | 有缓冲删尾;空:Pass |
 | Esc | 清缓冲(Consumed);空:Pass |
 | `-`/`=` | 有候选翻页(Consumed);否则 Pass |
 | 标点 | 中文态空缓冲→Commit(对应中文标点);有缓冲→Commit(首选)+Commit(中文标点);英文态 Pass |
 | 上屏后词组提示(可配置) | 含汉字的 Commit 之后,若最近 2–6 个上屏字有更省键的五笔词组(编码长 < 实敲字母数),效果流末尾追加 `Hint(「词」可用 编码 打出)`;宿主候选条展示、**无定时**,下一次输入的新效果流自然替换/清除(§3;`phrase_hint` 默认开) |
-| Shift 按下 | 有缓冲:**Commit(原字母)**(英文原串);空缓冲:Consumed 并进入单击检测 |
+| Shift 按下 | 有缓冲:**Commit(原字母)**(英文原串),去向按 `shift_english`(默认 `en` 长久:追加 `ModeChanged(English)` 进入英文模式,宿主同步中英指示/XIM trigger;`temp` 临时:仅上屏,保持中文,恢复旧版行为);空缓冲:Consumed 并进入单击检测 |
 | Shift 单击(空缓冲) | toggle_mode + ModeChanged(单击=按下后未产生其它键即释放,且无其它修饰) |
 | 其它键 | Pass(有缓冲时先 reset) |
 | 造词热键(Ctrl+=) | 进入造词模式(§12);组合中先按普通流程上屏再进入;英文态直通 |
@@ -199,7 +213,7 @@ Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.r
 
 - **接入**:应用设置 `XMODIFIERS=@im=lyyime`(doctor 的 Mode B profile 负责写入并重启会话应用);GTK3 内建 xim immodule / Xlib 应用原生接入。覆盖 GTK3+Xlib+XIM 类终端;Qt5 走 Mode A(互补全覆盖)。
 - **按键流**(root-window style):trigger on 后,XIM forward event → 映射 LKey → core.process_key → 效果流:Preedit/Candidates 画进自绘候选窗;Commit → `IMCommitString`(任意 Unicode);Pass 类键 → `IMForwardEvent`(协议级原样回放,零风险)。
-- **Shift 单击切换** = 空缓冲时以 XIM trigger off/on 切换中英:off 后应用直接收键(英文态),再 on 恢复中文态;组合中 Shift 已用于上屏英文原串,该次按键被消费且 release/超时不得再次切换模式。
+- **Shift 单击切换** = 空缓冲时以 XIM trigger off/on 切换中英:off 后应用直接收键(英文态),再 on 恢复中文态;组合中 Shift 已用于上屏英文原串,该次按键被消费且 release/超时不得再次切换模式。上屏英文原串的 mode 效果(shift_english=en,§6)在 apply_effects 内即时 `set_trigger(0)` 关 trigger 转英文,与单击路径同机制。
 - **候选窗**:GTK3 override-redirect、无边框、accept_focus(false),跟随光标(root style 下用 XQueryPointer);序号高亮首选、编码提示、翻页指示,样式对齐主流输入法。
 - **托盘**:Gtk.StatusIcon(XEmbed,兼容 xfce4-panel):状态(中/EN)+ 左键单击切换中英 + 右键菜单:主窗口、启用/停用、模式、设置、工具(直输模式/截屏(§13)/ 修复输入法 / 输入法管理(exec `lyyime-doctor` CLI 并解析 JSON,危险操作 GTK 确认对话框)、重载词库、日志)、退出。
 - **主窗口**:GTK3 纯代码构建(`mainwin.c`,标题 "lyyIme 输入法"):状态行(版本/启用/中 EN/引擎态,随 `update_mode_ui` 即时刷新)+ 入口(输入设置…=打开设置窗;直输模式…=拉起 lyyime-float,Mode C 悬浮独立输入)+ 工具箱(与托盘工具共用 `tools.c` 动作)。唤起路径:托盘菜单、`lyyime-xim --mainwin`(单实例二次启动发 SIGUSR2;SIGUSR1 仍弹设置窗)、`--mainwin` 首次启动直弹。关闭=隐藏保活,退出走托盘。
@@ -408,7 +422,7 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
 
 | 环节 | 行为 |
 |---|---|
-| 触发 | 缓冲 == 触发词(整串,非前缀)时候选追加功能候选;紧跟首选之后(无词库命中时置顶),多条触发词按配置顺序;普通候选永不功能键顶替,四码唯一上屏/四码顶屏对功能键候选不触发(功能必须经用户确认) |
+| 触发 | 缓冲 == 触发词(整串,非前缀)时候选追加功能候选;紧跟首选之后(无词库命中时置顶),多条触发词按配置顺序;普通候选永不功能键顶替,四码首选上屏/四码唯一上屏/四码顶屏对功能键候选不触发(缓冲等于触发词或其前缀时四码不自动上屏,功能必须经用户确认) |
 | 展示 | 候选文本 = `label`,注释 = 「功能键」;总开关 `quick_actions_enabled` 关闭则整表不生效 |
 | 执行 | 数字 1–9 / 鼠标点击候选行 / Space 确认首选 → core 回 `Effect::Action(i)`(i = 配置下标) + 清除效果流;宿主执行 `command`,不上屏文本 |
 | 标点/Enter 收尾 | 功能键候选不作首选文本:退回原始字母直通(不会把 label 当文字打出) |
@@ -447,3 +461,82 @@ doctor lib 额外提供一组管理 API(`ImeManager`,CLI 子命令同名),lyyime
   `xim/tests/unit_effects_json.c` §19(action 解析)+ `unit_config.c` §16
   (默认表/解析/剔除/保存回读)+ 桩库 §14 符号;`tests/e2e/run.sh` 双模式
   触发词→命令执行断言(marker 文件)。
+
+## 15. 候选右键菜单(固定首位 / 删除词组 / 反查英文)
+
+候选条上的词是"用户词汇资产"的可视部分:右键任何一行弹出操作菜单,
+三个动作全部走 core 统一语义,持久化在用户数据目录,重启后依然生效。
+
+### 15.1 交互合同(三端宿主必须一致实现)
+
+| 环节 | 行为 |
+|---|---|
+| 唤起 | 鼠标右键(button=3)点击候选行;行下标 = 当前页内可见序(与数字选词同序) |
+| 菜单项 | ①「固定首位」/「取消固定首位」(已固定的词标签取反)②「删除词组」③「反查英文」④「自定义查询」(**已配置才显示**,见 §15.5);功能键候选(§14 `CandKind::Action`)与页脚等非词项不弹菜单 |
+| 固定首位 | 词+当前缓冲码记入 `pinned.tsv`;该码的候选重算中此词恒居第一、注释追加「固」;再点同一词「取消固定」回落正常排序 |
+| 删除词组 | 词记入 `blocked.tsv`,任何编码下立即消失;用户词同删 `user_words.tsv`;**再造该词(§12 造词成功)自动解除屏蔽**——删除只针对当前词条不封锁词本身 |
+| 反查英文 | 当前词查 `zh_en.tsv`;命中则候选区替换为英文释义页(普通候选,数字/点选正常上屏英文);不命中回 notice「没有英文反查结果」,候选原样保留 |
+| 菜单后效果 | 操作完成后宿主拿到新的 effects JSON 刷新候选窗(固定/删除→过滤后的原候选页;反查→释义页) |
+
+### 15.2 各端实现要点
+
+- **core**(`wordops.rs` + `engine.rs`):`PinTable/BlockList/ZhEn` 三张持久表
+  (临时文件+rename 原子替换,与 user_words 同目录);`Engine::cand_pinned /
+  cand_op / plan_cand_op` 统一三动作;`recompute` 先过滤 blocked 再按 pinned
+  置顶(仅缓冲恰等于所记 code 才置顶);`Effect::Candidates` 驱动宿主刷新。
+  FFI 见 §3 `cand_pinned`/`cand_op` 可选符号组。
+- **Mode A(ibus)**:`EngineLogic.cand_menu` 状态 + `cand_menu_open/exec/restore`;
+  ibus 面板无弹出菜单 API,右键把候选区**整页替换为操作行**
+  ([1]固定首位 [2]删除词组 [3]反查英文),数字 1–3 或再次点选执行、
+  Esc/其他键还原;`service.rs candidate_clicked` 按 `button==3` 分派。
+- **Mode B(xim)**:候选窗原每 80ms 跟随 `pointer+20,+30`,指针进不了窗口
+  ——`candidate_window.c` 加悬停冻结(enter 停跟随、leave 恢复、hide 复位),
+  `button-press-event` button=3 弹 `GtkMenu` 三项;回调经
+  `xim_server.c → core_ffi.c` 的 `cand_pinned_ok/cand_op` 可选符号组进 core,
+  效果 JSON 走与数字选词同一条 apply_effects 路径。
+- **Mode C(float)**:候选按钮挂 `button-press-event`,button=3 弹 GTK 菜单;
+  `ui.rs` 复用 core `wordops`(同一 user 目录文件,与引擎互见),
+  `refresh_cands` 先滤 blocked 再按 pinned 置顶;反查直接把释义塞进候选行。
+
+### 15.3 数据生成
+
+`zh_en.tsv` 由 `lyyime-dicttool zhen <stardict.db> <out_dir>` 生成:ECDict
+`translation` 字段抽取中文词段(剥词性/标点/释义括号)、跨词条去重、
+按词频倒序截上限(默认 30 万行),与 `convert/fetch` 同一 `meta.json` 维护;
+`dicttool verify` 视其为可选文件(缺失放行,存在则校验格式与排序),
+`dicttool query --kind zhen <word>` 可查。
+
+### 15.5 自定义查询(菜单第 4 项,宿主侧动作)
+
+config.toml 顶层两键(统一设置窗「常规」页管理,保存即生效):
+
+```toml
+custom_query_label = "查词典"                            # 菜单显示名,空=「自定义查询」
+custom_query_url = "https://baike.baidu.com/item/{q}"    # {q}=候选词(百分号编码代入);空=菜单不显示此项
+```
+
+- **合同**:模板中全部 `{q}` 出现处替换为 RFC 3986 unreserved 规则百分号
+  编码后的词;模板无 `{q}` 则原样打开。核心替换/编码逻辑在
+  `lyyime_core::wordops::custom_query_url`(Rust 端共用;xim C 侧同语义)。
+- **执行**:三端统一 `xdg-open <url>` 异步拉起浏览器,不阻塞按键流、
+  不产生上屏、不动引擎状态(与 §14 快速功能键"宿主执行命令"同型,
+  故不走 core `cand_op`/FFI)。
+- **Mode B**:菜单第 4 项在 `candidate_window.c` 内部直接处理
+  (`open_query_url`),不经 `op_fn`/IC —— 菜单 grab 期间照样可用;
+  `lyy_candwin_set_query` 启动注入 + 设置保存再注入。
+- **Mode C**:`config::load_custom_query()` 每次弹菜单时读 config.toml。
+- **Mode A**:操作行第 4 行(已配置才出现);`Action::OpenUrl` 经
+  service `open_query_url` 拉起;`focus_in` 热读(同 ai_cfg 纪律)。
+
+### 15.6 测试
+
+- core `tests/candops_test.rs`:置顶带「固」标记/取消回落/pinned.tsv 持久化
+  重载、删除即隐/blocked.tsv 落盘/重启仍在、删除后再造词自动解屏蔽、
+  反查命中出释义页并可选中上屏、无反查 notice、功能键候选拒绝操作;
+  `ffi_test.rs` 增 `cand_pinned`/`cand_op` JSON 与两段式缓冲语义。
+- dicttool `zhen.rs` 单测:词段抽取/词性标点剥离/去重排序/上限截断;
+  `verify.rs` zh_en 存在与缺失两路。
+- Mode A `logic.rs` 单测:操作行展示/数字执行/Esc 还原/功能行不弹菜单。
+- Mode B `xim_e2e.sh` 场景 G:Xvfb 真鼠标——悬停冻结后右键弹 GTK 菜单,
+  指针点击依次验证反查(hello 上屏)/删除(首行变 你号)/固定(拟好置顶)
+  /自定义查询(桩 xdg-open 断言 {q} 代入网址)。

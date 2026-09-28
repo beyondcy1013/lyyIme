@@ -16,7 +16,7 @@
 /* §3 key_id 枚举(python 侧同样常量) */
 enum {
     LKEY_CHAR = 0,   /* 小写字母 a–z,宿主负责小写化(chr=码点) */
-    LKEY_DIGIT = 1,  /* '1'..'9'(chr=数字字符) */
+    LKEY_DIGIT = 1,  /* '0'..'9'(chr=数字字符;0 = 选第 10 个候选) */
     LKEY_SPACE = 2,
     LKEY_ENTER = 3,
     LKEY_BACKSPACE = 4,
@@ -40,6 +40,17 @@ typedef struct CoreFfi {
     /* §14 快速功能键符号组:1 = 五个符号齐备(旧 core 库可能缺失,
      * 缺失仅禁用该功能,不影响其余符号加载与打字主链路) */
     int qa_ok;
+    /* 英文上屏去向符号组(§6,2026-09-24):1 = 两符号齐备;旧 core 库
+     * 缺失时保持 core 各自默认(回车临时 / Shift 切英文),不整体降级 */
+    int en_mode_ok;
+    /* 精确单字按词频排位符号(§5,2026-09-24):1 = 符号在;旧 core 库
+     * 缺失时沿用 core 默认(开),不整体降级 */
+    int freq_rank_ok;
+    /* 1 = 支持"四码首选上屏"可选符号(lyyime_set_commit_first_at_four) */
+    int first_four_ok;
+    /* §15 候选右键菜单符号组(2026-09-29):1 = 两符号齐备;
+     * 旧 core 库缺失时右键行静默无菜单,打字/点选主链路照常 */
+    int cand_ops_ok;
     /* §3 原型,逐字对应 */
     void *(*lyyime_new)(const char *data_dir);                       /* NULL=失败 */
     void (*lyyime_free)(void *eng);
@@ -48,11 +59,19 @@ typedef struct CoreFfi {
     int (*lyyime_toggle_mode)(void *eng);             /* 返回新 mode */
     int (*lyyime_set_commit_after_four)(void *eng, int enabled); /* 返回生效值 */
     int (*lyyime_set_commit_unique_four)(void *eng, int enabled); /* 返回生效值 */
+    /* 四码首选上屏(§6,可选符号):0 = 关,非 0 = 开(满四码且首选是
+     * 五笔命中时直接上屏首选,有重码也上屏第一个) */
+    int (*lyyime_set_commit_first_at_four)(void *eng, int enabled); /* 返回生效值 */
     int (*lyyime_set_phrase_hint)(void *eng, int enabled);        /* 返回生效值 */
     int64_t (*lyyime_process_key)(void *eng, int key_id, uint32_t chr,
                                   char *buf, int64_t buf_cap);
     int (*lyyime_cand)(void *eng, int i, char *buf, int cap);
     int (*lyyime_cand_comment)(void *eng, int i, char *buf, int cap);
+    /* 英文上屏去向(§6,可选符号组):0 = temp 临时,非 0 = en 切英文模式 */
+    int (*lyyime_set_enter_english)(void *eng, int en_mode); /* 返回生效 0/1 */
+    int (*lyyime_set_shift_english)(void *eng, int en_mode); /* 返回生效 0/1 */
+    /* 精确单字按词频排位(§5,可选符号):0 = 关(恒居首位),非 0 = 开 */
+    int (*lyyime_set_exact_char_freq_rank)(void *eng, int enabled); /* 返回生效 0/1 */
     /* §14 快速功能键(可选符号组) */
     int (*lyyime_set_quick_actions_enabled)(void *eng, int enabled); /* 返回生效值 */
     void (*lyyime_clear_quick_actions)(void *eng);
@@ -61,6 +80,12 @@ typedef struct CoreFfi {
     int (*lyyime_action_command)(void *eng, int i, char *buf, int cap);
     int64_t (*lyyime_select_candidate)(void *eng, int idx, char *buf,
                                        int64_t buf_cap);
+    /* §15 候选右键操作(可选符号组):
+     * cand_pinned → -1 行不支持菜单 / 0 未固定 / 1 已固定;
+     * cand_op → 同 process_key 的效果流 JSON 两段式协议,op∈{1,2,3} */
+    int (*lyyime_cand_pinned)(void *eng, int idx);
+    int64_t (*lyyime_cand_op)(void *eng, int idx, int op, char *buf,
+                              int64_t buf_cap);
 } CoreFfi;
 
 /*
@@ -77,6 +102,11 @@ int lyy_core_process_key_json(const CoreFfi *ffi, void *eng, int key_id,
 /* 点选候选便捷封装(§14 鼠标点选;语义同 process_key_json):返回 0 成功 */
 int lyy_core_select_candidate_json(const CoreFfi *ffi, void *eng, int idx,
                                    char *out, int out_cap);
+
+/* 候选右键操作便捷封装(§15;语义同 process_key_json):返回 0 成功;
+ * 要求 cand_ops_ok,否则返回 -1(宿主据此禁用菜单) */
+int lyy_core_cand_op_json(const CoreFfi *ffi, void *eng, int idx, int op,
+                          char *out, int out_cap);
 
 /* 取第 i 个候选文本/注释;-needed 自动重试;失败返回 NULL */
 const char *lyy_core_cand_text(const CoreFfi *ffi, void *eng, int i,

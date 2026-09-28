@@ -227,9 +227,10 @@ fn 缺码字造词给失败提示() {
     )
     .unwrap();
     let mut eng = Engine::new(&td.path).unwrap();
-    // 本测验证拼音上屏与造词失败提示:关掉四码唯一上屏——夹具小词库里
-    // zhon(zhong 的前缀)候选唯一,会在第 4 键把「中」提前上屏。
+    // 本测验证拼音上屏与造词失败提示:关掉四码自动上屏——夹具小词库里
+    // zhon(zhong 的前缀)第 4 键首选会把「中」提前上屏。
     eng.set_config(Config {
+        commit_first_at_four: false,
         commit_unique_four: false,
         ..Config::default()
     });

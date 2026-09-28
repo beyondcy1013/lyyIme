@@ -154,26 +154,47 @@ wait_buffer "你好网络" 8
 grep -q '词组提示:「网络」' "$XIM_LOG" && fail "四码直上「网络」不应再次提示"
 echo "PASS B1d:同码词组打过不重复提示"
 
-# Shift 按下时有缓冲 → 上屏英文原串并消费该 Shift,不得同时切到英文态。
-xdotool type --delay 80 "the"; sleep 0.3; xdotool key Shift_L
+# Shift 按下时有缓冲 → 上屏英文原串;默认(shift_english=en)再切英文态
+# (mode 效果 → trigger off,xim 日志记录同步动作)。
+xdotool type --delay 80 "the"; sleep 0.3; xdotool key Shift_L; sleep 0.6
 wait_buffer "你好网络the" 8
-echo "PASS B2:Shift 按下上屏英文原串 the"
+grep -q 'mode 效果:core 切英文' "$XIM_LOG" || fail "Shift 上屏 the 后未切英文态"
+echo "PASS B2:Shift 按下上屏 the 并进入英文模式"
 
-# 下一段仍应由中文态处理,证明上一次 Shift release 没有切英文。
-xdotool type --delay 80 "zhongguo"; sleep 0.4; xdotool key space
-wait_buffer "你好网络the中国" 8
-echo "PASS B3:临时英文上屏后的 Shift 被消费,仍处中文态"
-
-# 空缓冲 Shift 单击才切英文直通。
-xdotool key Shift_L; sleep 0.6
+# 英文态直通:字母不再进组词缓冲(上一 Shift 已消费,release 不会切回)。
 xdotool type --delay 80 "abc"
-wait_buffer "你好网络the中国abc" 8
-echo "PASS B4:空缓冲 Shift 后英文态直通 abc"
+wait_buffer "你好网络theabc" 8
+echo "PASS B3:英文态直通 abc(Shift 上屏即转英文)"
 
+# 空缓冲 Shift 单击切回中文,zhongguo 顶屏「中国」。
 xdotool key Shift_L; sleep 0.6
 xdotool type --delay 80 "zhongguo"; sleep 0.4; xdotool key space
-wait_buffer "你好网络the中国abc中国" 8
-echo "PASS B5:Shift 回中文,zhongguo 顶屏 中国"
+wait_buffer "你好网络theabc中国" 8
+echo "PASS B4:Shift 单击回中文,zhongguo 顶屏 中国"
+
+# ---- 大写输入候选(2026-09-28):中文态 Shift+字母 进组词,全大写敲入
+# 候选 = 原样大写 → 首字母大写 → 全小写 → 中文翻译(en_trans.tsv)。
+# 真实打字习惯:按住 Shift 逐键敲字母(仅一次 Shift 按下事件),空格顶屏
+# = 原样大写 "WHO"。 ----
+xdotool keydown Shift_L
+xdotool key --delay 150 w h o
+xdotool keyup Shift_L
+sleep 0.4
+xdotool key space; sleep 0.4
+wait_buffer "你好网络theabc中国WHO" 12
+grep -q "commit: WHO" "$XIM_LOG" || fail "全大写敲入 WHO 后空格应顶屏原样大写"
+echo "PASS B4b:全大写敲入 WHO,空格上屏原样大写"
+
+# 数字 4 选中文翻译:CPU → 中央处理器(ECDICT + 内置缩略语校对表)。
+focus_client; sleep 0.3
+xdotool keydown Shift_L
+xdotool key --delay 200 c p u
+xdotool keyup Shift_L
+sleep 0.5
+xdotool key 4; sleep 0.5
+wait_buffer "你好网络theabc中国WHO中央处理器" 16
+grep -q "commit: 中央处理器" "$XIM_LOG" || fail "大写候选第 4 项应为中文翻译"
+echo "PASS B4c:CPU 数字 4 选中中文翻译 中央处理器"
 
 # ---- /AI:触发 → 提示词采集(拉丁) → 回车 → mock 服务回复上屏 ----
 xdotool type --delay 80 "/ai"; sleep 0.4
@@ -276,16 +297,15 @@ dbus-run-session -- bash -c '
     xdotool type --delay 90 "nihao"; sleep 0.5
     xdotool key space
     sleep 0.5
-    # 组合中 Shift 临时上屏英文原串,但保持中文态。
+    # 组合中 Shift 上屏英文原串,默认(shift_english=en)随之切英文态。
     xdotool type --delay 90 "the"; sleep 0.3
     xdotool key Shift_L; sleep 0.6
-    # 四码唯一上屏证明仍为中文态。
-    xdotool type --delay 90 "mqxt"; sleep 0.4
-    # 空缓冲 Shift 才切英文。
-    xdotool key Shift_L; sleep 0.6
+    # 英文态直通 ok(上一 Shift 已消费,release 不会切回中文)。
     xdotool type --delay 90 "ok"; sleep 0.6
-    # ---- 回中文后触发 /AI(须在内层会话存活时输入) ----
+    # 空缓冲 Shift 单击回中文:四码唯一上屏证明中文态恢复。
     xdotool key Shift_L; sleep 0.8
+    xdotool type --delay 90 "mqxt"; sleep 0.4
+    # ---- 中文态触发 /AI(须在内层会话存活时输入;上一步已在中文态) ----
     xdotool type --delay 90 "/ai"; sleep 0.4
     xdotool type --delay 90 "hi"; sleep 0.4
     xdotool key Return
@@ -307,13 +327,13 @@ dbus-run-session -- bash -c '
     xdotool key 2
     sleep 1.5
 '
-wait_buffer "你好the网络ok" 10
+wait_buffer "你好theok网络" 10
 IBUS_LOG="$WORK/home/.local/share/lyyime/logs/ibus.log"
 grep -q 'hint: 词组提示:「你好」可用 wqvb 打出' "$IBUS_LOG" || fail "Mode A 未见词组提示(wqvb):$(tail -5 "$IBUS_LOG" 2>/dev/null)"
 echo "PASS A1c:Mode A 词组提示「你好」= wqvb 已在辅助区展示"
-echo "PASS A1:ibus 临时英文上屏 Shift 被消费,下一段 mqxt 仍按中文处理"
+echo "PASS A1:Shift 上屏 the 即转英文(ok 直通),单击回中文后 mqxt 直上网络"
 # 四码唯一上屏:mqxt 真库唯一候选「网络」,第 4 键免空格直接上屏
-wait_buffer "你好the网络" 10
+wait_buffer "你好theok网络" 10
 echo "PASS A1b:四码唯一 mqxt 免空格直上 网络"
 wait_buffer "AI回复OK" 20
 grep -q '"content": "hi"' "$AI_DUMP" || fail "Mode A 提示词内容不符:$(cat "$AI_DUMP")"

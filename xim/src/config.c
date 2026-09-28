@@ -13,7 +13,7 @@
 
 /* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键。
  * 追加新键放表尾(索引 clamp_key/apply_value/write_value_buf 三处同步)。 */
-#define LYY_CFG_KEYS 22
+#define LYY_CFG_KEYS 28
 typedef enum { LYY_VT_INT, LYY_VT_BOOL, LYY_VT_STR } LyyValType;
 static const struct {
     const char *section;
@@ -21,7 +21,7 @@ static const struct {
     LyyValType type;
     const char *comment;
 } g_keys[LYY_CFG_KEYS] = {
-    { NULL, "page_size", LYY_VT_INT, "候选数 1..9" },
+    { NULL, "page_size", LYY_VT_INT, "候选数 1..10(数字键 1-9/0,0=第 10 个)" },
     { NULL, "mixed_english", LYY_VT_BOOL, "中英混合(无中文命中时给英文词)" },
     { NULL, "auto_commit_english", LYY_VT_BOOL,
       "高置信英文词遇标点/空格自动直通" },
@@ -54,6 +54,18 @@ static const struct {
       "停顿多少秒后显示今日统计 3..300" },
     { NULL, "stats_idle_exclude_secs", LYY_VT_INT,
       "计入速度的最长停顿秒数,超时的空隙不计时长 5..600" },
+    { NULL, "enter_english", LYY_VT_STR,
+      "回车上屏英文原串后的去向:temp=临时(默认,保持中文);en=切英文模式" },
+    { NULL, "shift_english", LYY_VT_STR,
+      "Shift 上屏英文原串后的去向:en=切英文模式(默认);temp=临时(保持中文)" },
+    { NULL, "exact_char_freq_rank", LYY_VT_BOOL,
+      "精确单字按词频排位(低频字让位高频词组;关闭则恒居首位)" },
+    { NULL, "commit_first_at_four", LYY_VT_BOOL,
+      "四码首选上屏(满四码且首选是五笔命中时直接上屏,有重码也上屏第一个)" },
+    { NULL, "custom_query_label", LYY_VT_STR,
+      "候选右键·自定义查询菜单名(默认:自定义查询)" },
+    { NULL, "custom_query_url", LYY_VT_STR,
+      "候选右键·自定义查询网址模板,{q} 为查询词占位符(空=菜单不显示此项)" },
 };
 
 /* 内置默认功能键表(合同 §14;与 core Config::default 一致) */
@@ -71,14 +83,16 @@ void lyy_config_defaults(LyyConfig *c)
 {
     /* 默认值:候选数等与 core Config 的常用取值对齐(docs/ARCHITECTURE.md §4);
      * AI 默认关闭且字段为空:未配置前 /AI 完全不介入按键 */
-    c->page_size = 5;
+    c->page_size = 10;
     c->mixed_english = 1;
     c->auto_commit_english = 1;
     c->chinese_punct = 1;
     c->learning = 1;
     c->commit_after_four = 0;
+    c->commit_first_at_four = 1;
     c->commit_unique_four = 1;
     c->phrase_hint = 1;
+    c->exact_char_freq_rank = 1;
     c->font_size = 14;
     c->autostart = 0;
     c->ai_enabled = 0;
@@ -99,11 +113,26 @@ void lyy_config_defaults(LyyConfig *c)
     c->stats_enabled = 1;
     c->stats_pause_secs = 10;
     c->stats_idle_exclude_secs = 30;
+    /* 英文上屏去向(§6):回车默认临时(单个英文词),Shift 默认转英文 */
+    snprintf(c->enter_english, sizeof(c->enter_english), "%s", "temp");
+    snprintf(c->shift_english, sizeof(c->shift_english), "%s", "en");
+    /* §15 自定义查询:默认空(url 空 = 候选右键菜单不显示此项) */
+    c->custom_query_label[0] = '\0';
+    c->custom_query_url[0] = '\0';
 }
 
 int lyy_config_ai_active(const LyyConfig *c)
 {
     return c->ai_enabled && c->ai_api_base[0] && c->ai_model[0];
+}
+
+const char *lyy_en_mode_canon(const char *v, const char *def)
+{
+    if (!strcmp(v, "temp") || !strcmp(v, "temporary"))
+        return "temp";
+    if (!strcmp(v, "en") || !strcmp(v, "english") || !strcmp(v, "persist"))
+        return "en";
+    return def;
 }
 
 static char *trim(char *s)
@@ -253,8 +282,8 @@ static void clamp_key(LyyConfig *c, int idx)
 {
     switch (idx) {
     case 0:
-        if (c->page_size < 1 || c->page_size > 9)
-            c->page_size = 5;
+        if (c->page_size < 1 || c->page_size > 10)
+            c->page_size = 10;
         break;
     case 7:
         if (c->font_size < 10 || c->font_size > 28)
@@ -287,6 +316,13 @@ static void clamp_key(LyyConfig *c, int idx)
     case 21:
         if (c->stats_idle_exclude_secs < 5 || c->stats_idle_exclude_secs > 600)
             c->stats_idle_exclude_secs = 30;
+        break;
+    case 22:
+    case 23:
+        /* 英文上屏去向:取值归一在 apply_value 完成,无额外钳制 */
+        break;
+    case 24:
+        /* 布尔无钳制;缺省由 defaults 给 1 */
         break;
     default:
         break;
@@ -328,6 +364,24 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
     case 19: c->stats_enabled = parse_bool(v, c->stats_enabled); break;
     case 20: c->stats_pause_secs = atoi(v); break;
     case 21: c->stats_idle_exclude_secs = atoi(v); break;
+    case 22:
+        copy_bounded(c->enter_english, sizeof(c->enter_english),
+                     lyy_en_mode_canon(v, "temp"));
+        break;
+    case 23:
+        copy_bounded(c->shift_english, sizeof(c->shift_english),
+                     lyy_en_mode_canon(v, "en"));
+        break;
+    case 24: c->exact_char_freq_rank = parse_bool(v, c->exact_char_freq_rank); break;
+    case 25:
+        c->commit_first_at_four = parse_bool(v, c->commit_first_at_four);
+        break;
+    case 26:
+        copy_bounded(c->custom_query_label, sizeof(c->custom_query_label), v);
+        break;
+    case 27:
+        copy_bounded(c->custom_query_url, sizeof(c->custom_query_url), v);
+        break;
     default: break;
     }
     clamp_key(c, idx);
@@ -582,6 +636,12 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     case 19: val = c->stats_enabled; break;
     case 20: val = c->stats_pause_secs; break;
     case 21: val = c->stats_idle_exclude_secs; break;
+    case 22: sval = c->enter_english; break;
+    case 23: sval = c->shift_english; break;
+    case 24: val = c->exact_char_freq_rank; break;
+    case 25: val = c->commit_first_at_four; break;
+    case 26: sval = c->custom_query_label; break;
+    case 27: sval = c->custom_query_url; break;
     default: return 0;
     }
     if (g_keys[idx].type == LYY_VT_STR) {

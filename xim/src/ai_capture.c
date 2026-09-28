@@ -474,6 +474,20 @@ static int capture_key(App *app, xcb_key_press_event_t *ev, uint32_t sym)
         candwin_hide(app);
         return 2;
     }
+    if (key == LKEY_CHAR) {
+        /* 死码吞键(core 为保留中文候选拒绝死码字母,组词缓冲不增):
+         * 采集态里字母是提示词原料——先把当前缓冲按"上屏原始字母"归入
+         * 提示词,再追加本字母,保持敲击顺序 */
+        char before[512];
+        snprintf(before, sizeof(before), "%s", ai->core_preedit);
+        if (lyy_ai_feed_core(app, ev, sym, key, chr) > 0 && before[0] &&
+            strcmp(ai->core_preedit, before) == 0) {
+            lyy_ai_feed_core(app, ev, sym, LKEY_ENTER, 0);
+            lyy_ai_on_pass_key(app, sym);
+        }
+        ai_show(app);
+        return 1;
+    }
     lyy_ai_feed_core(app, ev, sym, key, chr);
     ai_show(app);
     return 1;

@@ -6,6 +6,7 @@ use lyyime_core::LKey;
 // X keysym 常量
 pub const KSYM_A: u32 = 0x61;
 pub const KSYM_Z: u32 = 0x7a;
+pub const KSYM_0: u32 = 0x30;
 pub const KSYM_1: u32 = 0x31;
 pub const KSYM_9: u32 = 0x39;
 pub const KSYM_SPACE: u32 = 0x20;
@@ -17,6 +18,7 @@ pub const KSYM_PAGE_UP: u32 = 0xff55;
 pub const KSYM_PAGE_DOWN: u32 = 0xff56;
 pub const KSYM_SHIFT_L: u32 = 0xffe1;
 pub const KSYM_SHIFT_R: u32 = 0xffe2;
+pub const KSYM_KP_0: u32 = 0xffb0;
 pub const KSYM_KP_1: u32 = 0xffb1;
 pub const KSYM_KP_9: u32 = 0xffb9;
 
@@ -60,22 +62,27 @@ pub fn hotkey_match(state: u32, keyval: u32, mods: u32, sym: u32) -> bool {
 
 /// keysym → (LKey, 码点);无法识别时回 (LKey::Other, 0)。
 ///
-/// 注:Digit 的数值经 char 参数按码点传递('1'=0x31),core 取 chr-0x30
-/// 得 1..9(合同 §3 的补充约定)。
+/// 注:Digit 的数值经 char 参数按码点传递('0'=0x30),core 取 chr-0x30
+/// 得 0..9(0 = 选第 10 个候选,合同 §3 的补充约定)。
 pub fn map_keyval(keyval: u32) -> (LKey, u32) {
     if (KSYM_A..=KSYM_Z).contains(&keyval) {
         return (LKey::Char(keyval as u8 as char), keyval);
     }
-    // Shift 产生的大写键值:小写化入缓冲(CapsLock 大写态在 logic 层直通,不会到这里)
+    // Shift 产生的大写键值:原样传入(core 自行小写化组词并镜像敲入原形,
+    // 全大写敲入走大写候选通道,2026-09-28 需求;CapsLock 大写态在 logic 层
+    // 直通,不会到这里)。
     if (0x41..=0x5a).contains(&keyval) {
-        return (LKey::Char((keyval + 0x20) as u8 as char), keyval + 0x20);
+        return (LKey::Char(keyval as u8 as char), keyval);
     }
-    if (KSYM_1..=KSYM_9).contains(&keyval) {
-        return (LKey::Digit((keyval - KSYM_1 + 1) as u8), keyval);
+    if (KSYM_0..=KSYM_9).contains(&keyval) {
+        return (LKey::Digit((keyval - KSYM_0) as u8), keyval);
     }
     // 小键盘数字也可选词
-    if (KSYM_KP_1..=KSYM_KP_9).contains(&keyval) {
-        return (LKey::Digit((keyval - KSYM_KP_1 + 1) as u8), 0x31 + (keyval - KSYM_KP_1));
+    if (KSYM_KP_0..=KSYM_KP_9).contains(&keyval) {
+        return (
+            LKey::Digit((keyval - KSYM_KP_0) as u8),
+            0x30 + (keyval - KSYM_KP_0),
+        );
     }
     if keyval == KSYM_SPACE {
         return (LKey::Space, 0);
@@ -113,16 +120,20 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_lowercased_into_buffer() {
-        assert_eq!(map_keyval(0x41), (LKey::Char('a'), 0x61));
-        assert_eq!(map_keyval(0x5a), (LKey::Char('z'), 0x7a));
+    fn uppercase_passthrough_for_caps_candidates() {
+        // 2026-09-28 需求:Shift 产生的大写键值原样传入,core 侧全大写敲入
+        // 走大写候选通道(小写化组词在 core 内部完成)。
+        assert_eq!(map_keyval(0x41), (LKey::Char('A'), 0x41));
+        assert_eq!(map_keyval(0x5a), (LKey::Char('Z'), 0x5a));
     }
 
     #[test]
     fn digits_and_keypad() {
+        assert_eq!(map_keyval(0x30), (LKey::Digit(0), 0x30));
         assert_eq!(map_keyval(0x31), (LKey::Digit(1), 0x31));
         assert_eq!(map_keyval(0x39), (LKey::Digit(9), 0x39));
         assert_eq!(map_keyval(0xffb1), (LKey::Digit(1), 0x31));
+        assert_eq!(map_keyval(0xffb0), (LKey::Digit(0), 0x30));
         assert_eq!(map_keyval(0xffb9), (LKey::Digit(9), 0x39));
     }
 

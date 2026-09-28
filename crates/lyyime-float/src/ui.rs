@@ -27,6 +27,7 @@ use crate::undo;
 use crate::xtrack::XTrack;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
+use lyyime_core::wordops::{BlockList, PinTable, ZhEn};
 use lyyime_core::{punct, stats};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -73,6 +74,12 @@ pub struct App {
     pub(crate) ptr_hint: Cell<bool>,
     /// 内置输入法(Mode A)状态前缀缓存(每秒轮询刷新, 变化才重绘状态行)
     pub(crate) engine_prefix: RefCell<String>,
+    /// §15 候选右键菜单状态:与 core 引擎同一份数据文件
+    /// (~/.local/share/lyyime/{pinned,blocked}.tsv),跨模式即时一致;
+    /// zh_en 懒加载(LYYIME_DATA_DIR/zh_en.tsv,缺失时反查项给提示)。
+    pub(crate) pins: Rc<RefCell<PinTable>>,
+    pub(crate) blocked: Rc<RefCell<BlockList>>,
+    pub(crate) zh_en: Rc<RefCell<Option<ZhEn>>>,
 }
 
 /// 构建 App + 全部布线 + 显示 + 定时器。返回后调用方进 gtk::main()。
@@ -110,6 +117,17 @@ pub fn create() -> Result<Rc<App>, anyhow::Error> {
         caret: inline::CaretTracker::spawn(),
         ptr_hint: Cell::new(false),
         engine_prefix: RefCell::new(String::new()),
+        pins: {
+            let mut t = PinTable::new();
+            t.load(&config::data_dir().join("pinned.tsv"));
+            Rc::new(RefCell::new(t))
+        },
+        blocked: {
+            let mut t = BlockList::new();
+            t.load(&config::data_dir().join("blocked.tsv"));
+            Rc::new(RefCell::new(t))
+        },
+        zh_en: Rc::new(RefCell::new(None)),
     });
     wire(&app);
     app.win.show_all();
@@ -285,6 +303,15 @@ fn wire(app: &Rc<App>) {
             if let Some(t) = text {
                 commit(&app2, t);
             }
+        });
+        // §15 右键菜单: 固定首位 / 删除词组 / 反查英文(不产生上屏)
+        let app3 = app.clone();
+        b.connect_button_press_event(move |_, ev| {
+            if ev.button() == 3 {
+                popup_cand_menu(&app3, app3.page.get() * PAGE + i, ev);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
         });
         cand_box.pack_start(b, false, false, 0);
     }
@@ -635,10 +662,17 @@ fn poll_target(app: &Rc<App>) {
 
 // ---------- 候选 ----------
 fn refresh_cands(app: &Rc<App>) {
-    let code = app.entry.text().trim().to_string();
     app.page.set(0);
+    recompute_cands(app);
+}
+
+/// 合并词典/短语候选后应用 §15 屏蔽与置顶(pinned.tsv/blocked.tsv 与
+/// core/xim 共用同一份文件,跨模式即时一致);不重置页码,越界收敛末页
+/// ——右键操作后保持当前页上下文。
+fn recompute_cands(app: &Rc<App>) {
+    let code = app.entry.text().trim().to_lowercase();
     let dict = app.dict.borrow().clone();
-    *app.cands.borrow_mut() = match dict {
+    let mut list = match dict {
         Some(d) if !code.is_empty() => {
             let uf = app.user_freq.borrow().clone();
             merged_candidates(
@@ -651,7 +685,158 @@ fn refresh_cands(app: &Rc<App>) {
         }
         _ => Vec::new(),
     };
+    {
+        let pins = app.pins.borrow();
+        let blocked = app.blocked.borrow();
+        lyyime_core::wordops::apply_pin_block(&mut list, &code, &pins, &blocked,
+                                            |(t, _)| t.as_str());
+    }
+    *app.cands.borrow_mut() = list;
+    let n = app.cands.borrow().len();
+    let pages = if n == 0 { 1 } else { n.div_ceil(PAGE) };
+    if app.page.get() >= pages {
+        app.page.set(pages - 1);
+    }
     render_cands(app);
+}
+
+/// §15 候选右键菜单: 固定首位/删除词组/反查英文。右键本身不上屏、不改页。
+fn popup_cand_menu(app: &Rc<App>, j: usize, ev: &gdk::EventButton) {
+    let Some((text, tag)) = app.cands.borrow().get(j).cloned() else {
+        return;
+    };
+    let code = app.entry.text().trim().to_lowercase();
+    let pinned = app.pins.borrow().get(&code) == Some(text.as_str());
+    let menu = gtk::Menu::new();
+    let mi_pin = gtk::MenuItem::with_label(if pinned {
+        "取消固定首位"
+    } else {
+        "固定首位"
+    });
+    let mi_del = gtk::MenuItem::with_label("删除词组");
+    let mi_en = gtk::MenuItem::with_label("反查英文");
+    {
+        let app = app.clone();
+        let (code, text) = (code.clone(), text.clone());
+        mi_pin.connect_activate(move |_| cand_pin_toggle(&app, &code, &text));
+    }
+    {
+        let app = app.clone();
+        let (code, text, tag) = (code.clone(), text.clone(), tag.clone());
+        mi_del.connect_activate(move |_| cand_delete(&app, &code, &text, &tag));
+    }
+    {
+        let app = app.clone();
+        let text = text.clone();
+        mi_en.connect_activate(move |_| cand_en_lookup(&app, &text));
+    }
+    menu.append(&mi_pin);
+    menu.append(&mi_del);
+    menu.append(&mi_en);
+    // §15 自定义查询(config.toml custom_query_*;url 空则不显示)
+    if let Some(cq) = crate::config::load_custom_query() {
+        let mi_q = gtk::MenuItem::with_label(cq.menu_label());
+        let app = app.clone();
+        let text = text.clone();
+        mi_q.connect_activate(move |_| cand_custom_query(&app, &cq, &text));
+        menu.append(&mi_q);
+    }
+    menu.show_all();
+    menu.popup_at_pointer(None);
+    let _ = ev;
+}
+
+/// 自定义查询:网址模板 {q} 代入词 → xdg-open 拉起浏览器(宿主侧动作)。
+fn cand_custom_query(app: &Rc<App>, cq: &lyyime_core::wordops::CustomQuery,
+                     text: &str) {
+    let url = lyyime_core::wordops::custom_query_url(&cq.url, text);
+    match std::process::Command::new("xdg-open").arg(&url).spawn() {
+        Ok(_) => app
+            .status
+            .set_text(&format!("{}: {}", cq.menu_label(), text)),
+        Err(e) => app
+            .status
+            .set_text(&format!("打开失败(xdg-open): {e}")),
+    }
+}
+
+/// 固定首位/取消固定(同一编码下已固定再点即取消),pinned.tsv 持久化。
+fn cand_pin_toggle(app: &Rc<App>, code: &str, text: &str) {
+    let now_pinned;
+    {
+        let mut pins = app.pins.borrow_mut();
+        let r = if pins.get(code) == Some(text) {
+            now_pinned = false;
+            pins.unpin(code)
+        } else {
+            now_pinned = true;
+            pins.pin(code, text)
+        };
+        if let Err(e) = r {
+            app.status.set_text(&format!("固定保存失败: {e}"));
+            return;
+        }
+    }
+    recompute_cands(app);
+    let msg = if now_pinned {
+        format!("已固定首位: {text}")
+    } else {
+        "已取消固定".to_string()
+    };
+    app.status.set_text(&msg);
+}
+
+/// 删除词组: 入屏蔽表(词典/拼音同按词面屏蔽);属自定义短语则同步移出
+/// phrase.json —— 与 core 侧"删除同时移出造词库"同语义。
+fn cand_delete(app: &Rc<App>, code: &str, text: &str, tag: &str) {
+    {
+        if let Err(e) = app.blocked.borrow_mut().add(text) {
+            app.status.set_text(&format!("删除失败: {e}"));
+            return;
+        }
+    }
+    if tag == "自定义" {
+        let _ = app.phrase.borrow_mut().remove(code, text);
+        let _ = app.phrase.borrow().save();
+    }
+    recompute_cands(app);
+    app.status.set_text(&format!("已删除词组: {text}"));
+}
+
+/// 反查英文: zh_en.tsv 懒加载(运行时词库目录,与码表同一 LYYIME_DATA_DIR
+/// 解析);命中的英文词替换候选页,点选/数字照常上屏,继续输入即恢复。
+fn cand_en_lookup(app: &Rc<App>, text: &str) {
+    if !text.chars().all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+        app.status.set_text("该候选不是中文词, 无英文反查");
+        return;
+    }
+    {
+        let mut slot = app.zh_en.borrow_mut();
+        if slot.is_none() {
+            let dir = std::env::var("LYYIME_DATA_DIR")
+                .unwrap_or_else(|_| "/usr/local/share/lyyime/data".to_string());
+            *slot = Some(ZhEn::load(
+                &std::path::Path::new(&dir).join("zh_en.tsv"),
+            ));
+        }
+    }
+    let words: Vec<String> = app
+        .zh_en
+        .borrow()
+        .as_ref()
+        .map(|z| z.lookup(text).to_vec())
+        .unwrap_or_default();
+    if words.is_empty() {
+        app.status.set_text(&format!("「{text}」没有英文反查结果"));
+        return;
+    }
+    app.page.set(0);
+    *app.cands.borrow_mut() = words
+        .into_iter()
+        .map(|w| (w, format!("← {text}")))
+        .collect();
+    render_cands(app);
+    app.status.set_text(&format!("反查英文: {text}"));
 }
 
 fn render_cands(app: &Rc<App>) {
@@ -1554,6 +1739,18 @@ fn create_app_for_smoke() -> Result<Rc<App>, String> {
         caret: inline::CaretTracker::spawn(),
         ptr_hint: Cell::new(false),
         engine_prefix: RefCell::new(String::new()),
+        // 冒烟路径: 指向不存在目录 → 空表,不读写真实用户数据
+        pins: {
+            let mut t = PinTable::new();
+            t.load(std::path::Path::new("/tmp/lyyime-smoke-nonexistent/pinned.tsv"));
+            Rc::new(RefCell::new(t))
+        },
+        blocked: {
+            let mut t = BlockList::new();
+            t.load(std::path::Path::new("/tmp/lyyime-smoke-nonexistent/blocked.tsv"));
+            Rc::new(RefCell::new(t))
+        },
+        zh_en: Rc::new(RefCell::new(None)),
     }))
 }
 

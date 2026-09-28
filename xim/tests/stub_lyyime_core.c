@@ -39,6 +39,12 @@ typedef struct {
     int pages;
     int coin;     /* 造词模式(合同 §12):0=未进入;2..4=选长(演示串"你好好吗") */
     int commits;  /* 已发生上屏次数(造词历史非空判定) */
+    /* §15 右键菜单桩状态:按词面固定/屏蔽(空串=未固定);
+     * lookup=1 时候选集替换为反查结果(演示:你好 → hello/hi) */
+    char pinned[64];
+    char blocked[8][64];
+    int blocked_n;
+    int lookup;
 } StubEng;
 
 /* 造词演示串(每字 3 字节 UTF-8):选长 n 的选区 = 前 n 字 */
@@ -78,13 +84,92 @@ static int has_cands(const StubEng *e)
     return e->len > 0;
 }
 
-/* 生成第 page 页候选文本(0 基页) */
+/* 生成原始第 i 候选文本(未过滤;0 基,恒 5 项) */
 static void cand_text(const StubEng *e, int i, char *out, int cap)
 {
     if (strcmp(e->buf, "nihao") == 0)
         snprintf(out, (size_t)cap, "%s", g_nihao_cands[i]);
     else
         snprintf(out, (size_t)cap, "候选%d", i + 1);
+}
+
+/* ---- §15 右键菜单的生效候选集:剔除 blocked 词面,pinned 词面提首 ---- */
+
+static int stub_blocked(const StubEng *e, const char *w)
+{
+    for (int i = 0; i < e->blocked_n; i++)
+        if (strcmp(e->blocked[i], w) == 0)
+            return 1;
+    return 0;
+}
+
+/* 生效行 i → 原始下标写入 idxs;返回生效行数(0..5) */
+static int page_rows(const StubEng *e, int idxs[5])
+{
+    int n = 0;
+    for (int k = 0; k < 5; k++) {
+        char w[64];
+        cand_text(e, k, w, (int)sizeof(w));
+        if (!stub_blocked(e, w))
+            idxs[n++] = k;
+    }
+    if (e->pinned[0]) {
+        for (int k = 0; k < n; k++) {
+            char w[64];
+            cand_text(e, idxs[k], w, (int)sizeof(w));
+            if (strcmp(w, e->pinned) == 0) {
+                int t = idxs[k];
+                memmove(&idxs[1], &idxs[0], (size_t)k * sizeof(int));
+                idxs[0] = t;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+/* 反查演示结果集(§15):"你好" → hello/hi;blocked 同样剔除 */
+static const char *LOOKUP_WORDS[2] = { "hello", "hi" };
+
+static int lookup_count(const StubEng *e)
+{
+    int n = 0;
+    for (int i = 0; i < 2; i++)
+        if (!stub_blocked(e, LOOKUP_WORDS[i]))
+            n++;
+    return n;
+}
+
+/* 生效行数(缓冲为空恒 0) */
+static int page_count(const StubEng *e)
+{
+    if (e->len == 0)
+        return 0;
+    if (e->lookup)
+        return lookup_count(e);
+    int idxs[5];
+    return page_rows(e, idxs);
+}
+
+/* 生效行 i → 文本;i 越界不写入 */
+static void row_text(const StubEng *e, int i, char *out, int cap)
+{
+    if (e->lookup) {
+        int seen = 0;
+        for (int k = 0; k < 2; k++) {
+            if (stub_blocked(e, LOOKUP_WORDS[k]))
+                continue;
+            if (seen++ == i) {
+                snprintf(out, (size_t)cap, "%s", LOOKUP_WORDS[k]);
+                return;
+            }
+        }
+        return;
+    }
+    int idxs[5];
+    int n = page_rows(e, idxs);
+    if (i >= 0 && i < n)
+        cand_text(e, idxs[i], out, cap);
 }
 
 static void cand_comment_of(const StubEng *e, int i, char *out, int cap)
@@ -121,6 +206,7 @@ void lyyime_reset(void *eng)
     e->page = 0;
     e->pages = 0;
     e->coin = 0; /* 焦点切换/清缓冲均取消造词模式 */
+    e->lookup = 0; /* 缓冲清空/重置:反查结果页失效 */
 }
 
 int lyyime_mode(void *eng)
@@ -142,6 +228,12 @@ int lyyime_set_commit_after_four(void *eng, int enabled)
 }
 
 int lyyime_set_commit_unique_four(void *eng, int enabled)
+{
+    (void)eng;
+    return enabled ? 1 : 0;
+}
+
+int lyyime_set_commit_first_at_four(void *eng, int enabled)
 {
     (void)eng;
     return enabled ? 1 : 0;
@@ -265,6 +357,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
         break;
     }
     case 0: { /* CHAR */
+        e->lookup = 0; /* 新输入:反查结果页失效(与真核心重算一致) */
         if (e->len < 12 && chr >= 'a' && chr <= 'z') {
             e->buf[e->len++] = (char)chr;
             e->buf[e->len] = '\0';
@@ -274,16 +367,17 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
         if (has_cands(e)) {
             int page = 0, pages = 0;
             cands_page_of(e, &page, &pages);
-            jb_printf(&t, "{\"t\":\"cands\",\"n\":5,\"page\":%d,\"pages\":%d},",
-                      page, pages);
+            jb_printf(&t, "{\"t\":\"cands\",\"n\":%d,\"page\":%d,\"pages\":%d},",
+                      page_count(e), page, pages);
         }
         break;
     }
     case 1: { /* DIGIT */
         int d = (int)chr - '0'; /* 1..9 */
-        if (has_cands(e) && d >= 1 && d <= 5) {
+        int n = page_count(e);
+        if (has_cands(e) && d >= 1 && d <= n) {
             char word[64];
-            cand_text(e, d - 1, word, (int)sizeof(word));
+            row_text(e, d - 1, word, (int)sizeof(word));
             jb_printf(&t, "{\"t\":\"commit\",\"s\":\"%s\"},", word);
             jb_append(&t, "{\"t\":\"preedit\"}");
             e->len = 0;
@@ -298,7 +392,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
     case 2: { /* SPACE */
         if (has_cands(e)) {
             char word[64];
-            cand_text(e, 0, word, (int)sizeof(word));
+            row_text(e, 0, word, (int)sizeof(word));
             jb_printf(&t, "{\"t\":\"commit\",\"s\":\"%s\"},", word);
             jb_append(&t, "{\"t\":\"preedit\"}");
             e->len = 0;
@@ -332,8 +426,8 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
                 int page = 0, pages = 0;
                 cands_page_of(e, &page, &pages);
                 jb_printf(&t,
-                          "{\"t\":\"cands\",\"n\":5,\"page\":%d,\"pages\":%d},",
-                          page, pages);
+                          "{\"t\":\"cands\",\"n\":%d,\"page\":%d,\"pages\":%d},",
+                          page_count(e), page, pages);
             } else {
                 jb_append(&t, "{\"t\":\"preedit\"},");
             }
@@ -366,7 +460,7 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
             jb_append(&t, "{\"t\":\"pass\"}");
         } else if (e->len > 0) {
             char word[64];
-            cand_text(e, 0, word, (int)sizeof(word));
+            row_text(e, 0, word, (int)sizeof(word));
             jb_printf(&t, "{\"t\":\"commit\",\"s\":\"%s\"},", word);
             jb_printf(&t, "{\"t\":\"commit\",\"s\":\"%s\"},", cn);
             jb_append(&t, "{\"t\":\"preedit\"}");
@@ -429,10 +523,11 @@ int lyyime_cand(void *eng, int i, char *buf, int cap)
                  STUB_COIN_DEMO);
         return need;
     }
-    if (i >= 5 || e->len == 0)
+    int n = page_count(e);
+    if (i >= n)
         return -1;
     char word[64];
-    cand_text(e, i, word, (int)sizeof(word));
+    row_text(e, i, word, (int)sizeof(word));
     int64_t need = (int64_t)strlen(word) + 1;
     if (cap < need)
         return -(int)need;
@@ -455,10 +550,13 @@ int lyyime_cand_comment(void *eng, int i, char *buf, int cap)
         memcpy(buf, code, (size_t)need);
         return need;
     }
-    if (i >= 5 || e->len == 0)
+    int n = page_count(e);
+    if (i >= n)
         return -1;
+    int idxs[5];
+    page_rows(e, idxs);
     char c[128];
-    cand_comment_of(e, i, c, (int)sizeof(c));
+    cand_comment_of(e, idxs[i], c, (int)sizeof(c));
     int64_t need = (int64_t)strlen(c) + 1;
     if (cap < need)
         return -(int)need;
@@ -544,11 +642,11 @@ int64_t lyyime_select_candidate(void *eng, int idx, char *buf, int64_t buf_cap)
             return -need;
         }
     }
-    /* 普通候选点选:commit 第 idx 个(越界 consumed) */
+    /* 普通候选点选:commit 第 idx 个生效行(越界 consumed) */
     char word[64];
-    if (idx < 0 || idx >= 5)
+    if (idx < 0 || idx >= page_count(e))
         return -1;
-    cand_text(e, idx, word, (int)sizeof(word));
+    row_text(e, idx, word, (int)sizeof(word));
     const char *tpl = "[{\"t\":\"commit\",\"s\":\"%s\"},{\"t\":\"preedit\"},{\"t\":\"cands\",\"n\":0,\"page\":0,\"pages\":0}]";
     char tmp[256];
     int need = snprintf(tmp, sizeof(tmp), tpl, word) + 1;
@@ -556,6 +654,71 @@ int64_t lyyime_select_candidate(void *eng, int idx, char *buf, int64_t buf_cap)
         memcpy(buf, tmp, (size_t)need);
         e->len = 0;
         e->buf[0] = '\0';
+        return need;
+    }
+    return -need;
+}
+
+/* ---------- §15 候选右键菜单(桩:确定性 pin/delete/en_lookup) ----------
+ * op:1=固定/取消首位 2=删除词组(入 blocked) 3=反查英文(你好→hello/hi,
+ * 其余无结果提示)。效果流与真核心同构:preedit + cands / notice + consumed。 */
+int lyyime_cand_pinned(void *eng, int idx)
+{
+    StubEng *e = eng;
+    if (!e || idx < 0 || idx >= page_count(e))
+        return -1;
+    if (e->lookup)
+        return 0; /* 反查结果页同真核心:可右键,未固定 */
+    char w[64];
+    row_text(e, idx, w, (int)sizeof(w));
+    return (e->pinned[0] && strcmp(w, e->pinned) == 0) ? 1 : 0;
+}
+
+int64_t lyyime_cand_op(void *eng, int idx, int op, char *buf, int64_t buf_cap)
+{
+    StubEng *e = eng;
+    char tmp[1024];
+    tmp[0] = '\0';
+    if (!e || e->len == 0 || idx < 0 || idx >= page_count(e)) {
+        snprintf(tmp, sizeof(tmp), "[{\"t\":\"consumed\"}]");
+    } else if (op == 1 || op == 2) {
+        char w[64];
+        row_text(e, idx, w, (int)sizeof(w));
+        if (op == 1) { /* 固定首位:已固定再按=取消 */
+            if (e->pinned[0] && strcmp(e->pinned, w) == 0)
+                e->pinned[0] = '\0';
+            else
+                snprintf(e->pinned, sizeof(e->pinned), "%s", w);
+        } else { /* 删除词组:词面入 blocked,顺带解除固定 */
+            if (e->blocked_n < 8 && !stub_blocked(e, w)) {
+                snprintf(e->blocked[e->blocked_n],
+                         sizeof(e->blocked[0]), "%s", w);
+                e->blocked_n++;
+            }
+            if (e->pinned[0] && strcmp(e->pinned, w) == 0)
+                e->pinned[0] = '\0';
+        }
+        snprintf(tmp, sizeof(tmp),
+                 "[{\"t\":\"preedit\",\"s\":\"%s\"},{\"t\":\"cands\",\"n\":%d,\"page\":0,\"pages\":1}]",
+                 e->buf, page_count(e));
+    } else if (op == 3) { /* 反查英文:桩固定 你好→hello/hi,其余提示无结果 */
+        char w[64];
+        row_text(e, idx, w, (int)sizeof(w));
+        if (strcmp(w, "\xE4\xBD\xA0\xE5\xA5\xBD") == 0) {
+            e->lookup = 1;
+            snprintf(tmp, sizeof(tmp),
+                     "[{\"t\":\"preedit\",\"s\":\"%s\"},{\"t\":\"cands\",\"n\":%d,\"page\":0,\"pages\":1}]",
+                     e->buf, page_count(e));
+        } else {
+            snprintf(tmp, sizeof(tmp),
+                     "[{\"t\":\"notice\",\"s\":\"\xE8\xAF\xA5\xE8\xAF\x8D\xE6\xB2\xA1\xE6\x9C\x89\xE8\x8B\xB1\xE6\x96\x87\xE5\x8F\x8D\xE6\x9F\xA5\xE7\xBB\x93\xE6\x9E\x9C\"},{\"t\":\"consumed\"}]");
+        }
+    } else {
+        snprintf(tmp, sizeof(tmp), "[{\"t\":\"consumed\"}]");
+    }
+    int64_t need = (int64_t)strlen(tmp) + 1;
+    if (buf_cap >= need) {
+        memcpy(buf, tmp, (size_t)need);
         return need;
     }
     return -need;

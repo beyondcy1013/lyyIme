@@ -2,7 +2,8 @@
 <!--
   lyyime-xim 设置窗口(GtkBuilder 格式,GTK3,多标签页 GtkNotebook)
   页1 常规:候选数 / 字体大小 / 中文标点 / 词频学习 / 开机自启
-  页2 输入:中英混合 / 自动直通 / 四码顶屏 / 四码唯一上屏 / 词组效率提示
+  页2 输入:中英混合 / 自动直通 / 四码顶屏 / 四码唯一上屏 / 词组效率提示 /
+          精确单字词频排位 / 回车与 Shift 上屏英文后的去向(临时英文 / 切英文模式)
   页3 快捷键:造词 / 截屏(冲突自动避让)/ 快速功能键
   页4 AI 助手:OpenAI 兼容接口(地址/密钥/模型/系统提示/超时 + 测试连接)
   页5 输入统计:停顿显示今日统计(全局数据,显示端=悬浮窗状态行)
@@ -13,7 +14,7 @@
   <requires lib="gtk+" version="3.10"/>
   <object class="GtkAdjustment" id="adj_page_size">
     <property name="lower">1</property>
-    <property name="upper">9</property>
+    <property name="upper">10</property>
     <property name="step_increment">1</property>
     <property name="page_increment">1</property>
   </object>
@@ -144,6 +145,67 @@
                     <property name="width">2</property>
                   </packing>
                 </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_cq_label">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">候选右键·自定义查询菜单名</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">5</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_cq_label">
+                    <property name="visible">True</property>
+                    <property name="width-chars">18</property>
+                    <property name="placeholder-text">自定义查询</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">5</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_cq_url">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">自定义查询网址</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">6</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkEntry" id="ent_cq_url">
+                    <property name="visible">True</property>
+                    <property name="hexpand">True</property>
+                    <property name="width-chars">42</property>
+                    <property name="placeholder-text">https://baike.baidu.com/item/{q}</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">6</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_cq_hint">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label" translatable="yes">网址中 {q} 为候选词占位符;网址留空则右键菜单不显示此项</property>
+                    <attributes>
+                      <attribute name="scale" value="0.85"/>
+                      <attribute name="foreground" value="#777777"/>
+                    </attributes>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">7</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
               </object>
             </child>
             <child type="tab">
@@ -209,6 +271,18 @@
                   </packing>
                 </child>
                 <child>
+                  <object class="GtkCheckButton" id="chk_commit_first_at_four">
+                    <property name="visible">True</property>
+                    <property name="label">四码首选上屏(满四码直接上屏第一个候选,有重码也上屏)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">4</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
                   <object class="GtkCheckButton" id="chk_phrase_hint">
                     <property name="visible">True</property>
                     <property name="label">词组效率提示(上屏后最近几字有更省键的词组时候选条提示)</property>
@@ -216,8 +290,70 @@
                   </object>
                   <packing>
                     <property name="left-attach">0</property>
-                    <property name="top-attach">4</property>
+                    <property name="top-attach">5</property>
                     <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_exact_freq_rank">
+                    <property name="visible">True</property>
+                    <property name="label">四码/简码单字按词频排位(低频字让位高频词组,常用字仍在最前)</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">6</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_enter_en">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">回车上屏英文后</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">7</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkComboBoxText" id="combo_enter_en">
+                    <property name="visible">True</property>
+                    <property name="hexpand">True</property>
+                    <items>
+                      <item translatable="no">临时英文(默认,保持中文模式)</item>
+                      <item translatable="no">切到英文模式(长久英文)</item>
+                    </items>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">7</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkLabel" id="lbl_shift_en">
+                    <property name="visible">True</property>
+                    <property name="halign">start</property>
+                    <property name="label">Shift 上屏英文后</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">8</property>
+                  </packing>
+                </child>
+                <child>
+                  <object class="GtkComboBoxText" id="combo_shift_en">
+                    <property name="visible">True</property>
+                    <property name="hexpand">True</property>
+                    <items>
+                      <item translatable="no">临时英文(仅上屏,保持中文)</item>
+                      <item translatable="no">切到英文模式(默认,长久英文)</item>
+                    </items>
+                  </object>
+                  <packing>
+                    <property name="left-attach">1</property>
+                    <property name="top-attach">8</property>
                   </packing>
                 </child>
               </object>

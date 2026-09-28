@@ -21,7 +21,7 @@ pub enum Mode {
 pub enum LKey {
     /// 小写字母 a–z(宿主负责小写化)。
     Char(char),
-    /// 数字 '1'..'9' → 1..9,用于候选选词。
+    /// 数字 '0'..'9' → 0..9,用于候选选词(0 = 第 10 个,页不足 10 条时吞键)。
     Digit(u8),
     /// 空格:顶屏首选 / 直通原字母 / 空缓冲时放行。
     Space,
@@ -69,6 +69,20 @@ pub enum CandKind {
     /// 选中(数字/鼠标/空格顶屏)产生 [`Effect::Action`],宿主执行功能,
     /// 不上屏文本、不学习。
     Action(u8),
+}
+
+/// 候选右键菜单操作(合同 §15):宿主(候选窗/悬浮窗)右键候选行触发,
+/// 经 `Engine::cand_op` / FFI `lyyime_cand_op` 执行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CandOp {
+    /// 固定首位:当前缓冲编码下该词恒居候选第一;已固定时同操作取消固定。
+    PinToggle,
+    /// 删除词组:用户造词从 `user_words.tsv` 移除并加入屏蔽表
+    /// (`blocked.tsv`);内置词条不改词典文件、只屏蔽显示。
+    Delete,
+    /// 反查英文:当前候选页替换为该中文词的英文反查结果
+    /// (`zh_en.tsv`,可继续数字/点选上屏);无结果回 `Effect::Notice`。
+    EnLookup,
 }
 
 /// 一条候选:上屏文本 + 注释(编码/拼音提示)+ 得分 + 来源。

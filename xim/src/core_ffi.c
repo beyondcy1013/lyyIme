@@ -99,6 +99,32 @@ int lyy_core_ffi_load(CoreFfi *ffi)
                  ffi->lyyime_clear_quick_actions &&
                  ffi->lyyime_add_quick_action && ffi->lyyime_action_command &&
                  ffi->lyyime_select_candidate;
+
+    /* 英文上屏去向(§6,2026-09-24)同为可选符号组:旧 core 库缺失时
+     * config.toml 的 enter_english/shift_english 不生效(沿用 core 默认),
+     * 打字主链路照常。 */
+    ffi->lyyime_set_enter_english = dlsym(handle, "lyyime_set_enter_english");
+    ffi->lyyime_set_shift_english = dlsym(handle, "lyyime_set_shift_english");
+    ffi->en_mode_ok =
+        ffi->lyyime_set_enter_english && ffi->lyyime_set_shift_english;
+
+    /* 精确单字按词频排位(§5,2026-09-24)同为可选符号:旧 core 库缺失时
+     * config.toml 的 exact_char_freq_rank 不生效(沿用 core 默认,开)。 */
+    ffi->lyyime_set_exact_char_freq_rank =
+        dlsym(handle, "lyyime_set_exact_char_freq_rank");
+    ffi->freq_rank_ok = ffi->lyyime_set_exact_char_freq_rank != NULL;
+
+    /* 四码首选上屏(§6,2026-09-27)同为可选符号:旧 core 库缺失时
+     * config.toml 的 commit_first_at_four 不生效(沿用 core 默认,开)。 */
+    ffi->lyyime_set_commit_first_at_four =
+        dlsym(handle, "lyyime_set_commit_first_at_four");
+    ffi->first_four_ok = ffi->lyyime_set_commit_first_at_four != NULL;
+
+    /* 候选右键菜单(§15,2026-09-29)可选符号组:旧 core 库缺失时
+     * 右键行静默无菜单,打字/点选主链路照常。 */
+    ffi->lyyime_cand_pinned = dlsym(handle, "lyyime_cand_pinned");
+    ffi->lyyime_cand_op = dlsym(handle, "lyyime_cand_op");
+    ffi->cand_ops_ok = ffi->lyyime_cand_pinned && ffi->lyyime_cand_op;
     return 0;
 }
 
@@ -131,6 +157,23 @@ int lyy_core_select_candidate_json(const CoreFfi *ffi, void *eng, int idx,
     if (need <= 0 || (int64_t)out_cap < need)
         return -1;
     r = ffi->lyyime_select_candidate(eng, idx, out, out_cap);
+    return (r >= 0) ? 0 : -1;
+}
+
+/* §15 候选右键操作:语义同 select_candidate_json(两段式重试纪律);
+ * 只在 cand_ops_ok 时可用(旧库缺符号 → 宿主不建菜单,也不会走到这里) */
+int lyy_core_cand_op_json(const CoreFfi *ffi, void *eng, int idx, int op,
+                          char *out, int out_cap)
+{
+    if (!ffi->loaded || !ffi->cand_ops_ok || !eng || !out || out_cap <= 0)
+        return -1;
+    int64_t r = ffi->lyyime_cand_op(eng, idx, op, out, out_cap);
+    if (r >= 0)
+        return 0;
+    int64_t need = -r;
+    if (need <= 0 || (int64_t)out_cap < need)
+        return -1;
+    r = ffi->lyyime_cand_op(eng, idx, op, out, out_cap);
     return (r >= 0) ? 0 : -1;
 }
 

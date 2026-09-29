@@ -124,18 +124,22 @@ pub struct Config {
     pub en_freq_top_n: usize,
     /// 有中文命中时仍以英文候选/直通的名次上限(修订 §5.C:前 N 名完整英文词)。
     pub mixed_auto_commit_top_n: usize,
-    /// 满足四码后,再输入字母先上屏当前选中,剩余字母开启新组合。
+    /// 四码顶屏(默认开,借鉴极点五笔"四码顶屏"):恰好四码且首选是五笔
+    /// 命中(Wubi/User)时,再输入字母先上屏首选,该字母开启新组合;
+    /// 首选是拼音/英文/功能键或缓冲是触发词前缀时不顶屏,继续渐进组词。
     pub commit_on_extra_after_four: bool,
     /// 四码首选上屏(默认开,借鉴极点/QQ 五笔的"四码自动上屏"):恰好输入
-    /// 四码且首选是五笔命中时,免空格直接上屏首选——有重码也上屏第一个;
-    /// 首选是拼音/英文/功能键时不触发(拼音长码的中间态不被打断,"hell"
-    /// 这类英文前缀词不会四键即上屏)。关闭后回退 [`Config::commit_unique_four`]
-    /// 的"仅候选唯一才上屏"判定。
+    /// 四码、首选是五笔命中且候选条只此一条时,免空格直接上屏首选;
+    /// 候选条多于一条(同码重码或拼音/简拼/英文混排候选)一律保留组合
+    /// 等选词,或继续输入由 [`Config::commit_on_extra_after_four`] 顶屏
+    /// 首选。首选是拼音/英文/功能键时不触发(拼音长码的中间态不被打断,
+    /// "hell" 这类英文前缀词不会四键即上屏)。关闭后回退
+    /// [`Config::commit_unique_four`] 的"仅候选唯一才上屏"判定。
     pub commit_first_at_four: bool,
     /// 四码唯一上屏:恰好输入四码、有中文命中且候选唯一时,免空格直接上屏
     /// 该候选(主流五笔的"四码唯一自动上屏"习惯);多候选或唯一候选是
     /// 英文词时不触发,保持混打渐进。`commit_first_at_four` 开启时本项
-    /// 被覆盖(四码首选直接上屏,无需判唯一)。
+    /// 被覆盖(唯一五笔候选已直接上屏,无需判唯一)。
     pub commit_unique_four: bool,
     /// 回车上屏英文原串后的模式去向(默认 [`EnCommit::Temp`]:临时英文,
     /// 单个英文词的输入方式,上屏后保持中文模式)。
@@ -176,7 +180,7 @@ impl Default for Config {
             data_dir: None,
             en_freq_top_n: 2000,
             mixed_auto_commit_top_n: 500,
-            commit_on_extra_after_four: false,
+            commit_on_extra_after_four: true,
             commit_first_at_four: true,
             commit_unique_four: true,
             enter_english: EnCommit::Temp,
@@ -207,7 +211,13 @@ struct ConfigToml {
     data_dir: Option<String>,
     en_freq_top_n: usize,
     mixed_auto_commit_top_n: usize,
-    commit_on_extra_after_four: bool,
+    /// 规范键名;`None` 时回退别名 `commit_after_four`(XIM 设置窗写盘键名)
+    /// 或内置默认,见 [`ConfigToml::into_config`]。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_on_extra_after_four: Option<bool>,
+    /// `commit_on_extra_after_four` 的别名(XIM 写盘键名);规范键缺失时才生效。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_after_four: Option<bool>,
     commit_first_at_four: bool,
     commit_unique_four: bool,
     enter_english: String,
@@ -222,7 +232,11 @@ struct ConfigToml {
 
 impl Default for ConfigToml {
     fn default() -> Self {
-        ConfigToml::from(&Config::default())
+        let mut t = ConfigToml::from(&Config::default());
+        // 带别名的键以 Option 呈现,缺失(None)才可被别名/内置默认接管。
+        t.commit_on_extra_after_four = None;
+        t.commit_after_four = None;
+        t
     }
 }
 
@@ -248,7 +262,8 @@ impl From<&Config> for ConfigToml {
                 .map(|p| p.to_string_lossy().into_owned()),
             en_freq_top_n: c.en_freq_top_n,
             mixed_auto_commit_top_n: c.mixed_auto_commit_top_n,
-            commit_on_extra_after_four: c.commit_on_extra_after_four,
+            commit_on_extra_after_four: Some(c.commit_on_extra_after_four),
+            commit_after_four: None,
             commit_first_at_four: c.commit_first_at_four,
             commit_unique_four: c.commit_unique_four,
             enter_english: c.enter_english.as_toml().to_string(),
@@ -350,8 +365,13 @@ impl Config {
         let _ = writeln!(s, "mixed_auto_commit_top_n = {}", d.mixed_auto_commit_top_n);
         let _ = writeln!(
             s,
-            "\n# 满足四码后,再输入字母先上屏当前选中,后续字母开始新组合"
+            "\n# 四码顶屏(默认开):恰好四码且首选是五笔命中时,再输入字母先上屏首选,"
         );
+        let _ = writeln!(
+            s,
+            "# 该字母开始新组合;首选是拼音/英文时不顶屏,继续渐进组词(XIM 写盘键名"
+        );
+        let _ = writeln!(s, "# commit_after_four,与本键同义)");
         let _ = writeln!(
             s,
             "commit_on_extra_after_four = {}",
@@ -359,12 +379,13 @@ impl Config {
         );
         let _ = writeln!(
             s,
-            "\n# 四码首选上屏(默认开):恰好四码且首选是五笔命中时免空格直接上屏首选,"
+            "\n# 四码首选上屏(默认开):恰好四码且首选是五笔命中、候选条只此一条时免空格"
         );
         let _ = writeln!(
             s,
-            "# 有重码也上屏第一个;首选是拼音/英文时不触发(不打断拼音长码与英文单词)"
+            "# 直接上屏首选;候选多于一条(重码或混排候选)保留组合等选词/顶屏;首选是拼音/英文时不触发"
         );
+        let _ = writeln!(s, "# (不打断拼音长码与英文单词)");
         let _ = writeln!(
             s,
             "commit_first_at_four = {}",
@@ -523,7 +544,11 @@ impl ConfigToml {
                 .map(PathBuf::from),
             en_freq_top_n: self.en_freq_top_n,
             mixed_auto_commit_top_n: self.mixed_auto_commit_top_n,
-            commit_on_extra_after_four: self.commit_on_extra_after_four,
+            // 规范键优先,XIM 写盘的别名 commit_after_four 兜底,再落内置默认。
+            commit_on_extra_after_four: self
+                .commit_on_extra_after_four
+                .or(self.commit_after_four)
+                .unwrap_or(Config::default().commit_on_extra_after_four),
             commit_first_at_four: self.commit_first_at_four,
             commit_unique_four: self.commit_unique_four,
             // 未知/空取值按各键默认回退(回车 temp / Shift en),不判整份损坏
@@ -688,6 +713,30 @@ mod tests {
             .unwrap();
         assert!(cfg.quick_actions_enabled);
         assert_eq!(cfg.quick_actions, default_quick_actions());
+    }
+
+    #[test]
+    fn 四码顶屏_别名键兼容与规范键优先() {
+        // XIM 设置窗写盘键名 commit_after_four 与规范键
+        // commit_on_extra_after_four 同义;规范键缺失时别名生效,两键同写规范键优先。
+        let cfg: Config = toml::from_str::<ConfigToml>("commit_after_four = false")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.commit_on_extra_after_four);
+        let cfg: Config = toml::from_str::<ConfigToml>(
+            "commit_on_extra_after_four = true\ncommit_after_four = false",
+        )
+        .unwrap()
+        .into_config(Path::new("x"))
+        .unwrap();
+        assert!(cfg.commit_on_extra_after_four);
+        // 缺省 = 内置默认(顶屏开)。
+        let cfg: Config = toml::from_str::<ConfigToml>("mode = \"cn\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(cfg.commit_on_extra_after_four);
     }
 
     #[test]

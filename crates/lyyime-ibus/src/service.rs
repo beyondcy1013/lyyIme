@@ -379,6 +379,35 @@ impl EngineService {
         });
     }
 
+    /// 面板翻页统一入口(候选窗「<」「>」按钮与滚轮,合同 §6):
+    /// ibus-ui-gtk3 点击翻页箭头/在候选区滚轮时,ibus-daemon 以
+    /// Engine.PageUp/PageDown(CursorUp/CursorDown)回调引擎;此前未实现,
+    /// zbus 回 UnknownMethod → 面板点击无反应。日志落 ibus.log 供 e2e 断言。
+    async fn panel_page(&self, down: bool) {
+        let (actions, page, pages) = {
+            let mut logic = self.0.logic.lock().unwrap();
+            let mut host = CollectingHost::default();
+            logic.flip_page(&mut host, down);
+            let pos = logic.page_pos();
+            (host.actions, pos.0, pos.1)
+        };
+        let dir = if down { "下一页" } else { "上一页" };
+        if pages > 0 {
+            logger::info(&format!(
+                "候选窗面板翻页:{dir} → 第 {}/{} 页",
+                page + 1,
+                pages
+            ));
+        } else {
+            logger::info(&format!("候选窗面板翻页:{dir}(无候选,忽略)"));
+        }
+        for a in &actions {
+            if let Err(e) = self.emit_action(a).await {
+                crate::logger::error(&format!("翻页信号发送失败:{e}"));
+            }
+        }
+    }
+
     fn spawn_ai(&self, prompt: String) {
         let cfg = lyyime_ai::load_config();
         let model = cfg.model.clone();
@@ -733,6 +762,25 @@ impl EngineService {
         if let Some(u) = open_url {
             self.open_query_url(&u);
         }
+    }
+
+    /// 候选窗「<」「>」翻页按钮(合同 §6):与键盘 -/= 同一条 core 路径。
+    async fn page_up(&self) {
+        self.panel_page(false).await;
+    }
+
+    async fn page_down(&self) {
+        self.panel_page(true).await;
+    }
+
+    /// 面板候选区滚轮(ibus-ui-gtk3 滚动发 CursorUp/CursorDown):映射翻页,
+    /// 与主流输入法滚轮翻候选一致;造词模式下承担多选/少选一字。
+    async fn cursor_up(&self) {
+        self.panel_page(false).await;
+    }
+
+    async fn cursor_down(&self) {
+        self.panel_page(true).await;
     }
 
     async fn focus_in(&self) {

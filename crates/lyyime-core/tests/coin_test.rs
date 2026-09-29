@@ -227,11 +227,14 @@ fn 缺码字造词给失败提示() {
     )
     .unwrap();
     let mut eng = Engine::new(&td.path).unwrap();
-    // 本测验证拼音上屏与造词失败提示:关掉四码自动上屏——夹具小词库里
-    // zhon(zhong 的前缀)第 4 键首选会把「中」提前上屏。
+    // 本测验证拼音上屏与造词失败提示:关掉四码自动上屏与四码顶屏——夹具小
+    // 词库里 zhon(zhong 的前缀)第 4 键首选「中」属拼音中间态;显式关闭
+    // 保证行为与词条是否被学习过无关。用户词典一并隔离,不碰真实 HOME。
     eng.set_config(Config {
         commit_first_at_four: false,
         commit_unique_four: false,
+        commit_on_extra_after_four: false,
+        user_dict: Some(td.join("user.tsv")),
         ..Config::default()
     });
     type_str(&mut eng, "zhong");

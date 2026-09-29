@@ -102,7 +102,13 @@ fn read_core_config() -> Config {
             if let Some(v) = data.get("page_size").and_then(|v| v.as_integer()) {
                 cfg.page_size = v.clamp(1, 10) as usize;
             }
-            if let Some(v) = data.get("commit_on_extra_after_four").and_then(|v| v.as_bool()) {
+            // 四码顶屏:规范键 commit_on_extra_after_four,兼容 XIM 设置窗
+            // 写盘键名 commit_after_four(同一份 config.toml 跨模式共用)。
+            if let Some(v) = data
+                .get("commit_on_extra_after_four")
+                .and_then(|v| v.as_bool())
+                .or_else(|| data.get("commit_after_four").and_then(|v| v.as_bool()))
+            {
                 cfg.commit_on_extra_after_four = v;
             }
             if let Some(v) = data.get("commit_first_at_four").and_then(|v| v.as_bool()) {

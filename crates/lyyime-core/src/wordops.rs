@@ -488,8 +488,8 @@ mod tests {
     fn custom_query_url_substitute() {
         // {q} 替换为 UTF-8 百分号编码词;多处占位全替换
         assert_eq!(
-            custom_query_url("https://baike.baidu.com/item/{q}", "你好"),
-            "https://baike.baidu.com/item/%E4%BD%A0%E5%A5%BD"
+            custom_query_url("https://www.baidu.com/s?wd={q}", "你好"),
+            "https://www.baidu.com/s?wd=%E4%BD%A0%E5%A5%BD"
         );
         assert_eq!(
             custom_query_url("https://x/{q}?p={q}", "a b&c"),

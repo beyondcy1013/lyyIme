@@ -28,7 +28,7 @@ static const struct {
     { NULL, "chinese_punct", LYY_VT_BOOL, "中文态空缓冲输出中文标点" },
     { NULL, "learning", LYY_VT_BOOL, "用户词学习开关" },
     { NULL, "commit_after_four", LYY_VT_BOOL,
-      "满足四码后继续输入字母先上屏当前选中" },
+      "四码顶屏(满四码后继续输入字母先上屏五笔首选)" },
     { NULL, "commit_unique_four", LYY_VT_BOOL,
       "恰好四码且候选唯一时免空格直接上屏" },
     { NULL, "font_size", LYY_VT_INT, "候选窗字体大小 10..28" },
@@ -61,7 +61,7 @@ static const struct {
     { NULL, "exact_char_freq_rank", LYY_VT_BOOL,
       "精确单字按词频排位(低频字让位高频词组;关闭则恒居首位)" },
     { NULL, "commit_first_at_four", LYY_VT_BOOL,
-      "四码首选上屏(满四码且首选是五笔命中时直接上屏,有重码也上屏第一个)" },
+      "四码首选上屏(满四码且首选是五笔命中、同码无重码时直接上屏首选;有重码待选/顶屏)" },
     { NULL, "custom_query_label", LYY_VT_STR,
       "候选右键·自定义查询菜单名(默认:自定义查询)" },
     { NULL, "custom_query_url", LYY_VT_STR,
@@ -88,7 +88,7 @@ void lyy_config_defaults(LyyConfig *c)
     c->auto_commit_english = 1;
     c->chinese_punct = 1;
     c->learning = 1;
-    c->commit_after_four = 0;
+    c->commit_after_four = 1;
     c->commit_first_at_four = 1;
     c->commit_unique_four = 1;
     c->phrase_hint = 1;

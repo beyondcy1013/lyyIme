@@ -46,8 +46,8 @@ typedef struct {
     int auto_commit_english; /* 高置信英文词标点/空格自动直通 */
     int chinese_punct;       /* 中文态使用中文标点 */
     int learning;            /* 用户词学习开关 */
-    int commit_after_four;   /* 满足四码后,继续输入字母先顶屏当前选中 */
-    int commit_first_at_four;/* 恰好四码且首选是五笔命中时,免空格直接上屏首选(有重码也上屏第一个) */
+    int commit_after_four;   /* 四码顶屏:恰好四码且首选是五笔命中时,继续输入字母先顶屏首选 */
+    int commit_first_at_four;/* 恰好四码且首选是五笔命中、候选条只此一条时,免空格直接上屏首选(多候选待选/顶屏) */
     int commit_unique_four;  /* 恰好四码且候选唯一时,免空格直接上屏(first_at_four 开时被覆盖) */
     int phrase_hint;         /* 词组效率提示(上屏后提示更省键的词组与编码) */
     int exact_char_freq_rank; /* 精确单字按词频排位(默认开;关=恒居首位旧行为) */

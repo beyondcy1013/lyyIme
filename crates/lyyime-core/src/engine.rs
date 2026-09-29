@@ -13,10 +13,14 @@
 //!   `enter_english` 配置,默认临时——上屏后保持中文模式);空缓冲放行;
 //! - Backspace:删尾;Esc:清缓冲;`-`/`=`(PageUp/PageDown):翻页;
 //! - 标点:中文态空缓冲出中文标点;有缓冲先上屏首选再补中文标点;英文态放行;
-//! - 四码首选上屏(可配置,默认开):恰好四码且首选是五笔命中时免空格
-//!   直接上屏首选,有重码也上屏第一个;首选是拼音/英文或缓冲命中
-//!   功能键触发词(前缀)不触发;关闭后回退"四码唯一上屏"——中文候选
-//!   唯一时才免空格上屏(唯一候选是英文词不触发);
+//! - 四码首选上屏(可配置,默认开):恰好四码、首选是五笔命中且同码
+//!   无重码(五笔/用户候选唯一)时免空格直接上屏首选;有重码不上屏,
+//!   留候选等选词或继续输入顶屏;首选是拼音/英文或缓冲命中功能键
+//!   触发词(前缀)不触发;关闭后回退"四码唯一上屏"——中文候选唯一
+//!   时才免空格上屏(唯一候选是英文词不触发);
+//! - 四码顶屏(可配置,默认开):缓冲恰四码且首选是五笔命中时再敲字母,
+//!   先上屏首选、该字母开新组合;拼音/英文/功能键首选与触发词前缀
+//!   不顶屏,继续渐进组词;
 //! - 词组提示(可配置):上屏后最近几字有更省键的五笔词组时,效果流在
 //!   清除类效果之后追加 [`Effect::Hint`](候选条展示,下一次输入才清除);
 //! - 快速功能键(可配置,合同 §14):缓冲与触发词完全相等时候选条追加
@@ -421,7 +425,7 @@ impl Engine {
     /// 真实表在 `apply_plan`(JSON 确认写入宿主缓冲后)才改动+落盘;
     /// 反查英文把计划候选页替换为 zh_en 结果(可继续数字/点选上屏)。
     pub(crate) fn plan_cand_op(&self, idx: usize, op: CandOp) -> (Vec<Effect>, Plan) {
-        let mut p = Plan::unchanged(self);
+        let p = Plan::unchanged(self);
         if self.coin.is_some() {
             return (vec![Effect::Consumed], p);
         }
@@ -685,15 +689,25 @@ impl Engine {
             // 缓冲已满:吞掉,维持现有组合(合同 §5.1 ≤12)。
             return vec![Effect::Consumed];
         }
-        // 可选顶屏:恰好四码且已有候选时,再来的字母先确认当前选中,
-        // 该字母开启新组合。关闭后保持前缀渐进组词。
-        // 功能键候选不作顶屏确认(避免拼到一半误触发功能),继续缓冲。
+        // 四码顶屏(默认开,借鉴极点五笔"四码顶屏"):恰好四码且首选是
+        // 当前码的五笔精确命中时,再来的字母先顶屏首选、该字母开启新组合;
+        // 首选是拼音/英文/功能键或缓冲恰是功能键触发词前缀时不顶屏,
+        // 继续渐进组词——"niha"+'o' 续拼 nihao、"hell"+'o' 续拼 hello
+        // 与长触发词都不被劫持。
         if self.cfg.commit_on_extra_after_four && p.buf.chars().count() == 4 {
-            if let Some(top) = plan_page_slice(self, p).first() {
-                if !matches!(top.kind, CandKind::Action(_)) {
-                    let text = top.text.clone();
+            let trigger_prefix = self.cfg.quick_actions_enabled
+                && self
+                    .cfg
+                    .quick_actions
+                    .iter()
+                    .any(|a| a.trigger.starts_with(p.buf.as_str()));
+            if !trigger_prefix {
+                let top_text = plan_page_slice(self, p)
+                    .first()
+                    .filter(|top| self.plan_wubi_hit(p, top))
+                    .map(|top| top.text.clone());
+                if let Some(text) = top_text {
                     let mut effects = plan_commit(self, p, &text, true);
-                    plan_clear(p);
                     p.buf.push(c.to_ascii_lowercase());
                     p.buf_raw.push(c);
                     p.page = 0;
@@ -730,10 +744,11 @@ impl Engine {
             }
         }
         // 四码上屏(借鉴极点/QQ 五笔的"四码自动上屏",两个开关):
-        // - commit_first_at_four(默认开):首选来自五笔/学习词即直接上屏首选,
-        //   有重码也上屏第一个——码表输入法"满四码即定"的习惯;
-        // - commit_unique_four:首选是拼音/英文通道时,候选唯一才免空格上屏
-        //   (混打渐进的弱顶屏)。
+        // - commit_first_at_four(默认开):首选是五笔命中且候选条只此一条时
+        //   免空格直接上屏;候选条多于一条(同码重码或拼音/简拼混排候选)
+        //   一律保留组合,交给空格/数字选词或继续输入由
+        //   commit_on_extra_after_four 顶屏;
+        // - commit_unique_four:候选唯一时免空格上屏(混打渐进的弱顶屏)。
         // 首选是拼音/英文时不触发前者:"niha" 是 nihao 的中间态、四键不该
         // 劫持拼音长码,"hell" 不该四键上屏英文前缀词。缓冲是快速功能键
         // 触发词(或其前缀)时同样不上屏——功能候选须经用户确认(§14)。
@@ -747,8 +762,12 @@ impl Engine {
                     .iter()
                     .any(|a| a.trigger.starts_with(p.buf.as_str())))
         {
-            let first_wubi = matches!(p.cands[0].kind, CandKind::Wubi | CandKind::User);
-            let auto = (self.cfg.commit_first_at_four && first_wubi)
+            // 首选是五笔命中按词条归属判定(wubi_exact 索引成员),不依赖
+            // 候选 kind——学习过的拼音词被标 User 不算五笔命中;"有重码"
+            // 按候选条可见总数判定:五笔同码重码与拼音/简拼/英文混排候选
+            // 都算重码,多于一条即不自动上屏。
+            let first_wubi = self.plan_wubi_hit(p, &p.cands[0]);
+            let auto = (self.cfg.commit_first_at_four && first_wubi && p.cands.len() == 1)
                 || (self.cfg.commit_unique_four && p.cn_hit && p.cands.len() == 1);
             if auto {
                 let text = p.cands[0].text.clone();
@@ -1233,6 +1252,18 @@ impl Engine {
             "@shot" => format!("功能键 热键:{}", self.cfg.shot_hotkey),
             _ => "功能键".to_string(),
         }
+    }
+
+    /// 候选是否是当前缓冲码的五笔精确命中(含用户造词——造词时已并入
+    /// wubi_exact 索引)。按词条归属判定而非候选 `kind`:学习过的拼音词
+    /// 被标 User 不算五笔命中,学习过的五笔词仍算。四码上屏的"首选是
+    /// 五笔命中"与四码顶屏的门控共用。
+    fn plan_wubi_hit(&self, p: &Plan, cand: &Candidate) -> bool {
+        self.dict.wubi_exact.get(&p.buf).is_some_and(|idxs| {
+            idxs
+                .iter()
+                .any(|&i| self.dict.wubi[i as usize].word == cand.text)
+        })
     }
 
     /// 五笔通道(§5.2):完全同码(code == buffer,简码奖励并入该层)与前缀渐进分两路查询。

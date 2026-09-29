@@ -326,6 +326,26 @@ dbus-run-session -- bash -c '
     xdotool type --delay 90 "jietu"; sleep 0.5
     xdotool key 2
     sleep 1.5
+    # ---- 面板翻页(A7,合同 §6):候选窗 < > 按钮 → Engine.PageUp/PageDown ----
+    # 真机链路为 ibus-ui-gtk3 点击箭头 → ibus-daemon → 引擎同名方法;此前引擎
+    # 未实现,点击无反应。此处经 ibus 私有总线直调引擎方法验证引擎侧(含
+    # "yi" 多页候选),面板中继为 ibus 标准链路。对所有 lyyime 引擎实例调用
+    # (预载实例无组合,日志为"无候选";持组合实例翻页 → 日志带页码)。
+    IBUS_ADDR="$(sed -n "s/^IBUS_ADDRESS=//p" "$HOME"/.config/ibus/bus/*-unix-* 2>/dev/null | head -1)"
+    ENG_LOG="$WORK/home/.local/share/lyyime/logs/ibus.log"
+    xdotool type --delay 90 "yi"; sleep 0.6
+    for ENGP in $(grep -o "/com/lyyime/IBus/engines/[^)]*" "$ENG_LOG" 2>/dev/null | sort -u); do
+        gdbus call --address "$IBUS_ADDR" --dest org.freedesktop.IBus.Lyyime \
+            --object-path "$ENGP" --method org.freedesktop.IBus.Engine.PageDown >/dev/null 2>&1 || true
+    done
+    sleep 0.4
+    for ENGP in $(grep -o "/com/lyyime/IBus/engines/[^)]*" "$ENG_LOG" 2>/dev/null | sort -u); do
+        gdbus call --address "$IBUS_ADDR" --dest org.freedesktop.IBus.Lyyime \
+            --object-path "$ENGP" --method org.freedesktop.IBus.Engine.PageUp >/dev/null 2>&1 || true
+    done
+    sleep 0.4
+    xdotool key Escape
+    sleep 0.3
 '
 wait_buffer "你好theok网络" 10
 IBUS_LOG="$WORK/home/.local/share/lyyime/logs/ibus.log"
@@ -352,6 +372,9 @@ SHOT_N="$(grep -c shot "$SHOT_MARKER" 2>/dev/null || echo 0)"
 grep -q "快速功能键命中:截图(@shot)" "$IBUS_LOG" || fail "Mode A @shot 无日志"
 grep -q "热键 ctrl+alt+a" "$IBUS_LOG" || fail "Mode A @shot 提示未带热键"
 echo "PASS A6:触发词 jietu + 数字 2 → @shot 拉起截屏桩,提示含热键 ctrl+alt+a"
+grep -q "候选窗面板翻页:下一页 → 第 2/" "$IBUS_LOG" || fail "Mode A 面板翻页 PageDown 未生效:$(tail -5 "$IBUS_LOG")"
+grep -q "候选窗面板翻页:上一页 → 第 1/" "$IBUS_LOG" || fail "Mode A 面板翻页 PageUp 未生效:$(tail -5 "$IBUS_LOG")"
+echo "PASS A7:候选窗 < > 面板翻页(Engine.PageUp/PageDown)生效,数字选词跟随页窗"
 echo "Mode A 最终缓冲: $(cat "$BUFFER")"
 
 ############################################
@@ -359,4 +382,4 @@ echo "== [3/7] 截屏助手 lyyime-shot(Xvfb :95) =="
 LYYIME_SHOT_BIN="${CARGO_TARGET_DIR:-/data/cargo-target/local/lyyIme}/release/lyyime-shot" bash "$ROOT/tests/e2e/shot_e2e.sh"
 
 echo "== [4/7] 汇总 =="
-echo "E2E-ALL-PASS: Mode B(10 断言)+ Mode A(8 断言)+ /AI 全链路 + lyyime-shot + 快速功能键(含 @shot 热键提示)通过 ✅"
+echo "E2E-ALL-PASS: Mode B(10 断言)+ Mode A(9 断言,含面板翻页 A7)+ /AI 全链路 + lyyime-shot + 快速功能键(含 @shot 热键提示)通过 ✅"

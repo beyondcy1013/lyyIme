@@ -109,8 +109,8 @@ fn 四码后续字母_开启后先上屏当前选中() {
 
 #[test]
 fn 四码后续字母_仍有中文命中则继续组词() {
-    // 四码顶屏默认关闭:只要扩展后仍有中文命中(拼音/简拼渐进),
-    // 缓冲照常加长——"nihaoma" 逐键命中 ni/niha/nihao/nihaoma 一路成词。
+    // 四码顶屏只对五笔首选生效(§6):"niha" 的首选来自拼音通道,'o'
+    // 不被顶屏——"nihaoma" 逐键命中 ni/niha/nihao/nihaoma 一路成词。
     let mut eng = engine();
     type_str(&mut eng, "nihaoma");
     assert_eq!(eng.buffer(), "nihaoma");
@@ -122,10 +122,12 @@ fn 四码后续字母_仍有中文命中则继续组词() {
 #[test]
 fn 四码后继续输入死码_吞键保留候选() {
     // "aaaa" 在夹具中只有唯一候选,关掉四码自动上屏让缓冲停在四码;
+    // 同时关掉四码顶屏(默认开),否则第 5 键会先顶屏首选而非走死码路径。
     // 此后敲 'g' 把缓冲推进完全无候选的死胡同 → 吞键,候选状态原样保留。
     let mut eng = engine_with(Config {
         commit_first_at_four: false,
         commit_unique_four: false,
+        commit_on_extra_after_four: false,
         ..Config::default()
     });
     type_str(&mut eng, "aaaa");
@@ -198,26 +200,63 @@ fn 四码唯一_免空格直接上屏() {
 }
 
 #[test]
-fn 四码首选_有重码也直接上屏() {
-    // wqvb 有两个候选(你好/您好):默认四码首选上屏,第 4 键直接上屏首选,
-    // 有重码不再等空格。
-    let mut eng = engine();
-    type_str(&mut eng, "wqv");
-    let fx = eng.process_key(LKey::Char('b'));
-    assert_eq!(commits(&fx), vec!["你好".to_string()]);
-    assert!(eng.buffer().is_empty());
-    assert!(eng.flush_page().is_empty(), "上屏后候选一并清空");
+fn 四码首选_有重码不上屏_继续输入顶屏首选() {
+    // 四码有重码禁止上屏(2026-09-28):gcft 同码命中「致/死难者」两个五笔
+    // 候选,第 4 键保留组合等用户选词;直接继续输入则由四码顶屏(默认开)
+    // 上屏首选,该字母开启新组合。
+    let td = TempDir::new();
+    let mut wubi = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wubi.push_str("gcft\t致\t900\ngcft\t死难者\t1200\n");
+    std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
+    let mut eng = engine_with_fixtures(&td.path, Config::default());
+    let fx = type_str(&mut eng, "gcft");
+    assert!(commits(&fx).is_empty(), "重码四码不得自动上屏:{fx:?}");
+    assert_eq!(eng.buffer(), "gcft");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("致"));
+    // 空格/数字照常可选重码;这里继续敲 'g' → 顶屏首选「致」,g 开新组合。
+    let fx = eng.process_key(LKey::Char('g'));
+    assert_eq!(commits(&fx), vec!["致".to_string()], "继续输入应顶屏首选");
+    assert_eq!(eng.buffer(), "g");
+    // 新组合 'g':精确命中「一」居首,gcft 前缀候选(死难者/致)随渐进跟排。
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("一"));
+}
+
+#[test]
+fn 四码首选_混排候选算重码不上屏_继续输入顶屏() {
+    // "重码"按候选条可见总数判定(2026-09-29 修订):xian 私有夹具给五笔
+    // 唯一词条「舞」,但拼音通道同出 先/西安/先安——候选条多于一条即
+    // 禁止自动上屏;继续输入字母仍顶屏五笔首选。
+    let td = TempDir::new();
+    for f in ["pinyin_char.tsv", "pinyin_phrase.tsv"] {
+        std::fs::copy(fixtures().join(f), td.join(f)).unwrap();
+    }
+    let mut wubi = std::fs::read_to_string(fixtures().join("wubi.tsv")).unwrap();
+    wubi.push_str("xian\t舞\t900\n");
+    std::fs::write(td.join("wubi.tsv"), &wubi).unwrap();
+    let mut eng = engine_with_fixtures(&td.path, Config::default());
+    let fx = type_str(&mut eng, "xian");
+    assert!(commits(&fx).is_empty(), "混排多候选不得自动上屏:{fx:?}");
+    assert_eq!(eng.buffer(), "xian");
+    let page = page_texts(&eng);
+    assert!(page.len() > 1 && page.first().map(String::as_str) == Some("舞"), "page={page:?}");
+    // 继续敲 'g' → 顶屏首选「舞」,g 开新组合。
+    let fx = eng.process_key(LKey::Char('g'));
+    assert_eq!(commits(&fx), vec!["舞".to_string()]);
+    assert_eq!(eng.buffer(), "g");
 }
 
 #[test]
 fn 四码首选_拼音与英文中间态不打断() {
     // "niha" 是 nihao 的中间态、首选来自拼音通道:四码首选上屏只对
     // 五笔命中触发,拼音长码不被劫持;"hell" 首选英文候选同样不触发。
+    // 四码顶屏(默认开)同样只对五笔首选生效:'o' 顶不动拼音首选,
+    // 缓冲照常加长续拼 nihao。
     let mut eng = engine();
     let fx = type_str(&mut eng, "niha");
     assert!(commits(&fx).is_empty(), "拼音中间态不得四码上屏");
     assert_eq!(eng.buffer(), "niha");
-    eng.process_key(LKey::Char('o'));
+    let fx = eng.process_key(LKey::Char('o'));
+    assert!(commits(&fx).is_empty(), "拼音首选不得被顶屏:{fx:?}");
     assert_eq!(eng.buffer(), "nihao", "继续打完 nihao 正常组词");
     assert!(page_texts(&eng).contains(&"你好".to_string()));
 }
@@ -1625,6 +1664,25 @@ fn 快速功能键_唯一功能候选不触发四码唯一上屏() {
         "唯一候选是功能键时不自动上屏,{fx:?}"
     );
     // 用户空格确认后才触发。
+    let fx = eng.process_key(LKey::Space);
+    assert!(matches!(fx.first(), Some(Effect::Action(0))));
+}
+
+#[test]
+fn 快速功能键_触发词前缀不被四码顶屏劫持() {
+    // 缓冲恰是触发词前缀时,四码顶屏不得先上屏五笔首选——否则 5 字母
+    // 触发词永远敲不完(§14 与死码保护同一纪律)。
+    let mut eng = engine_action("aaaab", "打开配置", "@settings");
+    // "aaaa" 是触发词 aaaab 的前缀:虽五笔唯一命中「恭恭敬敬」也不自动上屏。
+    let fx = type_str(&mut eng, "aaaa");
+    assert!(commits(&fx).is_empty(), "触发词前缀不得四码上屏:{fx:?}");
+    assert_eq!(eng.buffer(), "aaaa");
+    // 第 5 键 'b' 续成触发词:不顶屏「恭恭敬敬」,缓冲正常加长。
+    let fx = eng.process_key(LKey::Char('b'));
+    assert!(commits(&fx).is_empty(), "触发词前缀不得被顶屏:{fx:?}");
+    assert_eq!(eng.buffer(), "aaaab");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("打开配置"));
+    // 空格确认触发功能候选。
     let fx = eng.process_key(LKey::Space);
     assert!(matches!(fx.first(), Some(Effect::Action(0))));
 }

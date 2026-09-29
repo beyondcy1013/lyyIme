@@ -26,7 +26,7 @@ typedef struct SettingsUi {
     GtkWidget *chk_learn;
     GtkWidget *chk_commit_four;
     GtkWidget *chk_commit_unique_four;
-    GtkWidget *chk_commit_first_at_four; /* 四码首选上屏(有重码也直接上屏第一个) */
+    GtkWidget *chk_commit_first_at_four; /* 四码首选上屏(五笔首选且候选条只此一条直接上屏) */
     GtkWidget *chk_phrase_hint; /* 词组效率提示(上屏后提示更省键词组) */
     GtkWidget *chk_exact_freq_rank; /* 精确单字按词频排位(低频字让位高频词组) */
     /* 英文上屏去向(§6,输入页;0=临时 temp,1=切英文模式 en) */

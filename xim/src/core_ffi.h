@@ -60,7 +60,7 @@ typedef struct CoreFfi {
     int (*lyyime_set_commit_after_four)(void *eng, int enabled); /* 返回生效值 */
     int (*lyyime_set_commit_unique_four)(void *eng, int enabled); /* 返回生效值 */
     /* 四码首选上屏(§6,可选符号):0 = 关,非 0 = 开(满四码且首选是
-     * 五笔命中时直接上屏首选,有重码也上屏第一个) */
+     * 五笔命中、同码无重码时直接上屏首选;有重码待选/顶屏) */
     int (*lyyime_set_commit_first_at_four)(void *eng, int enabled); /* 返回生效值 */
     int (*lyyime_set_phrase_hint)(void *eng, int enabled);        /* 返回生效值 */
     int64_t (*lyyime_process_key)(void *eng, int key_id, uint32_t chr,

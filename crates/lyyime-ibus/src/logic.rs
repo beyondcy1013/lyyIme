@@ -572,6 +572,28 @@ impl EngineLogic {
         self.dispatch(host, effects)
     }
 
+    /// 候选窗面板翻页(候选窗「<」「>」按钮 / 滚轮,合同 §6):与键盘 `-`/`=`
+    /// 同一条 core 路径(LKey::PageUp/PageDown),边界由 core 钳制不循环;
+    /// 造词模式下同键承担多选/少选一字(§12)。
+    /// 返回 true=已消费(无候选/单页时 core 给 Pass → false,面板无需刷新)。
+    pub fn flip_page(&mut self, host: &mut dyn Host, down: bool) -> bool {
+        if self.degraded() {
+            return false;
+        }
+        let key = if down { LKey::PageDown } else { LKey::PageUp };
+        let effects = self.core_mut().process_key(key);
+        self.dispatch(host, effects)
+    }
+
+    /// (当前页, 总页数),页码 0 起;降级态/无候选为 (0, 0)。
+    /// 面板翻页日志与单测断言用,避免测试复刻效果流细节。
+    pub fn page_pos(&self) -> (usize, usize) {
+        self.engine
+            .as_ref()
+            .map(|e| (e.page(), e.page_count()))
+            .unwrap_or((0, 0))
+    }
+
     // ------------------------------------------------------------------
     // §15 候选右键菜单(ibus CandidateClicked button=3)
     // ------------------------------------------------------------------
@@ -778,6 +800,109 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d.join("user_words.tsv")
+    }
+
+    /// 分页夹具:同一编码候选(表频递减)。core 每码只留频次前 9(§5.2),
+    /// 默认 page_size=5 → 2 页(5+4)。复用 fixtures_dir 骨架(无 char_tier.tsv,
+    /// 排序仅依赖表频,页内容可预期);关四码直上,保证翻页时组合仍在。
+    fn logic_paging() -> (PathBuf, EngineLogic) {
+        let dir = fixtures_dir();
+        let words = ["工", "戈", "一", "地", "气", "心", "手", "口", "日", "光", "月", "明"];
+        let rows: String = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| format!("a\t{}\t{}\n", w, 120 - i as u32 * 5))
+            .collect();
+        std::fs::write(dir.join("wubi.tsv"), rows).unwrap();
+        let mut logic =
+            EngineLogic::new(dir.clone(), None, lyyime_core::Config {
+                // 显式 5/页:默认 page_size=10 时单码 9 候选(§5.2 截断)只有 1 页
+                page_size: 5,
+                commit_unique_four: false,
+                ..Default::default()
+            });
+        logic.stats_dir = None;
+        (dir, logic)
+    }
+
+    /// 取最后一条**非空**候选事件(提交后 core 会清空候选,不能只看最后一条)。
+    fn last_nonempty_cands(h: &Mock) -> String {
+        h.events
+            .borrow()
+            .iter()
+            .rev()
+            .find(|e| e.starts_with("cands:[") && *e != "cands:[]")
+            .expect("应有非空候选事件")
+            .clone()
+    }
+
+    #[test]
+    fn panel_flip_page_moves_window_and_clamps() {
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        assert!(l.process_key_event(&mut h, 'a' as u32, 0));
+        assert_eq!(l.page_pos(), (0, 2), "9 候选按 5/页应为 2 页");
+        let page1 = last_nonempty_cands(&h);
+        // 「>」按钮(下一页):页窗移到第 2 页,页内是不同于首页的候选
+        assert!(l.flip_page(&mut h, true), "翻页应消费");
+        assert_eq!(l.page_pos(), (1, 2));
+        let page2 = last_nonempty_cands(&h);
+        assert_ne!(page1, page2, "翻页后页内容应变化:{page1} vs {page2}");
+        // 末页再向下:core 边界钳制,页码不动
+        assert!(l.flip_page(&mut h, true));
+        assert_eq!(l.page_pos(), (1, 2));
+        // 「<」按钮(上一页):回第 1 页,内容还原;首页再向上:钳制
+        assert!(l.flip_page(&mut h, false));
+        assert_eq!(l.page_pos(), (0, 2));
+        assert_eq!(last_nonempty_cands(&h), page1, "翻回后应还原首页内容");
+        assert!(l.flip_page(&mut h, false));
+        assert_eq!(l.page_pos(), (0, 2));
+    }
+
+    #[test]
+    fn panel_page_down_then_digit1_selects_page2_first() {
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, 'a' as u32, 0);
+        l.flip_page(&mut h, true);
+        // 数字 1 按「当前页」相对选择 → 第 2 页首个候选,而非第 1 页首选
+        let page2_first: String = last_nonempty_cands(&h)[7..]
+            .trim_end_matches(']')
+            .split(',')
+            .next()
+            .expect("第 2 页非空")
+            .to_string();
+        l.process_key_event(&mut h, '1' as u32, 0);
+        assert!(
+            h.events
+                .borrow()
+                .iter()
+                .any(|e| *e == format!("commit:{page2_first}")),
+            "数字 1 应上屏第 2 页首选 {page2_first}:events={:?}",
+            h.events.borrow()
+        );
+        assert!(
+            !h.events.borrow().iter().any(|e| e == "commit:一"),
+            "不得仍从第 1 页选择:events={:?}",
+            h.events.borrow()
+        );
+    }
+
+    #[test]
+    fn panel_flip_page_single_page_or_empty_is_noop() {
+        // 无候选:'z' 无命中 → 翻页放行不消费
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, 'z' as u32, 0);
+        assert_eq!(l.page_pos(), (0, 0));
+        assert!(!l.flip_page(&mut h, true));
+        // 单页候选:简拼 'n' 仅 你 → core 给 Pass,页码不动
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, 'n' as u32, 0);
+        assert_eq!(l.page_pos(), (0, 1));
+        assert!(!l.flip_page(&mut h, true));
+        assert_eq!(l.page_pos(), (0, 1));
     }
 
     const SHIFT_L: u32 = 0xffe1;

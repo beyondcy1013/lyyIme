@@ -116,7 +116,7 @@ int64_t lyyime_cand_op(void* eng, int op, int idx, char* buf, int64_t buf_cap);
 
 `key_id` 枚举(python 侧同样常量):`LKEY_CHAR=0, LKEY_DIGIT=1, LKEY_SPACE=2, LKEY_ENTER=3, LKEY_BACKSPACE=4, LKEY_ESC=5, LKEY_PAGEUP=6, LKEY_PAGEDOWN=7, LKEY_PUNCT=8, LKEY_SHIFTPRESS=9, LKEY_OTHER=10, LKEY_COIN=11, LKEY_LEFT=12, LKEY_RIGHT=13, LKEY_UP=14, LKEY_DOWN=15`(11–15 见 §12)。
 
-`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串,再按 `shift_english`(默认 `en`)于效果流末尾追加 `{"t":"mode","m":1}` 切英文模式;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。回车上屏英文原串同理由 `enter_english`(默认 `temp`)决定是否追加 mode 效果——两个键共用 temp/en 取值,一处配置(XIM 设置窗「输入」页 / config.toml `enter_english`、`shift_english`),均有 FFI 开关 `lyyime_set_enter_english` / `lyyime_set_shift_english`(非 0 = en,返回生效后的 0/1)。四码顶屏为可选项:配置 `commit_on_extra_after_four = true` 时,恰好四码且已有候选,再输入字母先上屏当前选中,该字母开启新组合;默认关闭,保持前缀渐进组词。**四码首选上屏默认开启**(`commit_first_at_four = true`,2026-09-27 起默认改为开启):恰好凑满四码且合并排序后首选来自五笔通道(Wubi/User)时,core 直接回 Commit(首选),免按空格——有重码也上屏第一个;首选是拼音/英文候选时不触发(`niha` 是 nihao 的中间态、"hell" 不该四键上屏英文前缀词,拼音长码与英文单词输入不被打断);缓冲恰等于快速功能键触发词(或为其前缀)时同样不触发,功能候选须经用户确认(§14)。四码唯一上屏默认**开启**(`commit_unique_four = true`):`commit_first_at_four` 关闭后回退为本项判定——恰好四码、有中文命中且合并排序后候选唯一时免空格上屏;多候选不触发,唯一候选是英文词时同样不触发(避免四键即把英文前缀词上屏)。**死码保护**:原组合还有中文命中时,新字母若把缓冲推进完全无候选的死胡同(五笔码 ≤4、拼音/简拼索引均前缀单调,加长后不可能救回中文命中),该字母不进缓冲、回 Consumed,候选状态原样保留——四码未选继续敲击不再把候选清空、进而被空格/标点当英文字母直通;快速功能键触发词的前缀(§14)不受此保护,保证触发词总能敲完。**词组效率提示**默认**开启**(`phrase_hint = true`):每次 commit 含汉字后,core 回看最近 2–6 个上屏汉字,若该后缀是词库五笔词组(含用户造词)且词组编码长度**严格小于**这几个字实敲的字母数(多字同屏按均摊计),在同一效果流末尾追加 `{"t":"hint","s":"词组提示:「词」可用 编码 打出"}`;同码词组打过的不重复提示。宿主把 hint 展示在候选条/辅助区且**不做定时清除**,直到下一次输入产生新效果流时自然替换或隐藏。两项均有 FFI 开关:`lyyime_set_commit_after_four` / `lyyime_set_commit_unique_four` / `lyyime_set_phrase_hint`(非 0 启用,返回生效后的 0/1)。
+`LKEY_SHIFTPRESS` 表示 **Shift 按下**:core 对有缓冲组合先上屏英文原串,再按 `shift_english`(默认 `en`)于效果流末尾追加 `{"t":"mode","m":1}` 切英文模式;空缓冲回 Consumed,由宿主继续做 Shift 单击判定。回车上屏英文原串同理由 `enter_english`(默认 `temp`)决定是否追加 mode 效果——两个键共用 temp/en 取值,一处配置(XIM 设置窗「输入」页 / config.toml `enter_english`、`shift_english`),均有 FFI 开关 `lyyime_set_enter_english` / `lyyime_set_shift_english`(非 0 = en,返回生效后的 0/1)。四码顶屏默认**开启**(`commit_on_extra_after_four`,2026-09-28 起默认改为开启;XIM 写盘键名 `commit_after_four`,core `ConfigToml` 与 ibus 读取均兼容该别名,规范键优先):恰好四码且合并排序后首选来自五笔通道(Wubi/User)时,再输入字母先上屏首选、该字母开启新组合;首选是拼音/英文/功能键候选或缓冲恰是触发词前缀时不顶屏,继续渐进组词(`niha`+'o' 续拼 nihao、`hell`+'o' 续拼 hello、长触发词不被劫持)。**四码首选上屏默认开启**(`commit_first_at_four = true`):恰好凑满四码、合并排序后首选是五笔命中(按 `wubi_exact` 词条归属判定,学习过的拼音词标 User 不算)且**候选条只此一条**时,core 直接回 Commit(首选),免按空格;**候选条多于一条禁止上屏**(2026-09-28 修订:同码五笔重码与拼音/简拼/英文混排候选都算重码,候选条只要超过一条即不自动上屏)——保留组合交给空格/数字选词,或继续输入由四码顶屏上屏首选;首选是拼音/英文候选时不触发(`niha` 是 nihao 的中间态、"hell" 不该四键上屏英文前缀词,拼音长码与英文单词输入不被打断);缓冲恰等于快速功能键触发词(或为其前缀)时同样不触发,功能候选须经用户确认(§14)。四码唯一上屏默认**开启**(`commit_unique_four = true`):`commit_first_at_four` 关闭后回退为本项判定——恰好四码、有中文命中且合并排序后候选唯一时免空格上屏;多候选不触发,唯一候选是英文词时同样不触发(避免四键即把英文前缀词上屏)。**死码保护**:原组合还有中文命中时,新字母若把缓冲推进完全无候选的死胡同(五笔码 ≤4、拼音/简拼索引均前缀单调,加长后不可能救回中文命中),该字母不进缓冲、回 Consumed,候选状态原样保留——四码未选继续敲击不再把候选清空、进而被空格/标点当英文字母直通;快速功能键触发词的前缀(§14)不受此保护,保证触发词总能敲完。**词组效率提示**默认**开启**(`phrase_hint = true`):每次 commit 含汉字后,core 回看最近 2–6 个上屏汉字,若该后缀是词库五笔词组(含用户造词)且词组编码长度**严格小于**这几个字实敲的字母数(多字同屏按均摊计),在同一效果流末尾追加 `{"t":"hint","s":"词组提示:「词」可用 编码 打出"}`;同码词组打过的不重复提示。宿主把 hint 展示在候选条/辅助区且**不做定时清除**,直到下一次输入产生新效果流时自然替换或隐藏。两项均有 FFI 开关:`lyyime_set_commit_after_four` / `lyyime_set_commit_unique_four` / `lyyime_set_phrase_hint`(非 0 启用,返回生效后的 0/1)。
 
 **chr 传值约定(v1.1 实现期确认)**:`chr` 携带 Char/Punct/**Digit** 的码点——Digit 传 `'0'..'9'`(ASCII 0x30..0x39),core 按 `chr-'0'` 取值,0 = 选第 10 个候选;其余 key_id 填 0。**有状态纪律**:`lyyime_process_key` 必须先生成完整 effects JSON、确认写入容量足够后才落内部状态变更,保证宿主因 `-needed` 扩容重试时同一键不会二次生效。
 
@@ -175,8 +175,9 @@ Mode C 文本框撤销/重做:GTK3 的 Entry/TextView 无内建 undo,`src/undo.r
 | a–z | 缓冲,更新 preedit/候选;有中文命中时若该字母把缓冲推进完全无候选的死胡同,则吞键保留候选(死码保护,§3;功能键触发词前缀例外) |
 | CapsLock 大写态 + 字母 | **原样直通英文,不进组词缓冲**:无 Shift 输出大写字母;Shift+字母由应用按 Caps+Shift 翻译输出小写字母。直通前宿主送 core `Other` 复位可能残留的缓冲(CapsLock 键本身经"其它键"路径清缓冲);数字/标点等非字母键不受 CapsLock 影响,行为同常态 |
 | Shift+字母(中文态,2026-09-28) | 大写字母进组词缓冲(core 内部小写化组词,`buf_raw` 镜像敲入原形,preedit 显示敲入的大小写)。**全大写敲入**(缓冲全部字符为大写)时候选固定为 原样大写 → 首字母大写 → 全小写 → 中文翻译(en_trans.tsv,候选 4 起、常用在前,候选 5、6 后为其它常用翻译),不混入五笔/拼音候选;无翻译词条时仅三个大小写变体,单字母去重。混合大小写一经出现即回退小写普通通道。Space/Enter/标点收尾与 Shift 上屏均保留敲入大小写(空格顶屏=原样大写);全大写四码不触发四码首选/唯一上屏;数字/点选按位选择不变 |
-| 四码首选上屏(可配置) | 恰好输入第 4 个字母且首选是五笔命中(Wubi/User):core 直接 Commit(首选),缓冲与候选一并清空,有重码也上屏第一个;首选为拼音/英文或缓冲命中功能键触发词(前缀)不触发。默认开启(`commit_first_at_four`) |
+| 四码首选上屏(可配置) | 恰好输入第 4 个字母、首选是五笔命中且**候选条只此一条**:core 直接 Commit(首选),缓冲与候选一并清空;**候选条多于一条不上屏**(同码重码或混排候选都算),保留组合等选词或继续输入顶屏;首选为拼音/英文或缓冲命中功能键触发词(前缀)不触发。默认开启(`commit_first_at_four`) |
 | 四码唯一上屏(可配置) | `commit_first_at_four` 关闭后回退判定:恰好四码、有中文命中且合并候选唯一时 core 直接 Commit(该候选);多候选或唯一候选为英文词不触发。默认开启(`commit_unique_four`),两者全关后第 4 键保持组合(§3) |
+| 四码顶屏(可配置) | 缓冲恰四码且首选是五笔命中(Wubi/User)时再输入字母:先 Commit(当前首选)、该字母开启新组合;首选为拼音/英文/功能键候选或缓冲是触发词前缀时不顶屏,继续渐进组词。默认开启(`commit_on_extra_after_four`,别名 `commit_after_four`) |
 | 1–9 | 有候选:选第 N 个上屏;无候选:Pass(数字原样)。选中快速功能键候选(§14)时回 `Action(i)` 而非 Commit |
 | 0 | 有候选且当前页 ≥ 10 条:选第 10 个上屏(`page_size` 默认 10,数字键只到 9,0 补足第 10 个);否则 Consumed(无候选时经"无候选放行"路径 Pass 的是 1–9;0 无候选即吞) |
 | Space | **任何时候都确认当前选中项**:有候选顶屏首选(首选为快速功能键候选时同样回 `Action(i)`,§14);有缓冲无候选 Commit(原字母);无缓冲 Pass(空格) |
@@ -512,7 +513,7 @@ config.toml 顶层两键(统一设置窗「常规」页管理,保存即生效):
 
 ```toml
 custom_query_label = "查词典"                            # 菜单显示名,空=「自定义查询」
-custom_query_url = "https://baike.baidu.com/item/{q}"    # {q}=候选词(百分号编码代入);空=菜单不显示此项
+custom_query_url = "https://www.baidu.com/s?wd={q}"      # {q}=候选词(百分号编码代入);空=菜单不显示此项
 ```
 
 - **合同**:模板中全部 `{q}` 出现处替换为 RFC 3986 unreserved 规则百分号

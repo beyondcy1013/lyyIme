@@ -183,7 +183,7 @@
                     <property name="visible">True</property>
                     <property name="hexpand">True</property>
                     <property name="width-chars">42</property>
-                    <property name="placeholder-text">https://baike.baidu.com/item/{q}</property>
+                    <property name="placeholder-text">https://www.baidu.com/s?wd={q}</property>
                   </object>
                   <packing>
                     <property name="left-attach">1</property>
@@ -249,7 +249,7 @@
                 <child>
                   <object class="GtkCheckButton" id="chk_commit_after_four">
                     <property name="visible">True</property>
-                    <property name="label">四码顶屏(满四码后继续输入字母先上屏当前词)</property>
+                    <property name="label">四码顶屏(满四码后继续输入字母先上屏五笔首选)</property>
                     <property name="halign">start</property>
                   </object>
                   <packing>
@@ -273,7 +273,7 @@
                 <child>
                   <object class="GtkCheckButton" id="chk_commit_first_at_four">
                     <property name="visible">True</property>
-                    <property name="label">四码首选上屏(满四码直接上屏第一个候选,有重码也上屏)</property>
+                    <property name="label">四码首选上屏(满四码且候选只此一条直接上屏首选,多候选等选词/顶屏)</property>
                     <property name="halign">start</property>
                   </object>
                   <packing>

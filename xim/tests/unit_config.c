@@ -49,7 +49,7 @@ int main(void)
     LyyConfig c;
     lyy_config_defaults(&c);
     CHECK(c.page_size == 10 && c.mixed_english == 1 &&
-              c.commit_after_four == 0 && c.commit_unique_four == 1 &&
+              c.commit_after_four == 1 && c.commit_unique_four == 1 &&
               c.commit_first_at_four == 1 &&
               c.phrase_hint == 1 && c.exact_char_freq_rank == 1 &&
               c.font_size == 14 && c.autostart == 0,

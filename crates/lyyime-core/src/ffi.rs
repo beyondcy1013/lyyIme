@@ -25,6 +25,7 @@ use std::ptr;
 
 use crate::config::{EnCommit, QuickAction};
 use crate::engine::Engine;
+use crate::menu_trigger::{MenuTrigger, MENU_CATALOG};
 use crate::types::{CandOp, Effect, LKey, Mode};
 
 // ---- key_id 枚举(python 侧同名常量,合同 §3)----
@@ -384,6 +385,61 @@ pub unsafe extern "C" fn lyyime_set_exact_char_freq_rank(eng: *mut Engine, enabl
     }
 }
 
+/// 设置"上屏后联想"(中文词上屏后,候选条给出接下来可能输入的词句尾巴;
+/// 默认开):非 0 启用,0 关闭(关闭同时清掉正在展示的联想行与上下文)。
+/// NULL 引擎忽略,返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_next_word_prediction(
+    eng: *mut Engine,
+    enabled: c_int,
+) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            let mut cfg = e.config().clone();
+            cfg.next_word_prediction = enabled != 0;
+            e.set_config(cfg);
+            c_int::from(e.config().next_word_prediction)
+        }
+        None => 0,
+    }
+}
+
+/// 设置中文标点开关(运行时窄化路径:只改开关并复位引号配对状态,
+/// 不重装载词表、不清组合缓冲/候选/联想上下文)。非 0 = 中文标点,
+/// 0 = 标点原样直通。NULL 引擎忽略,返回生效后的 0/1。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_chinese_punctuation(
+    eng: *mut Engine,
+    enabled: c_int,
+) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            e.set_chinese_punctuation(enabled != 0);
+            c_int::from(e.config().cn_punct)
+        }
+        None => 0,
+    }
+}
+
+/// 翻转中文标点开关(Ctrl+. 热键路径),返回切换后的 0/1。
+/// NULL 引擎忽略,返回 0。
+///
+/// # Safety
+/// `eng` 必须是有效的引擎指针。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_toggle_chinese_punctuation(eng: *mut Engine) -> c_int {
+    match eng.as_mut() {
+        Some(e) => c_int::from(e.toggle_chinese_punctuation()),
+        None => 0,
+    }
+}
+
 /// 喂一个键,把效果流 JSON 写入 `buf`。
 ///
 /// 返回所需字节数(含 `\0`);容量不足时不写入并返回 `-needed`;
@@ -642,4 +698,191 @@ pub unsafe extern "C" fn lyyime_cand_op(
         e.apply_plan(plan);
     }
     n
+}
+
+// ---- 菜单触发(可选符号组;旧库缺符号时宿主整体禁用该特性即可) ----
+//
+// 该对象与 Engine 完全解耦:宿主只在真实上屏文本产生后喂入
+// `lyyime_menu_trigger_commit`,不占用引擎规划/重试路径,因此不会与 §3
+// 两段式契约互相干扰。`commit` 自身同样守两段式纪律:先在克隆副本上计算
+// 提示,确认能完整写入 buf 才落状态;返回 -needed 时尾串/待执行保持原样,
+// 宿主扩容重试不会重复记尾串或重复产出提示。
+
+/// 创建菜单触发器(独立对象,与引擎无关)。
+///
+/// # Safety
+/// 返回值须由 `lyyime_menu_trigger_free` 释放;宿主保证单线程调用。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_new() -> *mut MenuTrigger {
+    Box::into_raw(Box::new(MenuTrigger::new()))
+}
+
+/// 销毁菜单触发器(NULL 安全)。
+///
+/// # Safety
+/// `mt` 必须来自 `lyyime_menu_trigger_new`,且此后不得再被使用。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_free(mt: *mut MenuTrigger) {
+    if !mt.is_null() {
+        drop(Box::from_raw(mt));
+    }
+}
+
+/// 配置菜单触发器:`enabled` 非 0 启用;`key` 为 F1–F12 序号(1..=12,越界
+/// 回退默认 7);`disabled` 为逗号分隔的稳定 id 黑名单(NULL 视为空)。
+/// 配置变更视为硬边界:尾串与待执行一起复位。
+/// 返回 0;`mt` 为 NULL 或 `disabled` 非 UTF-8 时返回 -1。
+///
+/// # Safety
+/// `mt` 必须是有效指针;`disabled` 须是以 `\0` 结尾的 C 字符串或 NULL。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_configure(
+    mt: *mut MenuTrigger,
+    enabled: c_int,
+    key: c_int,
+    disabled: *const c_char,
+) -> c_int {
+    let Some(t) = mt.as_mut() else { return -1 };
+    let disabled = if disabled.is_null() {
+        ""
+    } else {
+        match std::ffi::CStr::from_ptr(disabled).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    // 越界/负数交给 configure 回退默认键
+    t.configure(enabled != 0, u8::try_from(key).unwrap_or(0), disabled);
+    0
+}
+
+/// 注入宿主实际截屏快捷键;NULL/空/非法写法清除替代快捷键提示。
+/// 返回 0;`mt` = NULL 或 `spec` 非 UTF-8 返回 -1。
+/// # Safety
+/// `mt` 必须指向有效 MenuTrigger;`spec` 须为 NUL 结尾字符串或 NULL。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_set_shot_hotkey(
+    mt: *mut MenuTrigger,
+    spec: *const c_char,
+) -> c_int {
+    let Some(t) = mt.as_mut() else { return -1 };
+    let spec = if spec.is_null() {
+        ""
+    } else {
+        match std::ffi::CStr::from_ptr(spec).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    t.set_shot_hotkey(spec);
+    0
+}
+
+/// 喂入一次真实上屏文本:更新尾串并做最长后缀匹配;命中时把提示文本
+/// (`匹配了菜单功能「{label}」,按 F{n} 进入该功能`)写入 `buf`,返回
+/// 所需字节数(含 `\0`);未命中写空串返回 1;`mt`/`text` 为 NULL 或非
+/// UTF-8 返回 0;容量不足返回 `-needed` 且**不改内部状态**(两段式,可重试)。
+///
+/// # Safety
+/// `mt` 必须是有效指针;`text` 须为 UTF-8 C 字符串;`buf` 可写 `buf_cap` 字节。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_commit(
+    mt: *mut MenuTrigger,
+    text: *const c_char,
+    buf: *mut c_char,
+    buf_cap: i64,
+) -> i64 {
+    let Some(t) = mt.as_mut() else { return 0 };
+    if text.is_null() {
+        return 0;
+    }
+    let Ok(s) = std::ffi::CStr::from_ptr(text).to_str() else {
+        return 0;
+    };
+    let mut probe = t.clone();
+    let hint = probe.on_commit(s).unwrap_or_default();
+    let n = put_cstr(buf, buf_cap, &hint);
+    if n >= 0 {
+        *t = probe;
+    }
+    n
+}
+
+/// 每个非确认按键调用:仅清待执行(保留尾串,允许跨上屏续接)。
+/// 返回 1 = 确实清掉了待执行(宿主可清掉提示条),0 = 本就无待执行。
+///
+/// # Safety
+/// `mt` 必须是有效指针或 NULL(后者返回 0)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_cancel(mt: *mut MenuTrigger) -> c_int {
+    mt.as_mut().map_or(0, |t| c_int::from(t.cancel_pending()))
+}
+
+/// 硬边界复位:尾串与待执行一起清空(退格/翻页/Esc/修饰键/直通文本/
+/// 焦点与模式切换/引擎与配置重载/AI 进出等)。返回值语义同上。
+///
+/// # Safety
+/// `mt` 必须是有效指针或 NULL(后者返回 0)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_reset(mt: *mut MenuTrigger) -> c_int {
+    mt.as_mut().map_or(0, |t| c_int::from(t.reset()))
+}
+
+/// 一次性取出待执行目录下标;无待执行返回 -1。不删文本、不重复上屏。
+///
+/// # Safety
+/// `mt` 必须是有效指针或 NULL(后者返回 -1)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_take(mt: *mut MenuTrigger) -> c_int {
+    mt.as_mut()
+        .and_then(|t| t.take_pending())
+        .and_then(|i| c_int::try_from(i).ok())
+        .unwrap_or(-1)
+}
+
+/// 当前待执行目录下标(不消费);无待执行返回 -1。
+///
+/// # Safety
+/// `mt` 必须是有效指针或 NULL(后者返回 -1)。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_pending(mt: *mut MenuTrigger) -> c_int {
+    mt.as_ref()
+        .and_then(|t| t.pending())
+        .and_then(|i| c_int::try_from(i).ok())
+        .unwrap_or(-1)
+}
+
+/// 目录条目数(设置窗据此动态生成黑名单勾选行)。
+#[no_mangle]
+pub extern "C" fn lyyime_menu_trigger_count() -> c_int {
+    MENU_CATALOG.len() as c_int
+}
+
+/// 目录第 `i` 项稳定 id 写入 `buf`(返回值语义同 [`lyyime_cand`];
+/// 越界写空串返回 1)。
+///
+/// # Safety
+/// `buf` 可写 `cap` 字节。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_id(i: c_int, buf: *mut c_char, cap: c_int) -> c_int {
+    let s = usize::try_from(i)
+        .ok()
+        .and_then(|u| MENU_CATALOG.get(u))
+        .map(|m| m.id)
+        .unwrap_or("");
+    put_cstr(buf, cap as i64, s) as c_int
+}
+
+/// 目录第 `i` 项显示名写入 `buf`(语义同 [`lyyime_menu_trigger_id`])。
+///
+/// # Safety
+/// `buf` 可写 `cap` 字节。
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_menu_trigger_label(i: c_int, buf: *mut c_char, cap: c_int) -> c_int {
+    let s = usize::try_from(i)
+        .ok()
+        .and_then(|u| MENU_CATALOG.get(u))
+        .map(|m| m.label)
+        .unwrap_or("");
+    put_cstr(buf, cap as i64, s) as c_int
 }

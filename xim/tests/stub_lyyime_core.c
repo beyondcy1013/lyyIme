@@ -45,6 +45,7 @@ typedef struct {
     char blocked[8][64];
     int blocked_n;
     int lookup;
+    int cn_punct; /* 中英文标点运行时开关(默认 1=中文标点) */
 } StubEng;
 
 /* 造词演示串(每字 3 字节 UTF-8):选长 n 的选区 = 前 n 字 */
@@ -190,6 +191,7 @@ void *lyyime_new(const char *data_dir)
     if (!e)
         return NULL;
     e->mode = 0;
+    e->cn_punct = 1;
     return e;
 }
 
@@ -243,6 +245,30 @@ int lyyime_set_phrase_hint(void *eng, int enabled)
 {
     (void)eng;
     return enabled ? 1 : 0;
+}
+
+int lyyime_set_next_word_prediction(void *eng, int enabled)
+{
+    (void)eng;
+    return enabled ? 1 : 0;
+}
+
+int lyyime_set_chinese_punctuation(void *eng, int enabled)
+{
+    StubEng *e = eng;
+    if (!e)
+        return 0;
+    e->cn_punct = enabled ? 1 : 0;
+    return e->cn_punct;
+}
+
+int lyyime_toggle_chinese_punctuation(void *eng)
+{
+    StubEng *e = eng;
+    if (!e)
+        return 0;
+    e->cn_punct = !e->cn_punct;
+    return e->cn_punct;
 }
 
 /* 效果 JSON 追加小工具:返回写入后总长(不含 \0),截断返回 -1 */
@@ -455,7 +481,8 @@ int64_t lyyime_process_key(void *eng, int key_id, uint32_t chr, char *buf,
         break;
     }
     case 8: { /* PUNCT */
-        const char *cn = punct_map((char)chr);
+        /* 与 core 一致:cn_punct 关闭时一律直通(不映射不吞键) */
+        const char *cn = e->cn_punct ? punct_map((char)chr) : NULL;
         if (e->mode == 1 || !cn) {
             jb_append(&t, "{\"t\":\"pass\"}");
         } else if (e->len > 0) {
@@ -723,3 +750,8 @@ int64_t lyyime_cand_op(void *eng, int idx, int op, char *buf, int64_t buf_cap)
     }
     return -need;
 }
+
+/* 菜单触发可选符号组:桩库刻意不导出 —— mt_ok=0 时宿主优雅禁用该特性
+ * (匹配语义的唯一来源是 Rust menu_trigger.rs,桩不再维持第二份实现,
+ * 避免两份目录/别名漂移)。菜单触发 E2E 用真库 liblyyime_core.so,
+ * 见 tests/e2e/menu_trigger_e2e.sh。 */

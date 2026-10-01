@@ -46,6 +46,7 @@ typedef struct AiCapture {
     GString *out_buf, *err_buf;
     xcb_key_press_event_t pend_ev[2]; /* 已吞按键(打歪时补发) */
     int pend_n;
+    int pred_saved; /* 采集期临时关闭的上屏后联想(0=未动;复位时还原配置值) */
 } AiCapture;
 
 /* xim_server.c 提供:喂 core 一个键并按采集态语义应用效果流

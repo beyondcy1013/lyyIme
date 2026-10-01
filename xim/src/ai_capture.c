@@ -307,6 +307,13 @@ void lyy_ai_clear(AiCapture *ai)
 void lyy_ai_reset(App *app)
 {
     AiCapture *ai = &app->ai;
+    lyy_mt_reset(app); /* AI 会话进出=菜单触发硬边界 */
+    /* 采集期临时关闭的上屏后联想:离开会话时按配置还原
+     * (组词上屏 commit 进提示词时不得再出联想行/联想词被空格吞进提示词) */
+    if (ai->pred_saved && app->core.pred_ok && app->engine)
+        app->core.lyyime_set_next_word_prediction(
+            app->engine, app->config.next_word_prediction);
+    ai->pred_saved = 0;
     ai->state = LYY_AI_IDLE;
     ai->pend_n = 0;
     ai->prompt_full_notified = 0;
@@ -544,6 +551,12 @@ int lyy_ai_take(App *app, xcb_key_press_event_t *ev, uint32_t keysym)
             g_string_truncate(ai->prompt, 0);
             ai->prompt_full_notified = 0;
             ai->core_preedit[0] = '\0';
+            /* 采集态组词上屏归于提示词:临时关闭上屏后联想,
+             * 避免空格把联想后缀当提示词吞入(退出时由 reset 还原) */
+            if (app->core.pred_ok && app->engine) {
+                app->core.lyyime_set_next_word_prediction(app->engine, 0);
+                ai->pred_saved = 1;
+            }
             ai_show(app);
             lyy_log(&app->log, "AI 触发成功,进入提示词采集");
             return 1;

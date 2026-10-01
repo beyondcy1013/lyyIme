@@ -51,6 +51,17 @@ typedef struct CoreFfi {
     /* §15 候选右键菜单符号组(2026-09-29):1 = 两符号齐备;
      * 旧 core 库缺失时右键行静默无菜单,打字/点选主链路照常 */
     int cand_ops_ok;
+    /* 菜单触发符号组(2026-09-30):1 = lyyime_menu_trigger_* 全组齐备;
+     * 旧 core 库缺失时只禁用该特性(不上屏文字匹配、不出提示、F 键原样
+     * 直通),打字主链路与 §14 快速功能键照常 */
+    int mt_ok;
+    /* 上屏后联想符号(可选):1 = lyyime_set_next_word_prediction 存在;
+     * 旧 core 库缺失时无法使用/配置联想,保留原输入行为,不整体降级 */
+    int pred_ok;
+    /* 中英文标点切换符号组(可选,Ctrl+.):1 = set/toggle 两符号齐备;
+     * 旧 core 库缺任一符号时无法使用/配置运行时标点切换(沿用启动
+     * 默认中文标点,Ctrl+. 不拦截直通应用),保留原输入行为,不整体降级 */
+    int punct_ok;
     /* §3 原型,逐字对应 */
     void *(*lyyime_new)(const char *data_dir);                       /* NULL=失败 */
     void (*lyyime_free)(void *eng);
@@ -72,6 +83,13 @@ typedef struct CoreFfi {
     int (*lyyime_set_shift_english)(void *eng, int en_mode); /* 返回生效 0/1 */
     /* 精确单字按词频排位(§5,可选符号):0 = 关(恒居首位),非 0 = 开 */
     int (*lyyime_set_exact_char_freq_rank)(void *eng, int enabled); /* 返回生效 0/1 */
+    /* 上屏后联想(可选符号):0 = 关,非 0 = 开(默认开);关闭时 core 内
+     * 部连带清掉正在展示的联想行与上下文 */
+    int (*lyyime_set_next_word_prediction)(void *eng, int enabled); /* 返回生效 0/1 */
+    /* 中英文标点(可选符号组):set 窄化写开关并复位引号开合位,
+     * toggle 翻转并返回新状态;均不改缓冲/候选/模式,不写盘 */
+    int (*lyyime_set_chinese_punctuation)(void *eng, int enabled); /* 返回生效 0/1 */
+    int (*lyyime_toggle_chinese_punctuation)(void *eng); /* 返回新状态 0/1 */
     /* §14 快速功能键(可选符号组) */
     int (*lyyime_set_quick_actions_enabled)(void *eng, int enabled); /* 返回生效值 */
     void (*lyyime_clear_quick_actions)(void *eng);
@@ -86,6 +104,23 @@ typedef struct CoreFfi {
     int (*lyyime_cand_pinned)(void *eng, int idx);
     int64_t (*lyyime_cand_op)(void *eng, int idx, int op, char *buf,
                               int64_t buf_cap);
+    /* 菜单触发(可选符号组):独立对象,宿主持有;commit 为两段式
+     * (容量不足返回 -needed 且不落状态,扩容重试不重复记尾串) */
+    void *(*lyyime_menu_trigger_new)(void);
+    void (*lyyime_menu_trigger_free)(void *mt);
+    int (*lyyime_menu_trigger_configure)(void *mt, int enabled, int key,
+                                         const char *disabled);
+    /* 可选:注入实际截屏快捷键(旧库缺此符号为 NULL,不进 mt_ok 链) */
+    int (*lyyime_menu_trigger_set_shot_hotkey)(void *mt, const char *spec);
+    int64_t (*lyyime_menu_trigger_commit)(void *mt, const char *text,
+                                          char *buf, int64_t buf_cap);
+    int (*lyyime_menu_trigger_cancel)(void *mt); /* 返回 1=清掉了待执行 */
+    int (*lyyime_menu_trigger_reset)(void *mt);  /* 返回 1=曾有待执行 */
+    int (*lyyime_menu_trigger_take)(void *mt);   /* 待执行下标或 -1 */
+    int (*lyyime_menu_trigger_pending)(void *mt); /* 只读待执行下标或 -1 */
+    int (*lyyime_menu_trigger_count)(void);
+    int (*lyyime_menu_trigger_id)(int i, char *buf, int cap);
+    int (*lyyime_menu_trigger_label)(int i, char *buf, int cap);
 } CoreFfi;
 
 /*

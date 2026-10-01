@@ -45,6 +45,7 @@ pub mod config;
 pub mod error;
 pub mod ffi;
 pub mod hotkey;
+pub mod menu_trigger;
 pub mod punct;
 pub mod stats;
 
@@ -52,6 +53,7 @@ mod dict;
 mod engine;
 mod learner;
 mod pinyin;
+mod prediction;
 mod rank;
 mod types;
 mod user_words;
@@ -59,6 +61,7 @@ pub mod wordops;
 
 pub use config::{default_quick_actions, Config, EnCommit, QuickAction, QUICK_ACTIONS_MAX};
 pub use engine::Engine;
+pub use menu_trigger::{MenuAction, MenuItem, MenuTrigger, MENU_CATALOG};
 pub use error::Error;
 pub use ffi::effects_json;
 pub use punct::{to_chinese, QuoteState};

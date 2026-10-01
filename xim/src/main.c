@@ -9,6 +9,8 @@
  *   - 装配:日志 → 配置 → core FFI(dlopen)→ XIM server → 候选窗 → 托盘
  *     → 设置窗 → 主窗口 → GLib 主循环(xcb fd 融入,单线程,满足 §3 线程约定)。
  */
+#include <ctype.h>
+#include <errno.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <locale.h>
@@ -30,6 +32,9 @@ static void usage(FILE *out)
             "%s — lyyIme 独立输入法外挂(Mode B,XIM server)\n"
             "用法: lyyime-xim [选项]\n"
             "  --settings   显示设置窗口(若已在运行则唤起已存在实例)\n"
+            "  --settings-page N\n"
+            "               显示设置窗口并切到第 N 页(0 基;供菜单触发等\n"
+            "               内置路径直达子页)\n"
             "  --mainwin    显示主窗口(门面:输入设置/直输模式/工具箱)\n"
             "  --version    显示版本\n"
             "  --help       显示本帮助\n\n"
@@ -66,13 +71,50 @@ static void write_pidfile(const char *path)
     }
 }
 
+/* --settings-page 页码解析:严格 strtol,合法范围 0..6(设置窗 7 页);
+ * 尾部允许空白(请求文件是 "N\n" 文本);非法/缺值/越界返回 -1。 */
+static int parse_settings_page(const char *s, int *out)
+{
+    if (!s)
+        return -1;
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || end == s)
+        return -1;
+    while (*end && isspace((unsigned char)*end))
+        end++;
+    if (*end != '\0' || v < 0 || v > 6)
+        return -1;
+    *out = (int)v;
+    return 0;
+}
+
 /* 主循环 200ms 轮询一次信号置位(Signal→GTK 单线程桥) */
 static gboolean on_flags_tick(gpointer user_data)
 {
     App *app = user_data;
     if (app->settings_requested) {
         app->settings_requested = 0;
-        lyy_settings_show(&app->settings);
+        int page = app->settings_page;
+        app->settings_page = -1;
+        /* 唤起路径页码经请求文件传递(SIGUSR1 不带参数):仅本进程未自带
+         * 页码时才采纳文件值,防遗留文件盖掉本次启动 --settings-page;
+         * 文件无论采纳与否都清掉 */
+        if (app->settings_page_req[0]) {
+            if (page < 0) {
+                gchar *txt = NULL;
+                if (g_file_get_contents(app->settings_page_req, &txt, NULL,
+                                        NULL)) {
+                    int p = -1;
+                    if (parse_settings_page(txt, &p) == 0)
+                        page = p;
+                    g_free(txt);
+                }
+            }
+            g_unlink(app->settings_page_req);
+        }
+        lyy_settings_show_page(&app->settings, page);
     }
     if (app->mainwin_requested) {
         app->mainwin_requested = 0;
@@ -121,6 +163,7 @@ static void resolve_dict_dir(char *out, size_t cap, const char *user_data_dir)
 int main(int argc, char *argv[])
 {
     App *app = lyy_app();
+    app->settings_page = -1; /* -1 = 未指定子页 */
     lyy_ai_init(&app->ai); /* /AI 触发会话资源(任何路径退出统一 clear) */
 
     for (int i = 1; i < argc; i++) {
@@ -134,6 +177,24 @@ int main(int argc, char *argv[])
         }
         if (!strcmp(argv[i], "--settings")) {
             app->settings_requested = 2; /* 启动即弹设置(或唤起已有实例) */
+            continue;
+        }
+        if (!strcmp(argv[i], "--settings-page") ||
+            !strncmp(argv[i], "--settings-page=", 16)) {
+            const char *val = NULL;
+            if (argv[i][15] == '=') {
+                val = argv[i] + 16;
+            } else if (i + 1 < argc) {
+                val = argv[++i];
+            }
+            int page = -1;
+            if (!val || parse_settings_page(val, &page) != 0) {
+                fprintf(stderr,
+                        "--settings-page 需要合法页码(0..6,0 基)\n");
+                return 2;
+            }
+            app->settings_page = page;
+            app->settings_requested = 2;
             continue;
         }
         if (!strcmp(argv[i], "--mainwin")) {
@@ -166,6 +227,9 @@ int main(int argc, char *argv[])
     resolve_dict_dir(app->data_dir, sizeof(app->data_dir), data_dir);
     char pidfile[1024], res_dir_default[1024];
     snprintf(pidfile, sizeof(pidfile), "%s/lyyime/xim.pid", data_dir);
+    /* --settings-page 唤起已存在实例的页码请求文件(信号不带参数) */
+    snprintf(app->settings_page_req, sizeof(app->settings_page_req),
+             "%s/lyyime/settings-page.req", data_dir);
     g_mkdir_with_parents(app->data_dir, 0755);
 
     /* 日志先行(排障红线) */
@@ -183,6 +247,21 @@ int main(int argc, char *argv[])
     if (pidfile_alive(pidfile, &alive_pid)) {
         int want_mainwin = app->mainwin_requested == 2;
         lyy_log(&app->log, "已存在实例(pid=%ld),发送唤起信号后退出", alive_pid);
+        /* 设置唤起(含 --settings 与 --settings-page):信号不带参数,页码
+         * 经请求文件**原子**传递;普通 --settings 写 -1 显式清掉可能遗留
+         * 的旧页码。写失败不发信号,避免向用户假报成功。 */
+        if (!want_mainwin) {
+            char req[16];
+            snprintf(req, sizeof(req), "%d\n", app->settings_page);
+            if (!g_file_set_contents(app->settings_page_req, req, -1, NULL)) {
+                fprintf(stderr, "无法写入设置页请求文件:%s\n",
+                        app->settings_page_req);
+                lyy_log(&app->log,
+                        "ERROR 设置页请求文件写入失败,唤起信号未发");
+                lyy_log_close(&app->log);
+                return 1;
+            }
+        }
         kill((pid_t)alive_pid, want_mainwin ? SIGUSR2 : SIGUSR1);
         fprintf(stderr, "lyyime-xim 已在运行(pid=%ld),已唤起其%s窗口。\n",
                 alive_pid, want_mainwin ? "主" : "设置");
@@ -255,6 +334,7 @@ int main(int argc, char *argv[])
             xcb_aux_get_screen(app->xim.conn, app->xim.screen_no);
         lyy_candwin_init(&app->candwin, app->xim.conn, screen->root,
                          res_dir_default, app->config.font_size);
+        lyy_candwin_set_skin(&app->candwin, app->config.skin);
         /* 候选窗行点击(§14 鼠标点选):桥到 core select_candidate;
          * 右键菜单(§15):状态查询 + 操作回调桥到 core cand_op */
         app->candwin.on_click = lyy_candwin_row_clicked;
@@ -307,6 +387,8 @@ int main(int argc, char *argv[])
     lyy_xim_shutdown(&app->xim);
     if (app->engine && app->core.loaded)
         app->core.lyyime_free(app->engine);
+    if (app->menu_trigger && app->core.mt_ok)
+        app->core.lyyime_menu_trigger_free(app->menu_trigger);
     lyy_ai_clear(&app->ai);
     g_unlink(pidfile);
     lyy_log(&app->log, "==== 退出完成 ====");

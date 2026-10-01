@@ -353,7 +353,24 @@ impl DictIndex {
 
     fn load_pinyin_phrase(&mut self, path: &Path) {
         let mut count = 0usize;
-        for cols in read_rows(path, 3) {
+        let mut rows = read_rows(path, 3);
+        // 词频源未收录的常用词可能已有可靠拼音标注。少量人工校对词
+        // 随核心发布,不覆盖主词库读音/权重,也不激活缺失的词组通道。
+        // 限定音节已存在,避免小词库被补充词扩展到它不支持的读音。
+        if !rows.is_empty() {
+            let existing: HashSet<String> = rows.iter().map(|cols| cols[0].clone()).collect();
+            rows.extend(
+                parse_rows(include_str!("../../../data/pinyin_supplement.tsv"), 3)
+                    .into_iter()
+                    .filter(|cols| {
+                        !existing.contains(&cols[0])
+                            && cols[1]
+                                .split_whitespace()
+                                .all(|syll| self.syllables.contains(syll))
+                    }),
+            );
+        }
+        for cols in rows {
             let word = cols[0].clone();
             let py = cols[1].to_lowercase();
             let Ok(freq) = cols[2].parse::<u64>() else {
@@ -517,6 +534,10 @@ fn read_rows(path: &Path, min_cols: usize) -> Vec<Vec<String>> {
     let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();
     };
+    parse_rows(&content, min_cols)
+}
+
+fn parse_rows(content: &str, min_cols: usize) -> Vec<Vec<String>> {
     content
         .lines()
         .map(str::trim)

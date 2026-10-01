@@ -9,7 +9,10 @@
 
 use crate::keysym::{
     hotkey_match, is_shift, map_keyval, parse_hotkey, BLOCKING_MODS, KSYM_BACKSPACE,
-    KSYM_ESCAPE, KSYM_KP_ENTER, KSYM_RETURN, KSYM_SPACE, MASK_LOCK, MASK_RELEASE,
+    KSYM_CONTROL_L, KSYM_CONTROL_R, KSYM_DELETE, KSYM_DOWN, KSYM_END, KSYM_ESCAPE,
+    KSYM_F1, KSYM_F12, KSYM_HOME, KSYM_KP_ENTER, KSYM_LEFT, KSYM_PAGE_DOWN,
+    KSYM_PAGE_UP, KSYM_PERIOD, KSYM_RETURN, KSYM_RIGHT, KSYM_SPACE, KSYM_TAB,
+    KSYM_UP, MASK_CTRL, MASK_LOCK, MASK_RELEASE, MASK_SHIFT,
     PURPOSE_PASSWORD, PURPOSE_PIN,
 };
 use lyyime_ai::AiConfig;
@@ -40,6 +43,14 @@ pub trait Host {
     /// 自定义查询(§15 菜单第 4 项):宿主拉起浏览器打开已代入词的网址
     /// (xdg-open;异步,不阻塞按键流)
     fn on_open_url(&mut self, url: &str);
+    /// 菜单触发确认(2026-09-30,与 Mode B 同合同):上屏中文命中菜单功能名后
+    /// 用户按下配置的无修饰 Fn;index = core 可信目录 MENU_CATALOG 下标,
+    /// 宿主按目录动作分派(OpenSettings/Help/EnglishMode/…),绝不落 shell。
+    fn on_menu_action(&mut self, index: usize);
+    /// 撤下辅助区的菜单触发提示:仅在确认辅助区当前仍是我们贴的提示时
+    /// 调用(词组提示/notice/候选 aux 会覆盖它,各自在 dispatch 内解除
+    /// 归属标记);宿主隐藏辅助区,不影响预编辑/候选。
+    fn on_menu_hint_clear(&mut self);
 }
 
 /// /AI 触发会话状态:idle=未触发;slash/slash_a=已吞触发前缀;
@@ -80,6 +91,20 @@ pub struct EngineLogic {
     /// §15 自定义查询(菜单第 4 行;config.toml custom_query_*,
     /// 焦点进入时热读 —— 设置保存后即时生效)。None = 操作行不显示。
     custom_query: Option<lyyime_core::wordops::CustomQuery>,
+    /// 菜单触发状态机(2026-09-30):独立纯状态机,不属于 engine/Plan;
+    /// 只消费真实上屏文本(dispatch 的 Commit 效果,AI 采集态除外)。
+    menu_trigger: lyyime_core::MenuTrigger,
+    /// 辅助区当前显示的是我们贴的菜单提示:为 true 才可撤下
+    /// (词组提示/notice/候选 aux 覆盖后在 dispatch 内置 false)
+    menu_hint_shown: bool,
+    /// 确认 Fn 的按下被吞 → 配对吞掉同键 release(防 release 泄给应用)
+    mt_eat_release: Option<u32>,
+    /// AI 采集态暂存的联想开关值(采集期关联想,退出时恢复;
+    /// Some 只出现在采集进入时原开关为开的情形——其实存原值通用)。
+    ai_pred_saved: Option<bool>,
+    /// Ctrl+. 标点切换:press 已吞 → 配对 release 一并吞掉并清锁存;
+    /// 兼作按住连发的去抖(按住不放只翻转一次)。会话级,不写盘。
+    punct_key_down: bool,
 }
 
 impl EngineLogic {
@@ -91,6 +116,13 @@ impl EngineLogic {
         let mode = engine.as_ref().map(|e| e.mode()).unwrap_or(lyyime_core::Mode::Chinese);
         let hotkey_shot = parse_hotkey(&core_cfg.shot_hotkey);
         let hotkey_coin = parse_hotkey(&core_cfg.coin_hotkey);
+        let mut menu_trigger = lyyime_core::MenuTrigger::new();
+        menu_trigger.configure(
+            core_cfg.menu_trigger_enabled,
+            core_cfg.menu_trigger_key.min(255) as u8,
+            &core_cfg.menu_trigger_disabled,
+        );
+        menu_trigger.set_shot_hotkey(&core_cfg.shot_hotkey);
         EngineLogic {
             engine,
             core_cfg,
@@ -108,7 +140,26 @@ impl EngineLogic {
             stats_dir: lyyime_core::stats::default_dir(),
             cand_menu: None,
             custom_query: None,
+            menu_trigger,
+            menu_hint_shown: false,
+            mt_eat_release: None,
+            ai_pred_saved: None,
+            punct_key_down: false,
         }
+    }
+
+    /// 菜单触发配置热读(focus_in 时调用,设置保存即生效;configure 内部即复位)
+    pub fn set_menu_trigger_cfg(&mut self, enabled: bool, key: usize, disabled: &str) {
+        self.menu_trigger.configure(enabled, key.min(255) as u8, disabled);
+    }
+
+    /// 与提示同步热读实际工具快捷键;冲突由配置读取入口统一消解。
+    pub fn set_tool_hotkeys(&mut self, coin: &str, shot: &str) {
+        self.core_cfg.coin_hotkey = coin.to_owned();
+        self.core_cfg.shot_hotkey = shot.to_owned();
+        self.hotkey_coin = parse_hotkey(coin);
+        self.hotkey_shot = parse_hotkey(shot);
+        self.menu_trigger.set_shot_hotkey(shot);
     }
 
     /// §15 自定义查询配置注入(config.toml custom_query_*;None=操作行
@@ -134,6 +185,38 @@ impl EngineLogic {
     pub fn set_ai_cfg(&mut self, cfg: Option<AiConfig>) {
         self.ai_cfg = cfg;
         self.ai_reset_state();
+    }
+
+    /// 联想开关热读(focus_in 时调用,设置保存即生效;
+    /// core set_config 关闭时会清掉正在展示的联想行与上下文)。
+    pub fn set_next_word_prediction(&mut self, on: bool) {
+        self.core_cfg.next_word_prediction = on;
+        if self.ai_state == AiState::Capture {
+            // 采集态联想被强行关闭;新配置记进暂存,退出采集时恢复
+            self.ai_pred_saved = Some(on);
+            return;
+        }
+        if let Some(e) = self.engine.as_mut() {
+            let mut cfg = e.config().clone();
+            if cfg.next_word_prediction != on {
+                cfg.next_word_prediction = on;
+                e.set_config(cfg);
+            }
+        }
+    }
+
+    /// 中文标点默认热读(focus_in 时调用,设置保存即生效)。
+    /// `core_cfg.cn_punct` 记的是保存的默认值而非运行时状态:
+    /// 默认值未变时不碰引擎 —— Ctrl+. 的本次运行切换跨焦点保留;
+    /// 默认值变了才走窄化 setter 下发(只改开关并复位引号开合位,
+    /// 不动组合缓冲/候选/联想行,不触发词表重载)。
+    pub fn set_punctuation_default(&mut self, on: bool) {
+        if self.core_cfg.cn_punct != on {
+            self.core_cfg.cn_punct = on;
+            if let Some(e) = self.engine.as_mut() {
+                e.set_chinese_punctuation(on);
+            }
+        }
     }
 
     /// 按键入口;返回 true=已消费 / false=放行给应用。
@@ -167,6 +250,10 @@ impl EngineLogic {
             }
         }
         if is_shift(keyval) {
+            // Shift 按下=菜单触发硬边界(与 Mode B 同合同):模式是否切换
+            // 取决于 release,组合或单击都不再保留尾串/待执行。
+            self.menu_trigger.reset();
+            self.mt_clear_hint(host);
             if state & BLOCKING_MODS != 0 {
                 // Shift 参与组合键(Ctrl/Alt/Super+Shift):放行,不算单击
                 self.pending_shift = None;
@@ -179,7 +266,7 @@ impl EngineLogic {
                 .as_ref()
                 .is_some_and(|engine| !engine.buffer().is_empty());
             let effects = self.core_mut().process_key(LKey::ShiftPress);
-            let _consumed = self.dispatch(host, effects);
+            let _consumed = self.dispatch(host, effects, true);
             if !had_composition {
                 self.pending_shift = Some(keyval);
             }
@@ -187,6 +274,44 @@ impl EngineLogic {
         }
         // 其它键按下:无论成败都取消未决的 Shift 单击
         self.pending_shift = None;
+        // ---- 菜单触发(2026-09-30,与 Mode B 同合同):待执行期间仅无修饰的
+        // 配置 Fn 吞键执行一次;编辑/导航/Esc 与修饰组合=硬边界复位尾串,
+        // 其余普通键仅取消待执行(尾串保留可续接)。AI 采集态冻结匹配器,
+        // 采集态按键全部归提示词路径,不进此分支。 ----
+        if self.ai_state != AiState::Capture && self.mt_press(host, keyval, state) {
+            return true;
+        }
+        // ---- 中英文标点切换(固定保留键 Ctrl+.;仅中文态) ----
+        // 纯 Control_L/R 按下直接放行、不进 core(OTHER 会清组合缓冲):
+        // 先按 Ctrl 再按 . 的预热键不得打断正在输入的组合。
+        if matches!(keyval, KSYM_CONTROL_L | KSYM_CONTROL_R) {
+            return false;
+        }
+        // 干净修饰恰为 Ctrl(Caps/NumLock 不算修饰;Ctrl+Shift+/Alt/Super
+        // 不命中):中文态下翻转运行时标点开关(不写盘),吞掉 press;
+        // 配对 release 由 punct_key_down 吞掉,按住连发只翻转一次。
+        // 组合/联想行在时静默切换,不打扰输入;仅空闲态亮状态提示。
+        if self.mode == 0
+            && keyval == KSYM_PERIOD
+            && (state & (BLOCKING_MODS | MASK_SHIFT)) == MASK_CTRL
+        {
+            if !self.punct_key_down {
+                self.punct_key_down = true;
+                let on = self.core_mut().toggle_chinese_punctuation();
+                let idle = self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.buffer().is_empty() && e.flush_page().is_empty());
+                if idle && self.ai_state != AiState::Capture {
+                    host.on_hint(if on {
+                        "中文标点:，。？！"
+                    } else {
+                        "英文标点:,.?!"
+                    });
+                }
+            }
+            return true;
+        }
         // ---- 截屏热键(合同 §13):纯工具组合键,中英文态同效。
         // ibus 激活期间按键必经引擎,故不区分 core 模式;命中即拉起
         // lyyime-shot 子进程并吞键,不进组词缓冲、不经 core。 ----
@@ -202,14 +327,14 @@ impl EngineLogic {
             if hotkey_match(state, keyval, mods, sym) {
                 self.ai_reset_state();
                 let effects = self.core_mut().process_key(LKey::Coin);
-                return self.dispatch(host, effects);
+                return self.dispatch(host, effects, true);
             }
         }
         if state & BLOCKING_MODS != 0 {
             // 应用快捷键(如 Ctrl+C):先放弃 AI 会话并复位缓冲,再放行
             self.ai_reset_state();
             let effects = self.core_mut().process_key(LKey::Other);
-            return self.dispatch(host, effects);
+            return self.dispatch(host, effects, true);
         }
         if let Some(taken) = self.ai_take(host, keyval) {
             return taken;
@@ -219,15 +344,87 @@ impl EngineLogic {
         // 应用按 Caps+Shift 翻译输出小写字母。非字母键不受影响走常态。
         if state & MASK_LOCK != 0 && matches!(keyval, 0x41..=0x5a | 0x61..=0x7a) {
             let effects = self.core_mut().process_key(LKey::Other);
-            return self.dispatch(host, effects);
+            return self.dispatch(host, effects, true);
         }
         let (lkey, ch) = map_keyval(keyval);
         let effects = self.core_mut().process_key(lkey);
         let _ = ch;
-        self.dispatch(host, effects)
+        self.dispatch(host, effects, true)
+    }
+
+    /// 撤下我们贴的菜单触发提示:仅当辅助区仍是我们的内容时才发隐藏
+    /// 回调(menu_hint_shown 为 false = 已被词组提示/notice/候选 aux
+    /// 覆盖,此时不动辅助区)。
+    fn mt_clear_hint(&mut self, host: &mut dyn Host) {
+        if self.menu_hint_shown {
+            self.menu_hint_shown = false;
+            host.on_menu_hint_clear();
+        }
+    }
+
+    /// 菜单触发按键分类:确认 Fn(无修饰;CapsLock/NumLock 不影响)且有待
+    /// 执行 → 吞键,一次性取出下标回调宿主执行,返回 true;其余按键只按
+    /// 边界语义复位/取消,不吞键(未匹配的 F 键照常放行给应用)。
+    /// 进入即撤下我们贴的提示条:任何下一次按键都终止「提示持续期」。
+    fn mt_press(&mut self, host: &mut dyn Host, keyval: u32, state: u32) -> bool {
+        self.mt_clear_hint(host);
+        let fn_num = if (KSYM_F1..=KSYM_F12).contains(&keyval) {
+            (keyval - KSYM_F1 + 1) as u8
+        } else {
+            0
+        };
+        let mods = state & (BLOCKING_MODS | MASK_SHIFT); // Caps/NumLock 不算修饰
+        if fn_num > 0
+            && mods == 0
+            && self.menu_trigger.pending().is_some()
+            && fn_num == self.menu_trigger.key()
+        {
+            if let Some(idx) = self.menu_trigger.take_pending() {
+                self.menu_trigger.reset(); // 动作执行=硬边界,防重入
+                self.mt_eat_release = Some(keyval); // 配对吞掉同键 release
+                host.on_menu_action(idx);
+                return true;
+            }
+        }
+        if mods != 0 || Self::mt_is_reset_key(keyval) {
+            self.menu_trigger.reset();
+        } else {
+            self.menu_trigger.cancel_pending();
+        }
+        false
+    }
+
+    /// 编辑/导航类按键 → 尾串硬边界(与 Mode B mt_is_reset_key 同清单)
+    fn mt_is_reset_key(keyval: u32) -> bool {
+        matches!(
+            keyval,
+            KSYM_BACKSPACE
+                | KSYM_TAB
+                | KSYM_ESCAPE
+                | KSYM_DELETE
+                | KSYM_HOME
+                | KSYM_END
+                | KSYM_LEFT
+                | KSYM_UP
+                | KSYM_RIGHT
+                | KSYM_DOWN
+                | KSYM_PAGE_UP
+                | KSYM_PAGE_DOWN
+        )
     }
 
     fn on_release(&mut self, host: &mut dyn Host, keyval: u32) -> bool {
+        // 菜单触发确认 Fn 的按下已被吞 → 配对吞掉同键 release;
+        // 未匹配的 F 键 release 照常放行给应用
+        if self.mt_eat_release == Some(keyval) {
+            self.mt_eat_release = None;
+            return true;
+        }
+        // Ctrl+. 的 press 已吞 → 配对吞掉同键 release 并清锁存
+        if self.punct_key_down && keyval == KSYM_PERIOD {
+            self.punct_key_down = false;
+            return true;
+        }
         if is_shift(keyval) {
             let pending = self.pending_shift.take();
             if pending == Some(keyval) {
@@ -268,13 +465,24 @@ impl EngineLogic {
 
     fn ai_reset_state(&mut self) {
         // 放弃会话(焦点切换/组合键):只清状态,显示由调用方统一清
+        // AI 会话进出=菜单触发硬边界:尾串与待执行一起清
+        self.menu_trigger.reset();
         self.ai_state = AiState::Idle;
         self.ai_prompt.clear();
         self.ai_prompt_full = false;
+        // 退出采集态:恢复采集进入时暂存的联想开关
+        if let Some(saved) = self.ai_pred_saved.take() {
+            if let Some(e) = self.engine.as_mut() {
+                let mut cfg = e.config().clone();
+                cfg.next_word_prediction = saved;
+                e.set_config(cfg);
+            }
+        }
     }
 
     fn ai_cancel(&mut self, host: &mut dyn Host) {
         self.ai_reset_state();
+        self.menu_hint_shown = false; // 下方空候选会隐藏辅助区
         self.preedit = None;
         host.on_preedit(None);
         host.on_candidates(&[], 0, 0, "");
@@ -288,11 +496,11 @@ impl EngineLogic {
         host.on_commit("/");
         if was_slash_a {
             let effects = self.core_mut().process_key(LKey::Char('a'));
-            self.dispatch(host, effects);
+            self.dispatch(host, effects, true);
         }
         let (lkey, _ch) = map_keyval(keyval);
         let effects = self.core_mut().process_key(lkey);
-        self.dispatch(host, effects)
+        self.dispatch(host, effects, true)
     }
 
     fn ai_append_prompt(&mut self, host: &mut dyn Host, text: &str) {
@@ -331,8 +539,22 @@ impl EngineLogic {
                 }
                 if matches!(ch, Some('i') | Some('I')) && self.ai_state == AiState::SlashA {
                     self.ai_state = AiState::Capture;
+                    self.menu_trigger.reset(); // 进入 AI 会话=菜单触发硬边界
+                    self.mt_clear_hint(host);
                     self.ai_prompt.clear();
                     self.preedit = None;
+                    // 采集态关联想:空格/数字不得把联想尾巴灌进提示词,
+                    // 联想行也不能出现在 /AI 展示帧里。原值暂存,退出恢复。
+                    if let Some(e) = self.engine.as_mut() {
+                        let mut cfg = e.config().clone();
+                        self.ai_pred_saved = Some(cfg.next_word_prediction);
+                        if cfg.next_word_prediction {
+                            cfg.next_word_prediction = false;
+                            e.set_config(cfg);
+                        }
+                    }
+                    // 关掉联想只清了 core 内部状态,已展示的联想行要主动撤下
+                    host.on_candidates(&[], 0, 0, "");
                     self.ai_show(host);
                     return Some(true);
                 }
@@ -483,23 +705,41 @@ impl EngineLogic {
         lyyime_core::stats::record(dir, chars, now_ms);
     }
 
-    fn dispatch(&mut self, host: &mut dyn Host, effects: Vec<Effect>) -> bool {
+    /// 效果流分发。`press`=源自按键按下:Pass 效果构成"直通边界"→
+    /// 菜单触发尾串与待执行一并复位;release/宿主驱动路径(select/翻页/
+    /// 右键执行)传 false,Pass 不复位匹配器。
+    fn dispatch(&mut self, host: &mut dyn Host, effects: Vec<Effect>, press: bool) -> bool {
         // 逐条执行效果;返回 false 仅当出现 pass(宿主必须放行该键)
         let mut consumed = true;
+        // 菜单触发:本次效果流最后一条真实上屏产生的命中提示,压轴展示
+        // (盖过同帧候选清屏与词组提示);同帧新预编辑(四码顶屏续打)或
+        // 最终帧仍有候选行(联想行)时不抢贴
+        let mut mt_hint: Option<String> = None;
+        let mut mt_preedit = false;
+        let mut mt_cands = false; // 本帧最终候选行数 > 0(联想/新组合)
         for eff in effects {
             match eff {
                 Effect::Commit(text) => {
                     if !text.is_empty() {
                         self.record_stats(&text);
                         host.on_commit(&text);
+                        // 菜单触发:真实上屏喂匹配器(AI 采集态 commit 走
+                        // dispatch_ai 进提示词,天然不经此分支)
+                        if self.ai_state != AiState::Capture {
+                            mt_hint = self.menu_trigger.on_commit(&text);
+                        }
                     }
                 }
                 Effect::Preedit(p) => {
                     // 缺失 / 空串都视为清除
                     self.preedit = p.filter(|s| !s.is_empty());
+                    mt_preedit = self.preedit.is_some();
                     host.on_preedit(self.preedit.as_deref());
                 }
                 Effect::Candidates(cands) => {
+                    // 候选 aux 会覆盖辅助区:菜单提示所有权即时解除
+                    self.menu_hint_shown = false;
+                    mt_cands = !cands.is_empty();
                     // 页码信息在效果流之外,直连 core 时从引擎当前状态读取
                     let (page, pages) = self
                         .engine
@@ -513,15 +753,55 @@ impl EngineLogic {
                     let aux = self.preedit.clone().unwrap_or_default();
                     host.on_candidates(&list, page, pages, &aux);
                 }
-                Effect::Pass => consumed = false,
+                Effect::Pass => {
+                    consumed = false;
+                    // 直通文本=菜单触发硬边界:本帧命中提示不得再贴;
+                    // 仅按键按下路径复位匹配器(空缓冲 Enter/CapsLock 字母/
+                    // 转发标点/未处理功能键),release 与宿主驱动不复位
+                    mt_hint = None;
+                    mt_preedit = false;
+                    mt_cands = false;
+                    if press {
+                        self.menu_trigger.reset();
+                        self.mt_clear_hint(host);
+                    }
+                }
                 Effect::Consumed => {}
-                Effect::Notice(t) => host.on_notice(&t),
-                Effect::Hint(t) => host.on_hint(&t),
+                Effect::Notice(t) => {
+                    // notice 覆盖辅助区 → 菜单提示所有权解除
+                    self.menu_hint_shown = false;
+                    host.on_notice(&t);
+                }
+                Effect::Hint(t) => {
+                    // 词组提示覆盖辅助区 → 菜单提示所有权解除
+                    self.menu_hint_shown = false;
+                    host.on_hint(&t);
+                }
                 Effect::Action(i) => host.on_action(i),
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
+                    // 模式切换=菜单触发硬边界:尾串/待执行/命中提示全清
+                    self.menu_trigger.reset();
+                    self.mt_clear_hint(host);
+                    mt_hint = None;
+                    mt_preedit = false;
+                    mt_cands = false;
                 }
+            }
+        }
+        // 同帧出现新预编辑(四码顶屏续打)或最终帧仍有候选行(联想行、
+        // 顶屏续打的新组合):命中提示已不可见 → 待执行一并取消,
+        // Fn 不得执行看不见的动作;尾串保留供续接
+        if mt_preedit || mt_cands {
+            self.menu_trigger.cancel_pending();
+            self.mt_clear_hint(host);
+        }
+        // 菜单触发提示压轴:本帧 commit/cands/hint 已落完且无复位
+        if let Some(h) = mt_hint {
+            if !mt_preedit && !mt_cands {
+                host.on_hint(&h);
+                self.menu_hint_shown = true;
             }
         }
         consumed
@@ -535,6 +815,8 @@ impl EngineLogic {
         if let Some(e) = self.engine.as_mut() {
             e.reset();
         }
+        self.menu_trigger.reset(); // 模式切换=菜单触发硬边界
+        self.menu_hint_shown = false; // 下方空候选会隐藏辅助区
         self.cand_menu = None;
         self.preedit = None;
         host.on_preedit(None);
@@ -550,8 +832,10 @@ impl EngineLogic {
         if let Some(e) = self.engine.as_mut() {
             e.reset();
         }
-        self.ai_reset_state();
+        self.ai_reset_state(); // 内含 menu_trigger.reset()(AI/会话边界)
+        self.menu_hint_shown = false; // 下方空候选会隐藏辅助区
         self.cand_menu = None;
+        self.punct_key_down = false; // 会话边界只清锁存,不动标点运行时开关
         self.preedit = None;
         host.on_preedit(None);
         host.on_candidates(&[], 0, 0, "");
@@ -569,7 +853,7 @@ impl EngineLogic {
             return self.cand_menu_exec(host, idx);
         }
         let effects = self.core_mut().select_candidate(idx);
-        self.dispatch(host, effects)
+        self.dispatch(host, effects, false)
     }
 
     /// 候选窗面板翻页(候选窗「<」「>」按钮 / 滚轮,合同 §6):与键盘 `-`/`=`
@@ -582,7 +866,7 @@ impl EngineLogic {
         }
         let key = if down { LKey::PageDown } else { LKey::PageUp };
         let effects = self.core_mut().process_key(key);
-        self.dispatch(host, effects)
+        self.dispatch(host, effects, false)
     }
 
     /// (当前页, 总页数),页码 0 起;降级态/无候选为 (0, 0)。
@@ -631,7 +915,7 @@ impl EngineLogic {
         const OPS: [CandOp; 3] = [CandOp::PinToggle, CandOp::Delete, CandOp::EnLookup];
         if let Some(&op) = OPS.get(sel) {
             let effects = self.core_mut().cand_op(orig, op);
-            return self.dispatch(host, effects);
+            return self.dispatch(host, effects, false);
         }
         // 第 4 行=自定义查询:宿主侧打开浏览器,core 状态不动;先还原真实
         // 候选再发 notice(顺序对调会被候选刷新盖掉),与 Esc 同一还原流。
@@ -734,6 +1018,12 @@ mod tests {
         }
         fn on_open_url(&mut self, url: &str) {
             self.log(format!("open-url:{url}"));
+        }
+        fn on_menu_action(&mut self, index: usize) {
+            self.log(format!("menu:{index}"));
+        }
+        fn on_menu_hint_clear(&mut self) {
+            self.log("menuhintclr".to_string());
         }
     }
 
@@ -1385,5 +1675,793 @@ mod tests {
         drop(ev);
         // 还原后真实候选回来了
         assert!(last_cands(&h).contains("你"));
+    }
+
+    // --------------------------------------------------------------
+    // 上屏后联想(2026-10):中文上屏 → 候选条出"可续接尾巴"(无注释列)
+    // --------------------------------------------------------------
+
+    #[test]
+    fn 联想_上屏中文后候选条出尾巴_空格续选() {
+        let (_d, mut l) = logic_with_ai(None);
+        l.set_next_word_prediction(true); // 联想默认关,显式开启后验证
+        let mut h = Mock::default();
+        // wq+空格 上屏「你」→ 夹具中「你」可续接成「你好」→ 联想行 [好]
+        type_keys(&mut l, &mut h, "wq");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:你"), "events={ev:?}");
+            assert!(
+                ev.iter().any(|e| e == "cands:[好]"),
+                "上屏后联想行应为[好]:events={ev:?}"
+            );
+        }
+        assert_eq!(l.preedit, None, "联想行不带预编辑");
+        // 空格续选:只上屏尾巴「好」
+        assert!(l.process_key_event(&mut h, KSYM_SPACE, 0));
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:好"), "events={ev:?}");
+            assert!(
+                ev.iter().all(|e| *e != "commit:你好"),
+                "不得把前缀一并上屏:events={ev:?}"
+            );
+        }
+        // 上下文"你好"在夹具中无下文:联想结束,空格照常放行
+        assert!(!l.process_key_event(&mut h, KSYM_SPACE, 0));
+    }
+
+    #[test]
+    fn 联想_字母撤行开新组合_esc吞键取消() {
+        let (_d, mut l) = logic_with_ai(None);
+        l.set_next_word_prediction(true); // 联想默认关,显式开启后验证
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "wq");
+        l.process_key_event(&mut h, KSYM_SPACE, 0); // 你 → 联想行
+        // 字母:撤联想行 + 进入新组合,不上屏任何尾巴
+        assert!(l.process_key_event(&mut h, 'n' as u32, 0));
+        {
+            let ev = h.events.borrow();
+            assert_eq!(
+                ev.iter().filter(|e| e.starts_with("commit:")).count(),
+                1,
+                "字母不得上屏联想尾巴:events={ev:?}"
+            );
+            assert!(ev.iter().any(|e| e == "aux:n"), "events={ev:?}");
+        }
+        // Esc 清掉组合;再走一遍验证 Esc 取消联想的路径
+        l.process_key_event(&mut h, KSYM_ESCAPE, 0);
+        type_keys(&mut l, &mut h, "wq");
+        l.process_key_event(&mut h, KSYM_SPACE, 0); // 你 → 联想行
+        h.events.borrow_mut().clear();
+        assert!(
+            l.process_key_event(&mut h, KSYM_ESCAPE, 0),
+            "联想态 Esc 应吞键撤联想"
+        );
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "cands:[]"), "Esc 应撤联想行");
+            assert!(
+                ev.iter().all(|e| !e.starts_with("commit:")),
+                "Esc 不得上屏尾巴:events={ev:?}"
+            );
+        }
+        // 取消后空格直通,不再选中旧联想
+        assert!(!l.process_key_event(&mut h, KSYM_SPACE, 0));
+    }
+
+    #[test]
+    fn 联想行同帧_菜单提示不盖候选() {
+        // 最终帧仍带候选行(联想/新组合)时,菜单触发命中提示不得抢贴,
+        // 待执行一并取消(Fn 不得执行不可见动作)。
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        let pred_cand = lyyime_core::Candidate {
+            text: "好".into(),
+            comment: String::new(),
+            score: 1.0,
+            kind: lyyime_core::CandKind::Wubi,
+            consumed: 0,
+        };
+        l.dispatch(
+            &mut h,
+            vec![
+                Effect::Commit("设置".into()),
+                Effect::Preedit(None),
+                Effect::Candidates(std::sync::Arc::new(vec![pred_cand])),
+            ],
+            true,
+        );
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:设置"));
+            assert!(ev.iter().any(|e| e == "cands:[好]"));
+            assert!(
+                ev.iter().all(|e| !e.contains("菜单功能")),
+                "有候选行时不得贴菜单提示:events={ev:?}"
+            );
+        }
+        assert_eq!(
+            l.menu_trigger.pending(),
+            None,
+            "候选行存在时不可见动作的待执行必须取消"
+        );
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+    }
+
+    // --------------------------------------------------------------
+    // 菜单触发(2026-09-30):上屏中文命中功能名 → 持续提示 → 配置 Fn 确认
+    // --------------------------------------------------------------
+    const KSYM_F6: u32 = 0xffc3;
+    const KSYM_F7: u32 = 0xffc4;
+    const KSYM_F8: u32 = 0xffc5;
+
+    /// 菜单触发夹具:sz=设置、bz=帮助、yw=英文(词库首位,空格上屏)。
+    fn logic_menu(mut core_cfg: lyyime_core::Config) -> (PathBuf, EngineLogic) {
+        let dir = fixtures_dir();
+        std::fs::write(
+            dir.join("wubi.tsv"),
+            "wqvb\t你好\t1000\nsz\t设置\t900\nbz\t帮助\t900\nyw\t英文\t900\njp\t截屏\t900\n",
+        )
+        .unwrap();
+        // 用户词典隔离到独立临时路径:测试不得写真实 HOME 的 user_words/统计
+        core_cfg.user_dict = Some(fixtures_dir_user());
+        let mut logic = EngineLogic::new(dir.clone(), None, core_cfg);
+        logic.stats_dir = None;
+        (dir, logic)
+    }
+
+    fn type_keys(l: &mut EngineLogic, h: &mut Mock, s: &str) {
+        for c in s.chars() {
+            l.process_key_event(h, c as u32, 0);
+        }
+    }
+
+    fn menu_idx(id: &str) -> usize {
+        lyyime_core::menu_trigger::MENU_CATALOG
+            .iter()
+            .position(|m| m.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn 菜单触发_设置上屏后f7执行_不产生额外commit() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:设置"), "events={ev:?}");
+            assert!(
+                ev.iter()
+                    .any(|e| e == "hint:匹配了菜单功能「设置」,按 F7 进入该功能"),
+                "events={ev:?}"
+            );
+            // 提示压轴:出现在最后一条候选事件之后(不被候选清屏覆盖)
+            let hi = ev.iter().rposition(|e| e.starts_with("hint:匹配了菜单功能")).unwrap();
+            let ci = ev.iter().rposition(|e| e.starts_with("cands:")).unwrap();
+            assert!(hi > ci, "菜单提示应在候选清屏之后展示:events={ev:?}");
+        }
+        let n_commit = h
+            .events
+            .borrow()
+            .iter()
+            .filter(|e| e.starts_with("commit:"))
+            .count();
+        assert!(l.process_key_event(&mut h, KSYM_F7, 0), "待执行时 F7 应吞键");
+        let ev = h.events.borrow();
+        assert!(
+            ev.iter()
+                .any(|e| e == &format!("menu:{}", menu_idx("settings"))),
+            "events={ev:?}"
+        );
+        assert_eq!(
+            ev.iter().filter(|e| e.starts_with("commit:")).count(),
+            n_commit,
+            "确认键不得产生额外上屏:events={ev:?}"
+        );
+        drop(ev);
+        // 一次性:再按 F7 不再触发
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0), "无待执行 F7 应放行");
+    }
+
+    #[test]
+    fn 菜单触发_无待执行fn键照常放行() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0), "空载 F7 应放行");
+        assert!(!l.process_key_event(&mut h, KSYM_F8, 0), "空载 F8 应放行");
+        assert!(h.events.borrow().iter().all(|e| !e.starts_with("menu:")));
+    }
+
+    #[test]
+    fn 菜单触发_ctrl_f7不触发() {
+        use crate::keysym::MASK_CTRL;
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        // Ctrl+F7:修饰组合=硬边界(复位),不确认执行
+        let consumed = l.process_key_event(&mut h, KSYM_F7, MASK_CTRL);
+        assert!(h.events.borrow().iter().all(|e| !e.starts_with("menu:")),
+            "Ctrl+F7 不得执行菜单动作");
+        // 边界复位后:裸 F7 同样放行(待执行已随尾串清空)
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+        let _ = consumed;
+    }
+
+    #[test]
+    fn 菜单触发_reset_session清掉待执行() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        l.reset_session(&mut h); // 焦点进出=硬边界
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0), "复位后 F7 应放行");
+        assert!(h.events.borrow().iter().all(|e| !e.starts_with("menu:")));
+    }
+
+    #[test]
+    fn 菜单触发_退格键是硬边界() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        l.process_key_event(&mut h, KSYM_BACKSPACE, 0); // 复位尾串与待执行
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+        assert!(h.events.borrow().iter().all(|e| !e.starts_with("menu:")));
+    }
+
+    #[test]
+    fn 菜单触发_普通键仅取消待执行_尾串保留() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        // 普通键(字母)取消待执行,但 CJK 尾串保留:再上屏「帮助」仍命中
+        l.process_key_event(&mut h, 'a' as u32, 0);
+        assert!(h.events.borrow().iter().all(|e| !e.starts_with("menu:")));
+        l.process_key_event(&mut h, KSYM_ESCAPE, 0); // 清掉字母缓冲,重新组词
+        type_keys(&mut l, &mut h, "bz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(l.process_key_event(&mut h, KSYM_F7, 0), "续接命中后 F7 应可确认");
+        let ev = h.events.borrow();
+        assert!(
+            ev.iter().any(|e| e == &format!("menu:{}", menu_idx("help"))),
+            "events={ev:?}"
+        );
+    }
+
+    #[test]
+    fn 菜单触发_ai采集上屏不喂匹配器() {
+        let cfg = AiConfig {
+            enabled: true,
+            api_base: "http://127.0.0.1:9".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            ..Default::default()
+        };
+        let dir = fixtures_dir();
+        std::fs::write(
+            dir.join("wubi.tsv"),
+            "wqvb\t你好\t1000\nsz\t设置\t900\n",
+        )
+        .unwrap();
+        let mut l = EngineLogic::new(
+            dir.clone(),
+            Some(cfg),
+            lyyime_core::Config {
+                user_dict: Some(fixtures_dir_user()),
+                ..Default::default()
+            },
+        );
+        l.stats_dir = None;
+        let mut h = Mock::default();
+        // /AI 进入采集态;采集态组词上屏进提示词,不喂菜单匹配器
+        for k in ['/','a','i'] {
+            assert!(l.process_key_event(&mut h, k as u32, 0));
+        }
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().all(|e| !e.contains("菜单功能")),
+            "AI 采集态上屏不得产生菜单提示"
+        );
+        l.process_key_event(&mut h, KSYM_ESCAPE, 0); // 空缓冲 Esc:退出会话
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0), "AI 后无待执行");
+    }
+
+    #[test]
+    fn 菜单触发_自定义确认键f8() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config {
+            menu_trigger_key: 8,
+            ..Default::default()
+        });
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().any(|e| e.contains("按 F8")),
+            "提示应带配置键 F8"
+        );
+        // F7 不是确认键:仅取消待执行;再上屏「设置」重新挂起后 F8 执行
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0), "F7 应照常放行");
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(l.process_key_event(&mut h, KSYM_F8, 0), "F8 应吞键执行");
+        let ev = h.events.borrow();
+        assert!(ev.iter().any(|e| e.starts_with("menu:")), "events={ev:?}");
+    }
+
+    #[test]
+    fn 菜单触发_黑名单与全局关闭() {
+        // 黑名单禁用 settings
+        let (_d, mut l) = logic_menu(lyyime_core::Config {
+            menu_trigger_disabled: "settings".into(),
+            ..Default::default()
+        });
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:设置"), "events={ev:?}");
+            assert!(ev.iter().all(|e| !e.contains("菜单功能")), "黑名单项不出提示");
+        }
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+        // 全局关闭
+        let (_d, mut l) = logic_menu(lyyime_core::Config {
+            menu_trigger_enabled: false,
+            ..Default::default()
+        });
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(h.events.borrow().iter().all(|e| !e.contains("菜单功能")));
+    }
+
+    #[test]
+    fn 菜单触发_英文动作经宿主回调() {
+        // english 动作不直接 toggle:经 on_menu_action 回调由宿主切英文,
+        // 断言产出 menu 下标且 ModeChanged 由宿主侧驱动(见 service.rs)。
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "yw");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(l.process_key_event(&mut h, KSYM_F7, 0));
+        let ev = h.events.borrow();
+        assert!(
+            ev.iter()
+                .any(|e| e == &format!("menu:{}", menu_idx("english"))),
+            "events={ev:?}"
+        );
+        assert!(
+            ev.iter().any(|e| e ==
+                "hint:匹配了菜单功能「英文」,按 F7 进入该功能；也可单击 Shift 切换中英文"),
+            "events={ev:?}"
+        );
+    }
+    #[test]
+    fn 菜单触发_同帧新预编辑取消待执行_不执行不可见动作() {
+        // 四码顶屏续打:同一效果流 commit+非空 preedit → 命中提示不显示,
+        // 待执行一并取消(尾串保留);F7 不得执行看不见的菜单动作。
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        l.dispatch(
+            &mut h,
+            vec![
+                Effect::Commit("设置".into()),
+                Effect::Preedit(Some("s".into())),
+            ],
+            true,
+        );
+        assert_eq!(l.menu_trigger.pending(), None, "新预编辑同帧:待执行必须取消");
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:设置"));
+            assert!(
+                ev.iter().all(|e| !e.contains("菜单功能")),
+                "提示被压掉不得显示:events={ev:?}"
+            );
+        }
+        // F7 无待执行:照常放行,无菜单动作
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .all(|e| !e.starts_with("menu:")));
+        // 尾串保留:后续上屏继续命中(续接「帮助」→ tail「设置帮助」尾命中)
+        l.dispatch(&mut h, vec![Effect::Commit("帮助".into())], true);
+        assert_eq!(l.menu_trigger.pending(), Some(menu_idx("help")));
+    }
+
+    #[test]
+    fn 菜单触发_直通边界_pass复位尾串_release不复位() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        // commit 设 + 空缓冲 Enter/Pass(按下直通)→ 尾串与待执行硬复位
+        l.dispatch(
+            &mut h,
+            vec![Effect::Commit("设".into()), Effect::Pass],
+            true,
+        );
+        l.dispatch(&mut h, vec![Effect::Commit("置".into())], true);
+        assert_eq!(l.menu_trigger.pending(), None, "pass 边界后「置」不得补全成「设置」");
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .all(|e| !e.contains("菜单功能")));
+        // 对照:release 路径(press=false)的 pass 不复位尾串
+        let mut l = EngineLogic::new(
+            fixtures_dir(),
+            None,
+            lyyime_core::Config {
+                user_dict: Some(fixtures_dir_user()),
+                ..Default::default()
+            },
+        );
+        l.stats_dir = None;
+        l.dispatch(
+            &mut h,
+            vec![Effect::Commit("设".into()), Effect::Pass],
+            false,
+        );
+        l.dispatch(&mut h, vec![Effect::Commit("置".into())], true);
+        assert_eq!(
+            l.menu_trigger.pending(),
+            Some(menu_idx("settings")),
+            "release pass 不复位:设+置应命中"
+        );
+    }
+
+    #[test]
+    fn 菜单触发_模式切换效果复位_命中提示不留存() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        l.dispatch(
+            &mut h,
+            vec![
+                Effect::Commit("设置".into()),
+                Effect::ModeChanged(lyyime_core::Mode::English),
+            ],
+            true,
+        );
+        assert_eq!(l.menu_trigger.pending(), None, "模式切换后不得留待执行");
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .all(|e| !e.contains("菜单功能")), "mode 复位后命中提示不得再贴");
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+    }
+
+    #[test]
+    fn 菜单触发_提示条随下一次按键撤下_修饰fn亦然() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert_eq!(l.menu_trigger.pending(), Some(menu_idx("settings")));
+        // ctrl+F7:不触发、提示条撤下、匹配器复位
+        use crate::keysym::MASK_CTRL;
+        h.events.borrow_mut().clear();
+        assert!(!l.process_key_event(&mut h, KSYM_F7, MASK_CTRL));
+        let ev = h.events.borrow();
+        assert!(
+            ev.iter().any(|e| e == "menuhintclr"),
+            "修饰键按下应撤下我们贴的提示:events={ev:?}"
+        );
+        drop(ev);
+        assert_eq!(l.menu_trigger.pending(), None);
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0), "ctrl+F7 不得执行");
+    }
+
+    #[test]
+    fn 菜单触发_确认fn的release配对吞掉_未确认fn的release放行() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        use crate::keysym::MASK_RELEASE;
+        // 确认按下被吞 → 配对 release 也被吞
+        assert!(l.process_key_event(&mut h, KSYM_F7, 0), "待执行时 F7 按下吞键");
+        assert!(
+            l.process_key_event(&mut h, KSYM_F7, MASK_RELEASE),
+            "被吞按下的配对 release 也必须吞掉"
+        );
+        // 未确认的 F 键:press/release 都照常放行
+        assert!(!l.process_key_event(&mut h, KSYM_F6, 0));
+        assert!(!l.process_key_event(&mut h, KSYM_F6, MASK_RELEASE));
+        // 无待执行时 F7 release 也放行
+        assert!(!l.process_key_event(&mut h, KSYM_F7, MASK_RELEASE));
+    }
+
+    #[test]
+    fn 菜单触发_shift按下硬边界() {
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "sz");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert_eq!(l.menu_trigger.pending(), Some(menu_idx("settings")));
+        // Shift 按下(单击检测前):待执行与提示一并清掉
+        l.process_key_event(&mut h, crate::keysym::KSYM_SHIFT_L, 0);
+        assert_eq!(l.menu_trigger.pending(), None, "Shift 按下必须复位待执行");
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e == "menuhintclr"), "Shift 按下应撤下提示");
+        assert!(!l.process_key_event(&mut h, KSYM_F7, 0));
+    }
+
+    #[test]
+    fn 菜单触发_截屏提示与热读快捷键一致() {
+        use crate::keysym::{MASK_ALT, MASK_CTRL, MASK_SHIFT};
+        const KSYM_F9: u32 = 0xffc6;
+        let (_d, mut l) = logic_menu(lyyime_core::Config::default());
+        let mut h = Mock::default();
+        // 默认配置:确认 F7 + 默认截屏键 ctrl+alt+a(两个都显示)
+        type_keys(&mut l, &mut h, "jp");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().any(|e| e ==
+                "hint:匹配了菜单功能「截屏」,按 F7 进入该功能；也可按 Ctrl+Alt+A"),
+            "events={:?}", h.events.borrow()
+        );
+
+        // 热读:确认键 F8 + 快捷键 ctrl+shift+F9(与配置读取入口同源注入)
+        l.set_menu_trigger_cfg(true, 8, "");
+        l.set_tool_hotkeys("ctrl+equal", "ctrl+shift+F9");
+        h.events.borrow_mut().clear();
+        type_keys(&mut l, &mut h, "jp");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().any(|e| e ==
+                "hint:匹配了菜单功能「截屏」,按 F8 进入该功能；也可按 Ctrl+Shift+F9"),
+            "events={:?}", h.events.borrow()
+        );
+        // 新快捷键真实命中 shot
+        assert!(l.process_key_event(&mut h, KSYM_F9, MASK_CTRL | MASK_SHIFT));
+        assert!(h.events.borrow().iter().any(|e| e == "shot"));
+        h.events.borrow_mut().clear();
+        // 旧 ctrl+alt+a 绑定不再命中
+        assert!(!l.process_key_event(&mut h, 0x61, MASK_CTRL | MASK_ALT));
+        assert!(!h.events.borrow().iter().any(|e| e == "shot"));
+
+        // 非法 shot spec → 提示回落为只有 F 键;旧绑定不复活
+        l.set_tool_hotkeys("ctrl+equal", "a");
+        h.events.borrow_mut().clear();
+        type_keys(&mut l, &mut h, "jp");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().any(|e| e ==
+                "hint:匹配了菜单功能「截屏」,按 F8 进入该功能"),
+            "events={:?}", h.events.borrow()
+        );
+        l.process_key_event(&mut h, KSYM_F9, MASK_CTRL | MASK_SHIFT);
+        assert!(!h.events.borrow().iter().any(|e| e == "shot"),
+            "非法快捷键不得复活旧绑定:events={:?}", h.events.borrow());
+    }
+
+    #[test]
+    fn 菜单触发_冲突后快捷键提示() {
+        use crate::keysym::{MASK_ALT, MASK_CTRL};
+        // coin 与 shot 同为 ctrl+equal:read_core_config 同款消解器把
+        // shot 自动升级(coin 保原组合,shot → +alt);提示须显示生效键。
+        let mut cfg = lyyime_core::Config {
+            coin_hotkey: "ctrl+equal".into(),
+            shot_hotkey: "ctrl+equal".into(),
+            ..Default::default()
+        };
+        let _notes = lyyime_core::hotkey::resolve_config_hotkeys(&mut cfg);
+        let (_d, mut l) = logic_menu(cfg);
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "jp");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().any(|e| e ==
+                "hint:匹配了菜单功能「截屏」,按 F7 进入该功能；也可按 Ctrl+Alt+Equal"),
+            "events={:?}", h.events.borrow()
+        );
+        // 与提示一致的实际生效键 ctrl+alt+= 命中 shot
+        assert!(l.process_key_event(&mut h, 0x3d, MASK_CTRL | MASK_ALT));
+        assert!(h.events.borrow().iter().any(|e| e == "shot"));
+    }
+
+    // ------------------------------------------------------------------
+    // 中英文标点运行时切换(保留键 Ctrl+.;仅中文态,不写盘)
+    // ------------------------------------------------------------------
+
+    /// 完整一次 Ctrl+.:Control_L 按下 → period 按下 → period 抬起 →
+    /// Control_L 抬起(release 掩码 = MASK_RELEASE|原修饰)。
+    fn press_ctrl_period(l: &mut EngineLogic, h: &mut Mock) {
+        assert!(!l.process_key_event(h, KSYM_CONTROL_L, 0), "Control 按下应放行");
+        assert!(l.process_key_event(h, KSYM_PERIOD, MASK_CTRL), "Ctrl+. press 应吞");
+        assert!(
+            l.process_key_event(h, KSYM_PERIOD, MASK_CTRL | MASK_RELEASE),
+            "配对 release 应吞"
+        );
+        assert!(!l.process_key_event(h, KSYM_CONTROL_L, MASK_RELEASE));
+    }
+
+    /// core 引擎当前中文标点运行时开关(测试内可读私有字段)。
+    fn punct_on(l: &EngineLogic) -> bool {
+        l.engine.as_ref().unwrap().config().cn_punct
+    }
+
+    #[test]
+    fn ctrl_period_切换标点_锁存去抖与配对release() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        assert!(punct_on(&l), "默认中文标点");
+        // 默认:逗号上屏全角
+        assert!(l.process_key_event(&mut h, ',' as u32, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "commit:，"));
+        h.events.borrow_mut().clear();
+
+        // Control_L 按下放行且不进 core;period 按下吞+翻转;
+        // 按住连发的第二次 press 仍吞但不再翻转;配对 release 吞掉。
+        assert!(!l.process_key_event(&mut h, KSYM_CONTROL_L, 0));
+        assert!(l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL));
+        assert!(l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL)); // 连发去抖
+        assert_eq!(punct_on(&l), false, "一次按下只翻转一次");
+        assert!(l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL | MASK_RELEASE));
+        assert!(!l.process_key_event(&mut h, KSYM_CONTROL_L, MASK_RELEASE));
+        // 空闲态切换亮状态提示
+        assert!(
+            h.events.borrow().iter().any(|e| e == "hint:英文标点:,.?!"),
+            "events={:?}", h.events.borrow()
+        );
+        // 英文标点态:逗号/句号直通应用
+        assert!(!l.process_key_event(&mut h, ',' as u32, 0));
+        assert!(!l.process_key_event(&mut h, '.' as u32, 0));
+        // 第二次完整序列翻回中文标点
+        press_ctrl_period(&mut l, &mut h);
+        assert!(punct_on(&l));
+        assert!(h.events.borrow().iter().any(|e| e == "hint:中文标点:，。？！"));
+        assert!(l.process_key_event(&mut h, ',' as u32, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "commit:，"));
+    }
+
+    #[test]
+    fn ctrl_period_组合中切换_缓冲与候选不动() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "wq");
+        assert_eq!(l.engine.as_ref().unwrap().buffer(), "wq");
+        // 先按 Control:放行,组合缓冲原样(不喂 Other 清缓冲)
+        assert!(!l.process_key_event(&mut h, KSYM_CONTROL_L, 0));
+        assert_eq!(l.engine.as_ref().unwrap().buffer(), "wq");
+        // Ctrl+. 翻转:缓冲/候选保留,不亮提示(组合中静默切换)
+        h.events.borrow_mut().clear();
+        assert!(l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL));
+        assert_eq!(l.engine.as_ref().unwrap().buffer(), "wq");
+        assert!(!punct_on(&l));
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("hint:")),
+            "组合中切换不亮提示:events={:?}", h.events.borrow());
+        // period release 吞掉,组合仍在
+        assert!(l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL | MASK_RELEASE));
+        assert_eq!(l.engine.as_ref().unwrap().buffer(), "wq");
+        assert!(!l.process_key_event(&mut h, KSYM_CONTROL_L, MASK_RELEASE));
+        // 组合照常上屏;英文标点态逗号直通
+        assert!(l.process_key_event(&mut h, KSYM_SPACE, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "commit:你"));
+        assert!(!l.process_key_event(&mut h, ',' as u32, 0));
+        // 再切回中文标点
+        press_ctrl_period(&mut l, &mut h);
+        assert!(punct_on(&l));
+    }
+
+    #[test]
+    fn ctrl_period_修饰变体与英文态密码框不拦截() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        // Ctrl+Shift+. / Ctrl+Alt+. 不是保留组合:走应用快捷键放行
+        assert!(!l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL | MASK_SHIFT));
+        assert!(!l.process_key_event(
+            &mut h,
+            KSYM_PERIOD,
+            MASK_CTRL | crate::keysym::MASK_ALT
+        ));
+        assert!(punct_on(&l), "修饰变体不得翻转标点");
+        // 英文态 Ctrl+.:直通且不改标点
+        l.switch_mode(&mut h);
+        assert_eq!(l.mode, 1);
+        assert!(!l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL));
+        assert!(punct_on(&l), "英文态 Ctrl+. 不得翻转标点");
+        l.switch_mode(&mut h);
+        // 密码框:一切按键全放行
+        l.input_purpose = PURPOSE_PASSWORD;
+        assert!(!l.process_key_event(&mut h, KSYM_PERIOD, MASK_CTRL));
+        assert!(punct_on(&l));
+    }
+
+    #[test]
+    fn 标点默认热读_同值不覆盖运行时_变值下发() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        // 运行时 Ctrl+. 切英文标点(不写盘);会话复位只清锁存不清开关
+        press_ctrl_period(&mut l, &mut h);
+        assert_eq!(punct_on(&l), false);
+        l.reset_session(&mut h);
+        l.set_punctuation_default(true); // 保存默认未变 → 不覆盖运行时
+        assert_eq!(punct_on(&l), false, "同值热读不得覆盖运行时切换");
+        // 保存默认变更 → 下发新默认
+        l.set_punctuation_default(false);
+        assert_eq!(punct_on(&l), false);
+        l.set_punctuation_default(true);
+        assert_eq!(punct_on(&l), true, "默认值变更应下发到引擎");
+        // 同值再热读:幂等
+        l.set_punctuation_default(true);
+        assert!(punct_on(&l));
+    }
+
+    /// 前缀候选(缺词兜底):宿主收到前缀 commit 后,
+    /// 预编辑与候选行应切到余下后缀(组合不中断)。
+    #[test]
+    fn 拼音前缀候选_宿主侧保留后缀组合() {
+        let d = fixtures_dir();
+        // 覆盖为缺词夹具:jie→截/接、ping→屏、pin→品;词库无「截屏」词组,
+        // 「截」是 consumed=3 的前缀候选。
+        std::fs::write(
+            d.join("pinyin_char.tsv"),
+            "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\npin\t品\t2000\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("pinyin_phrase.tsv"), "").unwrap();
+        std::fs::write(d.join("wubi.tsv"), "").unwrap();
+        let mut l = EngineLogic::new(
+            d,
+            None,
+            lyyime_core::Config {
+                user_dict: Some(fixtures_dir_user()),
+                ..Default::default()
+            },
+        );
+        l.stats_dir = None;
+        let mut h = Mock::default();
+        for c in "jieping".chars() {
+            assert!(l.process_key_event(&mut h, c as u32, 0));
+        }
+        assert_eq!(last_nonempty_cands(&h), "cands:[截,接]");
+        // 点选首选「截」:上屏前缀;预编辑/候选切到 ping。
+        assert!(l.select_candidate(&mut h, 0), "点选截应被消费");
+        {
+            let ev = h.events.borrow();
+            assert!(ev.iter().any(|e| e == "commit:截"), "events={:?}", *ev);
+            assert_eq!(
+                ev.iter()
+                    .rev()
+                    .find(|e| e.starts_with("preedit:"))
+                    .map(String::as_str),
+                Some("preedit:ping"),
+                "后缀应成为新的宿主预编辑:events={:?}",
+                *ev
+            );
+            assert_eq!(
+                ev.iter()
+                    .rev()
+                    .find(|e| e.starts_with("cands:["))
+                    .map(String::as_str),
+                Some("cands:[屏]"),
+                "候选行应切为 ping 的候选:events={:?}",
+                *ev
+            );
+        }
+        // 空格续选「屏」→ 整词收齐,组合与候选清空。
+        assert!(l.process_key_event(&mut h, KSYM_SPACE, 0));
+        let ev = h.events.borrow();
+        assert!(ev.iter().any(|e| e == "commit:屏"), "events={:?}", *ev);
+        assert_eq!(
+            ev.iter()
+                .rev()
+                .find(|e| e.starts_with("preedit:"))
+                .map(String::as_str),
+            Some("preedit:∅")
+        );
     }
 }

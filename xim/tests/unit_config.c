@@ -52,6 +52,7 @@ int main(void)
               c.commit_after_four == 1 && c.commit_unique_four == 1 &&
               c.commit_first_at_four == 1 &&
               c.phrase_hint == 1 && c.exact_char_freq_rank == 1 &&
+              c.next_word_prediction == 0 &&
               c.font_size == 14 && c.autostart == 0,
           "默认值正确");
 
@@ -66,12 +67,14 @@ int main(void)
     c.commit_unique_four = 0;
     c.commit_first_at_four = 0;
     c.phrase_hint = 0;
+    c.next_word_prediction = 0;
     CHECK(lyy_config_save(path, &c) == 0, "保存成功");
     char *body = read_all(path);
     CHECK(body && strstr(body, "page_size = 7") && strstr(body, "候选数") &&
               strstr(body, "commit_unique_four = false") &&
               strstr(body, "commit_first_at_four = false") &&
-              strstr(body, "phrase_hint = false"),
+              strstr(body, "phrase_hint = false") &&
+              strstr(body, "next_word_prediction = false"),
           "保存内容含键与注释");
 
     /* 4. 在文件中插入未知行/注释/[section],再保存,必须原样保留 */
@@ -97,7 +100,8 @@ int main(void)
     /* 6. 回读一致性 + 非法值钳制 */
     LyyConfig c2;
     CHECK(lyy_config_load(path, &c2) == 0 && c2.page_size == 9 &&
-              c2.mixed_english == 1 && c2.phrase_hint == 0,
+              c2.mixed_english == 1 && c2.phrase_hint == 0 &&
+              c2.next_word_prediction == 0,
           "回读一致");
     g_free(body);
     fp = fopen(path, "w");
@@ -480,6 +484,297 @@ int main(void)
     LyyConfig f2;
     CHECK(lyy_config_load(path, &f2) == 0 && f2.exact_char_freq_rank == 1,
           "exact_char_freq_rank 回读一致");
+
+    /* 20. 菜单触发(menu_trigger_*):默认值 / 解析钳制 / 保存回读 /
+     * 黑名单逐项精确匹配与未知 id 保留 */
+    CHECK(c.menu_trigger_enabled == 1 && c.menu_trigger_key == 7 &&
+              strcmp(c.menu_trigger_disabled, "fix_ime") == 0,
+          "菜单触发默认值(开/F7/黑名单=fix_ime)");
+    FILE *fmt = fopen(path, "w");
+    fprintf(fmt,
+            "menu_trigger_enabled = false\n"
+            "menu_trigger_key = 8\n"
+            "menu_trigger_disabled = \"help, future_entry\"\n"
+            "# 手写注释保留\n");
+    fclose(fmt);
+    LyyConfig m1;
+    CHECK(lyy_config_load(path, &m1) == 0 && m1.menu_trigger_enabled == 0 &&
+              m1.menu_trigger_key == 8 &&
+              strcmp(m1.menu_trigger_disabled, "help, future_entry") == 0,
+          "菜单触发三键解析(含未知 id)");
+    /* 键越界钳制回默认 7 */
+    FILE *fmt2 = fopen(path, "w");
+    fprintf(fmt2, "menu_trigger_key = 99\nmenu_trigger_key2 = 5\n");
+    fclose(fmt2);
+    LyyConfig m2;
+    CHECK(lyy_config_load(path, &m2) == 0 && m2.menu_trigger_key == 7,
+          "确认键越界钳制回 7(未知近名键不动)");
+    /* 保存回读 + 注释保留 */
+    m1.menu_trigger_enabled = 1;
+    snprintf(m1.menu_trigger_disabled, sizeof(m1.menu_trigger_disabled),
+             "%s", "settings, unknown_x");
+    CHECK(lyy_config_save(path, &m1) == 0, "菜单触发配置保存");
+    char *mbody = read_all(path);
+    CHECK(mbody && strstr(mbody, "menu_trigger_enabled = true") &&
+              strstr(mbody, "menu_trigger_key = 8") &&
+              strstr(mbody, "menu_trigger_disabled = \"settings, unknown_x\"") &&
+              strstr(mbody, "menu_trigger_key2 = 5"),
+          "菜单触发键在位写回,未知键保留");
+    g_free(mbody);
+    LyyConfig m3;
+    CHECK(lyy_config_load(path, &m3) == 0 && m3.menu_trigger_enabled == 1 &&
+              m3.menu_trigger_key == 8 &&
+              strcmp(m3.menu_trigger_disabled, "settings, unknown_x") == 0,
+          "菜单触发保存后回读一致");
+
+    /* csv 逐项精确匹配:token 整段相等,非子串 */
+    CHECK(lyy_config_csv_contains("help,settings", "help") &&
+              !lyy_config_csv_contains("help,settings", "hel") &&
+              !lyy_config_csv_contains("help,settings", "helps") &&
+              lyy_config_csv_contains(" a , b ", "b") &&
+              !lyy_config_csv_contains("", "x") &&
+              !lyy_config_csv_contains(NULL, "x"),
+          "csv 精确匹配(含 trim/空/NULL 边界)");
+    /* 黑名单合并:勾选项 + 未知 id 保留,目录项未勾选则移除 */
+    char merged[256];
+    CHECK(lyy_config_merge_menu_disabled(
+              merged, sizeof(merged), "help, old_gone, fix_ime",
+              "help,settings,fix_ime", "settings") == 0 &&
+              strcmp(merged, "settings,old_gone") == 0,
+          "黑名单合并:勾选入列,未知 id 保留,未勾目录项移除");
+    CHECK(lyy_config_merge_menu_disabled(merged, sizeof(merged), "", "a,b",
+                                         "b") == 0 &&
+              strcmp(merged, "b") == 0,
+          "黑名单合并:空基数");
+
+    /* 未知 id 长 token(>127 字节)逐字节保留:不得静默截断 */
+    char longtok[256];
+    memset(longtok, 'x', 200);
+    longtok[200] = '\0';
+    {
+        char base2[600];
+        snprintf(base2, sizeof(base2), "help, %s", longtok);
+        char merged2[LYY_CFG_STR_CMD];
+        CHECK(lyy_config_merge_menu_disabled(merged2, sizeof(merged2), base2,
+                                             "help,settings", "settings") ==
+                      0 &&
+                  strlen(merged2) == strlen("settings,") + 200 &&
+                  strcmp(merged2 + strlen("settings,"), longtok) == 0,
+              "黑名单合并:>127 字节未知 id 原样保留");
+    }
+
+    /* 合并结果超字段容量:整体失败,调用方中止保存(不静默丢安全开关) */
+    {
+        char base3[600];
+        memset(base3, 'y', 520);
+        base3[520] = '\0'; /* 单 token 已超 LYY_CFG_STR_CMD(512)容量 */
+        char merged3[LYY_CFG_STR_CMD];
+        CHECK(lyy_config_merge_menu_disabled(merged3, sizeof(merged3), base3,
+                                             "a,b", "a") != 0,
+              "黑名单合并:单 token 超容量整体失败");
+        /* 部分失败回滚:out 不得留半截串 */
+        CHECK(merged3[0] == '\0', "黑名单合并失败:输出不回留残串");
+        /* 小 out 容量的多 token 溢出同判定 */
+        char tiny[32];
+        CHECK(lyy_config_merge_menu_disabled(
+                  tiny, sizeof(tiny),
+                  "abcdefghij,klmno,pqrst,uvwxy,zzzzz", "z", "z") != 0,
+              "黑名单合并:多 token 累加溢出亦失败");
+    }
+
+    /* 21. 皮肤(skin 顶层键):默认 system / 有效 id 回读 / 旧配置缺键回退 /
+     * 未知与空值回退 system / 补齐的顶层键落在 [ai]/[[quick_actions]] 之前 */
+    CHECK(strcmp(c.skin, "system") == 0, "skin 默认 system");
+
+    FILE *fsk = fopen(path, "w");
+    fprintf(fsk, "skin = \"sakura\"\n");
+    fclose(fsk);
+    LyyConfig k1;
+    CHECK(lyy_config_load(path, &k1) == 0 &&
+              strcmp(k1.skin, "sakura") == 0,
+          "skin = \"sakura\" 解析回读");
+
+    FILE *fsk2 = fopen(path, "w");
+    fprintf(fsk2, "page_size = 6\n"); /* 旧版配置:无 skin 键 */
+    fclose(fsk2);
+    LyyConfig k2;
+    CHECK(lyy_config_load(path, &k2) == 0 && strcmp(k2.skin, "system") == 0 &&
+              k2.page_size == 6,
+          "旧配置缺 skin 回退 system");
+
+    FILE *fsk3 = fopen(path, "w");
+    fprintf(fsk3, "skin = \"no-such-skin\"\n");
+    fclose(fsk3);
+    LyyConfig k3;
+    CHECK(lyy_config_load(path, &k3) == 0 &&
+              strcmp(k3.skin, "system") == 0,
+          "未知 skin id 回退 system");
+    FILE *fsk4 = fopen(path, "w");
+    fprintf(fsk4, "skin = \"\"\n");
+    fclose(fsk4);
+    LyyConfig k4;
+    CHECK(lyy_config_load(path, &k4) == 0 && strcmp(k4.skin, "system") == 0,
+          "空 skin 回退 system");
+
+    /* skin 与 [ai]/[[quick_actions]] 同文件共存解析 */
+    FILE *fsk5 = fopen(path, "w");
+    fprintf(fsk5,
+            "skin = \"business-navy\"\n"
+            "[ai]\n"
+            "model = \"m9\"\n"
+            "[[quick_actions]]\n"
+            "trigger = \"rizhi\"\n"
+            "label = \"看日志\"\n"
+            "command = \"x\"\n");
+    fclose(fsk5);
+    LyyConfig k5;
+    CHECK(lyy_config_load(path, &k5) == 0 &&
+              strcmp(k5.skin, "business-navy") == 0 &&
+              k5.quick_actions_count == 1,
+          "skin 与 [ai]/[[quick_actions]] 同文件解析");
+    snprintf(k5.skin, sizeof(k5.skin), "%s", "sakura");
+    CHECK(lyy_config_save(path, &k5) == 0, "skin 在位保存");
+    char *skbody = read_all(path);
+    CHECK(skbody && strstr(skbody, "skin = \"sakura\""),
+          "skin 在位写回 sakura");
+    g_free(skbody);
+    LyyConfig k5b;
+    CHECK(lyy_config_load(path, &k5b) == 0 &&
+              strcmp(k5b.skin, "sakura") == 0,
+          "skin 保存后回读一致(sakura)");
+
+    /* 缺 skin 的文件:补齐的顶层键必须落在首个段头之前(否则下次读取
+     * 会被并入段内失效);未知行原样保留 */
+    FILE *fsk6 = fopen(path, "w");
+    fprintf(fsk6,
+            "page_size = 6\n"
+            "weird_line_keep = 1\n"
+            "[ai]\n"
+            "model = \"m9\"\n"
+            "[[quick_actions]]\n"
+            "trigger = \"rizhi\"\n"
+            "label = \"看日志\"\n"
+            "command = \"x\"\n");
+    fclose(fsk6);
+    LyyConfig k6;
+    CHECK(lyy_config_load(path, &k6) == 0, "缺 skin 文件读取");
+    CHECK(lyy_config_save(path, &k6) == 0, "缺 skin 文件保存补齐");
+    skbody = read_all(path);
+    char *pskin = skbody ? strstr(skbody, "skin = \"system\"") : NULL;
+    char *pai = skbody ? strstr(skbody, "[ai]") : NULL;
+    char *pqa = skbody ? strstr(skbody, "[[quick_actions]]") : NULL;
+    CHECK(pskin && pai && pqa && strstr(skbody, "weird_line_keep = 1") &&
+              pskin < pai && pskin < pqa,
+          "补齐 skin 落在 [ai]/[[quick_actions]] 之前,未知行保留");
+    g_free(skbody);
+    LyyConfig k7;
+    CHECK(lyy_config_load(path, &k7) == 0 &&
+              strcmp(k7.skin, "system") == 0 &&
+              k7.quick_actions_count == 1 &&
+              strcmp(k7.ai_model, "m9") == 0,
+          "补齐后回读:skin=system,[[quick_actions]]/[ai] 不丢");
+
+    /* 非法值兜底:写回时经注册表归一(程序内被改坏的值不原样落盘) */
+    snprintf(k7.skin, sizeof(k7.skin), "%s", "corrupted-id");
+    CHECK(lyy_config_save(path, &k7) == 0, "非法 skin 保存归一");
+    skbody = read_all(path);
+    CHECK(skbody && strstr(skbody, "skin = \"system\"") &&
+              !strstr(skbody, "corrupted-id"),
+          "非法 skin 写回时归一 system");
+    g_free(skbody);
+
+    /* 上屏后联想开关注入:文件缺省(空文件)读默认 0;显式 false 读 0;
+     * 显式 true 读 1;翻转写回 true(布尔写回必经注册表归一,不得冻结旧值) */
+    fp = fopen(path, "w");
+    fclose(fp); /* 空文件:键缺失 */
+    LyyConfig cp;
+    lyy_config_defaults(&cp);
+    CHECK(cp.next_word_prediction == 0, "联想默认关");
+    CHECK(lyy_config_load(path, &cp) == 0 && cp.next_word_prediction == 0,
+          "键缺失读到默认 0");
+    fp = fopen(path, "w");
+    fprintf(fp, "next_word_prediction = false\n");
+    fclose(fp);
+    lyy_config_defaults(&cp);
+    CHECK(lyy_config_load(path, &cp) == 0 && cp.next_word_prediction == 0,
+          "文件 false 读到 0");
+    cp.next_word_prediction = 1;
+    CHECK(lyy_config_save(path, &cp) == 0, "联想翻转后保存成功");
+    body = read_all(path);
+    CHECK(body && strstr(body, "next_word_prediction = true"),
+          "联想 false→true 翻转写回");
+    g_free(body);
+    LyyConfig cp2;
+    CHECK(lyy_config_load(path, &cp2) == 0 && cp2.next_word_prediction == 1,
+          "联想回读为 1");
+
+    /* 22. 中文标点(chinese_punct)与旧别名 cn_punct:默认开 /
+     * 别名读取 / 规范键无论书写先后都优先 / 保存归一为一条规范键 */
+    CHECK(c.chinese_punct == 1, "chinese_punct 默认开");
+    fp = fopen(path, "w");
+    fprintf(fp, "cn_punct = false\n");
+    fclose(fp);
+    LyyConfig p1;
+    CHECK(lyy_config_load(path, &p1) == 0 && p1.chinese_punct == 0,
+          "旧别名 cn_punct=false 读取生效");
+    /* 两键并存任一书写顺序:规范键(设置窗写盘键)优先 */
+    fp = fopen(path, "w");
+    fprintf(fp, "cn_punct = true\nchinese_punct = false\n");
+    fclose(fp);
+    lyy_config_load(path, &p1);
+    CHECK(p1.chinese_punct == 0, "别名在前:规范键 chinese_punct 仍优先");
+    fp = fopen(path, "w");
+    fprintf(fp, "chinese_punct = false\ncn_punct = true\n");
+    fclose(fp);
+    lyy_config_load(path, &p1);
+    CHECK(p1.chinese_punct == 0, "规范键在前:其后的别名行被忽略");
+    /* 保存归一:两种拼写收敛为一条规范键,别名行不再出现,其它键保留 */
+    p1.chinese_punct = 1;
+    p1.page_size = 8;
+    CHECK(lyy_config_save(path, &p1) == 0, "标点键归一保存");
+    body = read_all(path);
+    char *pl = body ? strstr(body, "chinese_punct =") : NULL;
+    CHECK(body && pl && !strstr(pl + 1, "chinese_punct =") &&
+              !strstr(body, "cn_punct") && strstr(body, "page_size = 8"),
+          "两种拼写收敛为一条规范键,其余键不受影响");
+    g_free(body);
+    LyyConfig p2;
+    CHECK(lyy_config_load(path, &p2) == 0 && p2.chinese_punct == 1 &&
+              p2.page_size == 8,
+          "归一保存后回读一致");
+
+    /* 23. 保留键 Ctrl+.(中英文标点切换):造词/截屏配成它时
+     * 逐级让位(+alt → +alt+shift),两侧同占时互不冲突 */
+    LyyConfig c15;
+    lyy_config_defaults(&c15);
+    snprintf(c15.coin_hotkey, sizeof(c15.coin_hotkey), "%s", "ctrl+period");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c15, note, sizeof(note)) == 1 &&
+              strcmp(c15.coin_hotkey, "ctrl+alt+period") == 0 &&
+              strstr(note, "标点切换") != NULL,
+          "造词占用保留键 → +alt 让位并说明");
+    /* 两侧都配成保留键:各让一级且互不冲突 */
+    lyy_config_defaults(&c15);
+    snprintf(c15.coin_hotkey, sizeof(c15.coin_hotkey), "%s", "ctrl+period");
+    snprintf(c15.shot_hotkey, sizeof(c15.shot_hotkey), "%s", "ctrl+period");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c15, note, sizeof(note)) == 1 &&
+              strcmp(c15.coin_hotkey, "ctrl+alt+period") == 0 &&
+              strcmp(c15.shot_hotkey, "ctrl+alt+shift+period") == 0,
+          "两侧同占保留键:分别让位且不互撞");
+    /* 让位候选被另一侧已占组合挡住 → 升两级 */
+    lyy_config_defaults(&c15);
+    snprintf(c15.coin_hotkey, sizeof(c15.coin_hotkey), "%s", "ctrl+period");
+    snprintf(c15.shot_hotkey, sizeof(c15.shot_hotkey), "%s",
+             "ctrl+alt+period");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c15, note, sizeof(note)) == 1 &&
+              strcmp(c15.coin_hotkey, "ctrl+alt+shift+period") == 0 &&
+              strcmp(c15.shot_hotkey, "ctrl+alt+period") == 0,
+          "让位候选被占时升两级(避开另一侧)");
+    /* 别名写法(Ctrl + .)同样判保留 */
+    lyy_config_defaults(&c15);
+    snprintf(c15.coin_hotkey, sizeof(c15.coin_hotkey), "%s", "Ctrl + .");
+    CHECK(lyy_config_resolve_hotkey_conflicts(&c15, note, sizeof(note)) == 1 &&
+              strcmp(c15.coin_hotkey, "ctrl+alt+period") == 0,
+          "别名写法同样判保留并让位");
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);

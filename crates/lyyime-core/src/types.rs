@@ -96,6 +96,9 @@ pub struct Candidate {
     pub score: f32,
     /// 来源类别。
     pub kind: CandKind,
+    /// 0 表示消费整个编码;非零表示只消费缓冲开头这些 ASCII 字节。
+    /// 不根据显示注释/汉字数/来源推断,学习后 kind 变化也保持此值。
+    pub consumed: usize,
 }
 
 /// 效果流:core 处理完一个键后要求宿主执行的动作序列。

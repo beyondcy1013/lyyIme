@@ -7,7 +7,8 @@
  *   轮询(docs/RESEARCH.md §2.3:XQueryPointer 是常见 IME 做法;此处用纯 xcb
  *   同语义接口,避免引入 Xlib 链接);
  * - 渲染:输入串 + 带序号候选 + 编码注释 + 翻页指示;首选高亮、贴边阴影,
- *   样式走 GtkCssProvider(xim/res/candidate.css),对齐主流输入法习惯
+ *   样式 = candidate.css 布局基准 + skin.c 皮肤层 CSS(颜色/圆角/字号,
+ *   provider 只挂本窗子树,不走 screen 级注入),对齐主流输入法习惯
  *   (借鉴搜狗/万能五笔候选窗布局,AGENTS.MD "UI 精致"红线)。
  */
 #ifndef LYY_CANDIDATE_WINDOW_H_
@@ -49,11 +50,13 @@ typedef struct CandidateWindow {
     GtkWidget *comment[LYY_MAX_ROWS]; /* 注释 */
     int row_count;
     guint pos_timer;
-    guint theme_timer;  /* 低频复查 GTK 明暗主题变化 */
+    guint theme_timer;  /* 低频复查 GTK 明暗主题变化(仅 system 皮肤生效) */
     GtkCssProvider *css_provider; /* 复用同一 provider,避免定时刷新累积 */
     xcb_connection_t *conn;
     xcb_window_t root;
     int font_size;
+    char skin[32];       /* 皮肤 id(注册表归一;"system"=跟随系统明暗) */
+    gboolean last_dark;  /* 上次应用时的系统明暗缓存,实际变化才重建 CSS */
     char css_dir[1024];    /* candidate.css 所在目录(空=未找到) */
     LyyCandwinClickFn on_click;   /* 行点击回调(§14);NULL=不响应点击 */
     void *click_user_data;        /* 回调入参(宿主传 App*) */
@@ -74,6 +77,9 @@ void lyy_candwin_init(CandidateWindow *cw, xcb_connection_t *conn,
 
 /* 重新应用字体大小(设置保存后调用,即时生效) */
 void lyy_candwin_set_font_size(CandidateWindow *cw, int font_size);
+
+/* 切换皮肤(注册表归一,未知/空按 system;设置保存后调用,即时生效) */
+void lyy_candwin_set_skin(CandidateWindow *cw, const char *id);
 
 /* 清空行并逐行填充;first=0 表示高亮第 0 行 */
 void lyy_candwin_begin_rows(CandidateWindow *cw);

@@ -10,7 +10,14 @@ use lyyime_core::ffi::{
     lyyime_set_enter_english, lyyime_set_exact_char_freq_rank, lyyime_set_shift_english,
     lyyime_process_key, lyyime_reset, lyyime_set_commit_after_four,
     lyyime_set_commit_first_at_four, lyyime_set_commit_unique_four,
-    lyyime_set_phrase_hint, lyyime_toggle_mode,
+    lyyime_set_next_word_prediction, lyyime_set_phrase_hint, lyyime_toggle_mode,
+    lyyime_set_chinese_punctuation, lyyime_toggle_chinese_punctuation,
+    lyyime_menu_trigger_cancel, lyyime_menu_trigger_commit,
+    lyyime_menu_trigger_configure, lyyime_menu_trigger_count,
+    lyyime_menu_trigger_free, lyyime_menu_trigger_id, lyyime_menu_trigger_label,
+    lyyime_menu_trigger_new, lyyime_menu_trigger_pending, lyyime_menu_trigger_reset,
+    lyyime_menu_trigger_set_shot_hotkey,
+    lyyime_menu_trigger_take,
     LKEY_BACKSPACE, LKEY_CHAR, LKEY_DIGIT, LKEY_ENTER, LKEY_ESC, LKEY_OTHER, LKEY_PAGEDOWN,
     LKEY_PAGEUP, LKEY_PUNCT, LKEY_SHIFTPRESS, LKEY_SPACE,
 };
@@ -116,6 +123,9 @@ fn ffi_键入首字母_效果json一字不差() {
 #[test]
 fn ffi_空格顶屏_commit与清除的json序列() {
     let mut eng = FfiEngine::new(&fixtures());
+    // 本测逐字节断言"上屏→清候选→词组提示"的旧序列;联想行会占候选条,
+    // 关掉联想隔离被测行为(联想自身 JSON 见 prediction 用例)。
+    assert_eq!(unsafe { lyyime_set_next_word_prediction(eng.0, 0) }, 0);
     for c in "nihao".chars() {
         eng.key_char(c);
     }
@@ -129,6 +139,9 @@ fn ffi_空格顶屏_commit与清除的json序列() {
 #[test]
 fn ffi_词组提示开关() {
     let mut eng = FfiEngine::new(&fixtures());
+    // 专验词组提示:联想行与提示共用候选条位置(有联想则不发提示),
+    // 关掉联想以隔离被测行为。
+    assert_eq!(unsafe { lyyime_set_next_word_prediction(eng.0, 0) }, 0);
     // 默认开启:逐字上屏「你」「好」后,第二次 commit 追加词组提示。
     for c in "wqiy".chars() {
         eng.key_char(c);
@@ -156,6 +169,36 @@ fn ffi_词组提示开关() {
     assert_eq!(unsafe { lyyime_set_phrase_hint(eng.0, 1) }, 1);
     // NULL 引擎:安全忽略,返回 0。
     assert_eq!(unsafe { lyyime_set_phrase_hint(std::ptr::null_mut(), 1) }, 0);
+}
+
+#[test]
+fn ffi_中文标点开关_设置与翻转_组合不丢() {
+    let mut eng = FfiEngine::new(&fixtures());
+    // 默认开:逗号上屏全角 ,(U+FF0C)。
+    let json = eng.key(LKEY_PUNCT, ',' as u32);
+    assert!(json.contains("\"s\":\"\u{FF0C}\""), "{json}");
+    // 关闭:setter 回环返回生效值,标点直通(空缓冲)。
+    assert_eq!(unsafe { lyyime_set_chinese_punctuation(eng.0, 0) }, 0);
+    let json = eng.key(LKEY_PUNCT, ',' as u32);
+    assert!(json.contains("\"t\":\"pass\""), "{json}");
+    // 组合中切换不清缓冲/候选:打 n 再翻转,空格仍上屏候选。
+    eng.key_char('n');
+    assert_eq!(unsafe { lyyime_toggle_chinese_punctuation(eng.0) }, 1);
+    let json = eng.key(LKEY_SPACE, 0);
+    assert!(
+        json.contains("\"t\":\"commit\""),
+        "切换标点不得丢进行中的组合: {json}"
+    );
+    // 再次翻转回 0;toggle NULL 也安全返回 0。
+    assert_eq!(unsafe { lyyime_toggle_chinese_punctuation(eng.0) }, 0);
+    assert_eq!(
+        unsafe { lyyime_set_chinese_punctuation(std::ptr::null_mut(), 1) },
+        0
+    );
+    assert_eq!(
+        unsafe { lyyime_toggle_chinese_punctuation(std::ptr::null_mut()) },
+        0
+    );
 }
 
 #[test]
@@ -468,6 +511,78 @@ fn ffi_重试纪律_小缓冲needed不落状态_扩容重试与一次成功一�
     }
 }
 
+#[test]
+fn ffi_重试纪律_联想触发与联想选择() {
+    // 联想路径同样服从两段式纪律:触发 commit 与联想选择在小缓冲下都
+    // 返回 -needed 且不落状态;扩容重试与一次成功逐字节一致。
+    let json_of = |eng: &mut FfiEngine, key_id: c_int, chr: u32| {
+        let mut buf = vec![0u8; 8192];
+        let n = unsafe {
+            lyyime_process_key(
+                eng.0,
+                key_id,
+                chr,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i64,
+            )
+        };
+        assert!(n > 0);
+        String::from_utf8_lossy(&buf[..(n - 1) as usize]).into_owned()
+    };
+
+    // 两台同态引擎都打到缓冲 "ni"(空格将上屏"你"并触发联想行)。
+    // 联想默认关:显式开启后才验证触发/选择路径。
+    let mut e1 = FfiEngine::new(&fixtures());
+    let mut e2 = FfiEngine::new(&fixtures());
+    assert_eq!(unsafe { lyyime_set_next_word_prediction(e1.0, 1) }, 1);
+    assert_eq!(unsafe { lyyime_set_next_word_prediction(e2.0, 1) }, 1);
+    for c in "ni".chars() {
+        json_of(&mut e1, LKEY_CHAR, c as u32);
+        json_of(&mut e2, LKEY_CHAR, c as u32);
+    }
+
+    // —— 触发联想的上屏 commit:e1 小缓冲 → -needed,组合候选原样保持 ——
+    let mut tiny = [0u8; 4];
+    let n = e1.key_raw(
+        LKEY_SPACE,
+        0,
+        tiny.as_mut_ptr() as *mut c_char,
+        tiny.len() as i64,
+    );
+    assert!(n < 0, "小缓冲应返回 -needed,得到 {n}");
+    assert!(tiny.iter().all(|&b| b == 0), "-needed 时不得写入");
+    assert_eq!(e1.cand(0).0, "你", "-needed 后候选页不得变更");
+    // 扩容重试:效果与 e2 一次成功一致,联想行([好, 好吗])落位。
+    let retry = json_of(&mut e1, LKEY_SPACE, 0);
+    let once = json_of(&mut e2, LKEY_SPACE, 0);
+    assert_eq!(retry, once, "联想触发重试效果须与一次成功一致");
+    assert!(retry.contains("{\"t\":\"commit\",\"s\":\"你\"}"));
+    assert_eq!(e1.cand(0), ("好".to_string(), String::new()));
+    assert_eq!(e1.cand(1).0, "好吗");
+
+    // —— 联想选择:e1 小缓冲喂空格 → -needed,联想行不得变更 ——
+    let n = e1.key_raw(
+        LKEY_SPACE,
+        0,
+        tiny.as_mut_ptr() as *mut c_char,
+        tiny.len() as i64,
+    );
+    assert!(n < 0, "联想选择小缓冲应返回 -needed,得到 {n}");
+    assert_eq!(e1.cand(0).0, "好", "-needed 后联想行不得变更");
+    // 扩容重试:与 e2 直接空格逐字节一致,只上屏尾巴"好"。
+    let retry = json_of(&mut e1, LKEY_SPACE, 0);
+    let once = json_of(&mut e2, LKEY_SPACE, 0);
+    assert_eq!(retry, once, "联想选择重试效果须与一次成功一致");
+    assert!(retry.contains("{\"t\":\"commit\",\"s\":\"好\"}"));
+    assert!(!retry.contains("\"s\":\"你好\""), "不得二次上屏前缀");
+    // 续接:上下文"你好" → 二级联想只剩「吗」。
+    assert_eq!(e1.cand(0), ("吗".to_string(), String::new()));
+    // 两台引擎后续键序仍完全一致(联想状态恰好生效一次)。
+    let a = json_of(&mut e1, LKEY_ESC, 0);
+    let b = json_of(&mut e2, LKEY_ESC, 0);
+    assert_eq!(a, b);
+}
+
 // ======================================================================
 // 造词(合同 §12):FFI 键值 11–15 与 notice 效果 JSON
 // ======================================================================
@@ -475,6 +590,9 @@ fn ffi_重试纪律_小缓冲needed不落状态_扩容重试与一次成功一�
 #[test]
 fn ffi_造词_热键方向键与notice效果流() {
     let mut eng = FfiEngine::new(&fixtures());
+    // 专验造词键序:上屏「你好」会出联想行,其后的空格会选中联想尾巴
+    // 而非直通——关掉联想保持造词历史的按键语义不变。
+    assert_eq!(unsafe { lyyime_set_next_word_prediction(eng.0, 0) }, 0);
     // 上屏「你好」:wqvb + 空格。
     for c in "wqvb".chars() {
         eng.key_char(c);
@@ -633,4 +751,372 @@ fn ffi_大写字母原样进入大写候选() {
     assert_eq!(eng.cand(2), ("who".to_string(), "en".to_string()));
     assert_eq!(eng.cand(3), ("世界卫生组织".to_string(), "WHO".to_string()));
     assert_eq!(eng.cand(4), ("谁".to_string(), "WHO".to_string()));
+}
+
+// ---- 菜单触发(可选符号组;独立对象,与引擎无关)----
+
+/// 新建+配置为默认(开/F7/空黑名单)的菜单触发器。
+struct FfiMenuTrigger(*mut lyyime_core::menu_trigger::MenuTrigger);
+
+impl FfiMenuTrigger {
+    fn new() -> Self {
+        let mt = unsafe { lyyime_menu_trigger_new() };
+        assert!(!mt.is_null());
+        let empty = CString::new("").unwrap();
+        assert_eq!(unsafe { lyyime_menu_trigger_configure(mt, 1, 7, empty.as_ptr()) }, 0);
+        Self(mt)
+    }
+
+    /// 喂上屏文本,返回提示串(空 = 未命中)。
+    fn commit(&mut self, text: &str) -> String {
+        let t = CString::new(text).unwrap();
+        let mut buf = vec![0u8; 512];
+        let n = unsafe {
+            lyyime_menu_trigger_commit(
+                self.0,
+                t.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i64,
+            )
+        };
+        assert!(n > 0, "commit 返回 {n}");
+        String::from_utf8_lossy(&buf[..n as usize - 1]).into_owned()
+    }
+}
+
+impl Drop for FfiMenuTrigger {
+    fn drop(&mut self) {
+        unsafe { lyyime_menu_trigger_free(self.0) };
+    }
+}
+
+#[test]
+fn ffi_菜单触发_目录枚举与命中流程() {
+    // 目录枚举:16 项,id/label 可读,越界取空串
+    let n = lyyime_menu_trigger_count();
+    assert_eq!(n, 16);
+    let mut id = vec![0u8; 128];
+    let mut label = vec![0u8; 128];
+    let ni = unsafe { lyyime_menu_trigger_id(0, id.as_mut_ptr() as *mut c_char, 128) };
+    let nl = unsafe { lyyime_menu_trigger_label(0, label.as_mut_ptr() as *mut c_char, 128) };
+    assert!(ni > 1 && nl > 1);
+    assert_eq!(String::from_utf8_lossy(&id[..ni as usize - 1]), "settings");
+    assert_eq!(String::from_utf8_lossy(&label[..nl as usize - 1]), "设置");
+    let nx = unsafe { lyyime_menu_trigger_id(99, id.as_mut_ptr() as *mut c_char, 128) };
+    assert_eq!(nx, 1, "越界 id 写空串返回 1");
+    // 负下标同样视为越界:写空串返回 1(不得回退到第 0 项)
+    let neg = unsafe { lyyime_menu_trigger_id(-1, id.as_mut_ptr() as *mut c_char, 128) };
+    assert_eq!(neg, 1, "负下标 id 写空串返回 1");
+    assert_eq!(id[0], 0);
+    let negl = unsafe { lyyime_menu_trigger_label(-1, label.as_mut_ptr() as *mut c_char, 128) };
+    assert_eq!(negl, 1, "负下标 label 写空串返回 1");
+    assert_eq!(label[0], 0);
+
+    // 上屏「设置」→ 提示 + pending=0;take 一次性取出
+    let mut mt = FfiMenuTrigger::new();
+    let hint = mt.commit("设置");
+    assert_eq!(hint, "匹配了菜单功能「设置」,按 F7 进入该功能");
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, 0);
+    assert_eq!(unsafe { lyyime_menu_trigger_take(mt.0) }, 0);
+    assert_eq!(unsafe { lyyime_menu_trigger_take(mt.0) }, -1, "take 只取一次");
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, -1);
+
+    // NULL 安全
+    assert_eq!(unsafe { lyyime_menu_trigger_take(std::ptr::null_mut()) }, -1);
+    assert_eq!(unsafe { lyyime_menu_trigger_cancel(std::ptr::null_mut()) }, 0);
+    assert_eq!(unsafe { lyyime_menu_trigger_reset(std::ptr::null_mut()) }, 0);
+    unsafe { lyyime_menu_trigger_free(std::ptr::null_mut()) };
+}
+
+#[test]
+fn ffi_菜单触发_commit短缓冲不落状态_重试不重复() {
+    let mt = FfiMenuTrigger::new();
+    let t = CString::new("设置").unwrap();
+
+    // ① 极小缓冲:返回 -needed,尾串与待执行保持按键前(不落状态)
+    let mut tiny = [0u8; 4];
+    let n = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t.as_ptr(), tiny.as_mut_ptr() as *mut c_char, 4)
+    };
+    assert!(n < 0, "小缓冲应返回 -needed,得到 {n}");
+    assert!(tiny.iter().all(|&b| b == 0), "-needed 时不得写入");
+    assert_eq!(
+        unsafe { lyyime_menu_trigger_pending(mt.0) },
+        -1,
+        "-needed 时待执行不得置起"
+    );
+
+    // ② 扩容重试:提示正常写入且 pending=0;若状态被 ① 落过,这里会重复
+    //    追加尾串(「设置设置」同样命中),只能靠重试前后一致性区分——
+    //    追加断言:重试后再 commit 一个非 CJK 边界,尾串应只剩一段。
+    let need = (-n) as usize;
+    let mut buf = vec![0u8; need];
+    let n2 = unsafe {
+        lyyime_menu_trigger_commit(
+            mt.0,
+            t.as_ptr(),
+            buf.as_mut_ptr() as *mut c_char,
+            need as i64,
+        )
+    };
+    assert_eq!(n2, n.abs(), "重试返回所需字节数");
+    assert_eq!(
+        String::from_utf8_lossy(&buf[..need - 1]),
+        "匹配了菜单功能「设置」,按 F7 进入该功能"
+    );
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, 0);
+}
+
+#[test]
+fn ffi_菜单触发_cancel与reset语义() {
+    let mut mt = FfiMenuTrigger::new();
+    // 分字上屏命中
+    assert_eq!(mt.commit("设"), "");
+    assert!(mt.commit("置").contains("「设置」"));
+    // cancel:清待执行留尾串,返回 1;再 cancel 返回 0
+    assert_eq!(unsafe { lyyime_menu_trigger_cancel(mt.0) }, 1);
+    assert_eq!(unsafe { lyyime_menu_trigger_cancel(mt.0) }, 0);
+    // 尾串保留:续接「帮助」→「设置帮助」命中帮助(index 1)
+    assert!(mt.commit("帮助").contains("「帮助」"));
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, 1);
+    // reset:尾串+待执行清空;标点 commit 截断尾串
+    assert_eq!(unsafe { lyyime_menu_trigger_reset(mt.0) }, 1);
+    let t = CString::new("，").unwrap();
+    let mut buf = [0u8; 64];
+    let n = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t.as_ptr(), buf.as_mut_ptr() as *mut c_char, 64)
+    };
+    assert_eq!(n, 1, "标点 commit 无提示(空串)");
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, -1);
+}
+
+#[test]
+fn ffi_菜单触发_黑名单与确认键配置() {
+    let mut mt = FfiMenuTrigger::new();
+    let dis = CString::new("settings,help").unwrap();
+    // F8 + 黑名单;配置即复位(此前无态,返回无妨)
+    assert_eq!(unsafe { lyyime_menu_trigger_configure(mt.0, 1, 8, dis.as_ptr()) }, 0);
+    assert_eq!(mt.commit("设置"), "", "黑名单内不提示");
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, -1);
+    // 换确认键:帮助放行,F8 提示
+    let only_s = CString::new("settings").unwrap();
+    assert_eq!(unsafe { lyyime_menu_trigger_configure(mt.0, 1, 8, only_s.as_ptr()) }, 0);
+    assert_eq!(mt.commit("帮助"), "匹配了菜单功能「帮助」,按 F8 进入该功能");
+    // 全局关闭
+    assert_eq!(unsafe { lyyime_menu_trigger_configure(mt.0, 0, 7, std::ptr::null()) }, 0);
+    assert_eq!(mt.commit("英文"), "", "全局关闭无提示");
+    // 非 UTF-8 disabled 拒绝配置
+    let bad = [0xffu8, 0xfe, 0x00];
+    assert_eq!(
+        unsafe {
+            lyyime_menu_trigger_configure(mt.0, 1, 7, bad.as_ptr() as *const c_char)
+        },
+        -1
+    );
+}
+
+#[test]
+fn ffi_菜单触发_整段精确别名() {
+    let mut mt = FfiMenuTrigger::new();
+    // 整段上屏文本精确等于混合别名 → settings_ai(目录下标 13)
+    let t = CString::new("AI 助手").unwrap();
+    let mut buf = vec![0u8; 256];
+    let n = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t.as_ptr(), buf.as_mut_ptr() as *mut c_char, 256)
+    };
+    assert!(n > 1, "「AI 助手」应出提示,得到 {n}");
+    assert_eq!(
+        String::from_utf8_lossy(&buf[..n as usize - 1]),
+        "匹配了菜单功能「AI 助手」,按 F7 进入该功能"
+    );
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, 13);
+    // 「切换中/英文」整段精确 → english(2)
+    let t2 = CString::new("切换中/英文").unwrap();
+    let n2 = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t2.as_ptr(), buf.as_mut_ptr() as *mut c_char, 256)
+    };
+    assert!(n2 > 1);
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, 2);
+    // 中文别名「人工智能助手」同样到达 AI 页(CJK 后缀与整段精确殊途同归)
+    let t3 = CString::new("人工智能助手").unwrap();
+    let n3 = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t3.as_ptr(), buf.as_mut_ptr() as *mut c_char, 256)
+    };
+    assert!(n3 > 1);
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, 13);
+    // AI 项入黑名单:整段精确命中被禁项即整体不触发(不回退更短后缀)
+    let dis = CString::new("settings_ai").unwrap();
+    assert_eq!(
+        unsafe { lyyime_menu_trigger_configure(mt.0, 1, 7, dis.as_ptr()) },
+        0
+    );
+    let t4 = CString::new("AI 助手").unwrap();
+    let n4 = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t4.as_ptr(), buf.as_mut_ptr() as *mut c_char, 256)
+    };
+    assert_eq!(n4, 1, "黑名单内 AI 项不提示(空串)");
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, -1);
+    let t5 = CString::new("人工智能助手").unwrap();
+    let n5 = unsafe {
+        lyyime_menu_trigger_commit(mt.0, t5.as_ptr(), buf.as_mut_ptr() as *mut c_char, 256)
+    };
+    assert_eq!(n5, 1, "中文别名同样被黑名单挡下");
+    assert_eq!(unsafe { lyyime_menu_trigger_pending(mt.0) }, -1);
+}
+
+/// 截屏快捷键提示:短缓冲两段式重试不丢串;NULL/非法 UTF-8 语义。
+#[test]
+fn ffi_菜单触发_截屏快捷键短缓冲() {
+    // NULL mt → -1
+    assert_eq!(unsafe {
+        lyyime_menu_trigger_set_shot_hotkey(std::ptr::null_mut(), std::ptr::null())
+    }, -1);
+
+    let mut mt = FfiMenuTrigger::new();
+    let spec = CString::new("ctrl+shift+F9").unwrap();
+    assert_eq!(unsafe {
+        lyyime_menu_trigger_set_shot_hotkey(mt.0, spec.as_ptr())
+    }, 0);
+
+    // 4 字节小缓冲 → 返回负数所需字节数,内部状态不被消耗
+    let text = CString::new("截屏").unwrap();
+    let mut tiny = [0u8; 4];
+    let need = unsafe {
+        lyyime_menu_trigger_commit(mt.0, text.as_ptr(),
+            tiny.as_mut_ptr() as *mut c_char, tiny.len() as i64)
+    };
+    assert!(need < 0, "短缓冲须返回 -needed,实得 {need}");
+    let pending = unsafe { lyyime_menu_trigger_pending(mt.0) };
+    assert_eq!(pending, -1, "两段式:短缓冲不置待执行(内部态未被消耗)");
+
+    // 精确容量重试 → 提示含 F7 + Ctrl+Shift+F9
+    let mut buf = vec![0u8; (-need) as usize];
+    let n = unsafe {
+        lyyime_menu_trigger_commit(mt.0, text.as_ptr(),
+            buf.as_mut_ptr() as *mut c_char, buf.len() as i64)
+    };
+    assert!(n > 0);
+    let hint = String::from_utf8_lossy(&buf[..n as usize - 1]).into_owned();
+    assert!(hint.contains('F'), "{hint}");
+    assert!(hint.contains("F7"), "{hint}");
+    assert!(hint.contains("Ctrl+Shift+F9"), "{hint}");
+
+    // NULL spec → 清除后缀,截屏项只剩 F 确认键(不带 也可按)
+    assert_eq!(unsafe {
+        lyyime_menu_trigger_set_shot_hotkey(mt.0, std::ptr::null())
+    }, 0);
+    assert_eq!(mt.commit("截屏"), "匹配了菜单功能「截屏」,按 F7 进入该功能");
+
+    // 非法 UTF-8 → -1 且前值保留
+    let bad = [0xffu8, 0xfe, 0];
+    assert_eq!(unsafe {
+        lyyime_menu_trigger_set_shot_hotkey(mt.0, bad.as_ptr() as *const c_char)
+    }, -1);
+    let spec2 = CString::new("ctrl+alt+a").unwrap();
+    assert_eq!(unsafe {
+        lyyime_menu_trigger_set_shot_hotkey(mt.0, spec2.as_ptr())
+    }, 0);
+    let bad2 = [0xf0u8, 0x9f, 0];
+    assert_eq!(unsafe {
+        lyyime_menu_trigger_set_shot_hotkey(mt.0, bad2.as_ptr() as *const c_char)
+    }, -1);
+    let hint3 = mt.commit("截图");
+    assert!(hint3.contains("Ctrl+Alt+A"), "{hint3}");   // 非法输入未清掉旧值
+}
+
+// ======================================================================
+// 前缀候选选词的两段式重试纪律(缺词夹具:consumed>0 只消费前缀)
+// ======================================================================
+
+/// 缺词夹具:jie→截/接、ping→屏、pin→品;词库无「截屏」词组,
+/// 「截」是 consumed=3 的前缀候选。
+fn jieping_dir() -> TempDir {
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\npin\t品\t2000\n",
+    )
+    .unwrap();
+    td
+}
+
+#[test]
+fn ffi_重试纪律_前缀候选选词_失败不落状态() {
+    // 前缀消费路径同样服从两段式:JSON 写不进宿主缓冲时 -needed,
+    // 缓冲/候选保持按键前;扩容重试与一次成功逐字节一致,
+    // 学习(截 入 user 表)也只生效一次。
+    let td = jieping_dir();
+    let mut e1 = FfiEngine::new(&td.path);
+    let mut e2 = FfiEngine::new(&td.path);
+    for c in "jieping".chars() {
+        e1.key_char(c);
+        e2.key_char(c);
+    }
+    assert_eq!(e1.cand(0).0, "截");
+    assert_eq!(e1.cand(1).0, "接");
+
+    // 容量 0 探测 → -needed;过小容量重试同样不落状态、不写缓冲。
+    let n = e1.key_raw(LKEY_SPACE, 0, std::ptr::null_mut(), 0);
+    assert!(n < 0, "容量探测应返回 -needed,得到 {n}");
+    let need = (-n) as usize;
+    let mut small = vec![0u8; need - 1];
+    let n2 = e1.key_raw(LKEY_SPACE, 0, small.as_mut_ptr() as *mut c_char, (need - 1) as i64);
+    assert_eq!(n2, n);
+    assert!(small.iter().all(|&b| b == 0));
+    // 两次失败后候选页与缓冲保持按键前:前缀候选还在,组合未被截断。
+    assert_eq!(e1.cand(0).0, "截", "-needed 后候选不得变更");
+    assert_eq!(e1.cand(1).0, "接");
+
+    // 足量重试:Commit(截)+Preedit(ping)+后缀候选 屏。
+    let mut big = vec![0u8; need];
+    let n3 = e1.key_raw(LKEY_SPACE, 0, big.as_mut_ptr() as *mut c_char, need as i64);
+    assert_eq!(n3, need as i64);
+    let json = String::from_utf8_lossy(&big[..need - 1]).into_owned();
+    assert_eq!(
+        json,
+        "[{\"t\":\"commit\",\"s\":\"截\"},{\"t\":\"preedit\",\"s\":\"ping\"},{\"t\":\"cands\",\"n\":1,\"page\":0,\"pages\":1}]",
+        "前缀选词 JSON:{json}"
+    );
+    // 与 e2 一次成功逐字节一致。
+    assert_eq!(json, e2.key(LKEY_SPACE, 0), "重试效果须与一次成功一致");
+    assert_eq!(e1.cand(0).0, "屏", "余下 ping 的候选应为 屏");
+    // 继续空格:只上屏 屏(截不得二次上屏)。
+    for eng in [&mut e1, &mut e2] {
+        let json = eng.key(LKEY_SPACE, 0);
+        assert!(json.contains("{\"t\":\"commit\",\"s\":\"屏\"}"), "{json}");
+        assert!(!json.contains("\"s\":\"截"), "{json}");
+    }
+}
+
+#[test]
+fn ffi_重试纪律_点选前缀候选_失败不落状态() {
+    // select_candidate 路径同样:容量不足不消费前缀、不清候选。
+    let td = jieping_dir();
+    let mut eng = FfiEngine::new(&td.path);
+    for c in "jieping".chars() {
+        eng.key_char(c);
+    }
+    let n = unsafe { lyyime_select_candidate(eng.0, 0, std::ptr::null_mut(), 0) };
+    assert!(n < 0, "点选容量探测应返回 -needed,得到 {n}");
+    let need = (-n) as usize;
+    let mut small = vec![0u8; need - 1];
+    let n2 = unsafe {
+        lyyime_select_candidate(eng.0, 0, small.as_mut_ptr() as *mut c_char, (need - 1) as i64)
+    };
+    assert_eq!(n2, n);
+    assert_eq!(eng.cand(0).0, "截", "-needed 后候选不得变更");
+    assert_eq!(eng.cand(1).0, "接");
+
+    let mut big = vec![0u8; need];
+    let n3 = unsafe {
+        lyyime_select_candidate(eng.0, 0, big.as_mut_ptr() as *mut c_char, need as i64)
+    };
+    assert_eq!(n3, need as i64);
+    let json = String::from_utf8_lossy(&big[..need - 1]).into_owned();
+    assert!(json.contains("{\"t\":\"commit\",\"s\":\"截\"}"), "{json}");
+    assert!(json.contains("{\"t\":\"preedit\",\"s\":\"ping\"}"), "{json}");
+    assert_eq!(eng.cand(0).0, "屏");
+    let json = eng.key(LKEY_SPACE, 0);
+    assert!(json.contains("{\"t\":\"commit\",\"s\":\"屏\"}"), "{json}");
+    assert!(!json.contains("\"s\":\"截"), "{json}");
 }

@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use lyyime_core::{CandKind, Config, Effect, EnCommit, Engine, LKey, Mode};
+use lyyime_core::{CandKind, CandOp, Config, Effect, EnCommit, Engine, LKey, Mode};
 use std::path::Path;
 
 // ======================================================================
@@ -187,7 +187,12 @@ fn 四码唯一_英文候选不自动上屏() {
 
 #[test]
 fn 四码唯一_免空格直接上屏() {
-    let mut eng = engine();
+    // 本测断言"上屏后候选一并清空"与空缓冲空格直通的旧语义;
+    // 上屏后联想属独立特性,这里关掉以隔离被测行为。
+    let mut eng = engine_with(Config {
+        next_word_prediction: false,
+        ..Config::default()
+    });
     type_str(&mut eng, "wqv");
     assert_eq!(eng.buffer(), "wqv", "三码前保持组合");
     // 第 4 键 wqvb → 唯一候选「你好」自动上屏。
@@ -318,7 +323,12 @@ fn 四码多候选_不自动上屏() {
 
 #[test]
 fn 词组提示_逐字上屏后提示更省词组() {
-    let mut eng = engine();
+    // 词组提示与联想共用候选条位置:有联想行时不发提示;
+    // 本测专验提示本身,关掉联想隔离变量。
+    let mut eng = engine_with(Config {
+        next_word_prediction: false,
+        ..Config::default()
+    });
     // 逐字打「你好」:wqiy+空格 → 你,再 vbg+空格 → 好(共 7 个字母)。
     type_str(&mut eng, "wqiy");
     let fx1 = eng.process_key(LKey::Space);
@@ -357,7 +367,10 @@ fn 词组提示_同码词组打过不再提示() {
 
 #[test]
 fn 词组提示_拼音打词组提示五笔编码() {
-    let mut eng = engine();
+    let mut eng = engine_with(Config {
+        next_word_prediction: false,
+        ..Config::default()
+    });
     // nihao+空格 顶屏词组「你好」(5 个字母 > wqvb 4 键)→ 提示五笔编码。
     type_str(&mut eng, "nihao");
     let fx = eng.process_key(LKey::Space);
@@ -368,7 +381,10 @@ fn 词组提示_拼音打词组提示五笔编码() {
 
 #[test]
 fn 词组提示_下一次输入产生新效果流无残留提示() {
-    let mut eng = engine();
+    let mut eng = engine_with(Config {
+        next_word_prediction: false,
+        ..Config::default()
+    });
     type_str(&mut eng, "wqiy");
     eng.process_key(LKey::Space);
     type_str(&mut eng, "vbg");
@@ -698,9 +714,17 @@ fn 拼音单字_全拼排序按频次() {
 fn 拼音词组_全拼命中第一() {
     let mut eng = engine();
     type_str(&mut eng, "nihao");
-    let page = page_texts(&eng);
-    assert_eq!(page.first().map(String::as_str), Some("你好"));
-    assert!(page.contains(&"好".to_string()), "末音节单字也应出现");
+    let page = eng.flush_page();
+    assert_eq!(page.first().map(|c| c.text.as_str()), Some("你好"));
+    // 多音节缓冲不再出"只对应末音节"的孤立单字(旧行为会在 nihao 下出
+    // 「好」);前缀候选「你」消费 ni(consumed=2),选中后剩余 hao 继续组词。
+    assert!(
+        !page.iter().any(|c| c.text == "好"),
+        "nihao 不得出尾音节孤字 好:{page:?}"
+    );
+    let ni = page.iter().find(|c| c.text == "你").expect("前缀候选 你 应在列");
+    assert_eq!(ni.consumed, 2, "前缀候选 你 只消费 ni");
+    assert_eq!(ni.comment, "wqiy", "前缀候选注释同样反查五笔码");
 }
 
 #[test]
@@ -713,8 +737,15 @@ fn 反查_拼音候选注释为五笔编码() {
         .find(|c| c.text == "你好")
         .expect("你好 应在候选");
     assert_eq!(ni_hao.comment, "wqvb", "拼音词组应反查五笔编码");
-    let hao = page.iter().find(|c| c.text == "好").expect("好 应在候选");
+    let ni = page.iter().find(|c| c.text == "你").expect("前缀候选 你 应在列");
+    assert_eq!(ni.comment, "wqiy", "前缀单字候选应反查五笔编码");
+    // 末音节单字的五笔反查在单音节缓冲下验证(ni → 你 见上,hao → 好)。
+    let mut eng2 = engine();
+    type_str(&mut eng2, "hao");
+    let page2 = eng2.flush_page();
+    let hao = page2.iter().find(|c| c.text == "好").expect("好 应在候选");
     assert_eq!(hao.comment, "vbg", "拼音单字应反查五笔编码");
+    assert_eq!(hao.consumed, 0, "单音节命中消费整个缓冲");
 }
 
 #[test]
@@ -757,27 +788,37 @@ fn 拼音切分歧义_xian_同时命中两种切分() {
         Some("西安"),
         "词组全拼应胜过单字"
     );
+    // 尾音节"an"的孤字(安)不得出现——它需要丢弃已敲的 xi 才说得通;
+    // 对应能力由前缀候选承担(西 consumed=2,选中后剩 an 继续组词)。
+    assert!(
+        !page.contains(&"安".to_string()),
+        "xian 不得出尾音节孤字 安:{page:?}"
+    );
+    let xi = eng
+        .flush_page()
+        .iter()
+        .find(|c| c.text == "西")
+        .expect("前缀候选 西 应在列");
+    assert_eq!(xi.consumed, 2);
 }
 
 #[test]
-fn 拼音末音节不完整_niha_词组命中且被完整切分压制() {
+fn 拼音末音节不完整_niha_词组命中且无尾部孤字() {
     let mut eng = engine();
     type_str(&mut eng, "niha");
-    let page = page_texts(&eng);
-    // "niha" 可完整切分为 ni+ha("哈",pinyin_full 层),按修订 §5 层位高于
-    // 不完整尾音节词组"你好"(pinyin_partial 层);但不完整查询必须仍然命中。
-    assert_eq!(page.first().map(String::as_str), Some("哈"));
-    assert!(
-        page.contains(&"你好".to_string()),
-        "缺尾词组你好应命中:{page:?}"
-    );
-    let nh = page.iter().position(|t| t == "你好").unwrap();
-    let h = page.iter().position(|t| *t == "好").unwrap();
-    assert!(nh < h, "缺尾词组你好(音节多)应排在单字好之前");
-    assert!(
-        page.contains(&"海".to_string()),
-        "不完整片段 h 的单字(hai 海)也应出现"
-    );
+    let page = eng.flush_page();
+    // "niha" 的完整切分 ni+ha 没有词组/单字落点(末音节孤字已取消),
+    // 缺尾词组"你好"(pinyin_partial 层)居首。
+    assert_eq!(page.first().map(|c| c.text.as_str()), Some("你好"));
+    for tail in ["哈", "海", "好"] {
+        assert!(
+            !page.iter().any(|c| c.text == tail),
+            "niha 不得出尾音节孤字 {tail}:{page:?}"
+        );
+    }
+    // 前缀候选 你(consumed=2)仍在列,选中后余 ha 继续组词。
+    let ni = page.iter().find(|c| c.text == "你").expect("前缀候选 你 应在列");
+    assert_eq!(ni.consumed, 2);
 }
 
 #[test]
@@ -802,13 +843,14 @@ fn 简拼至少两键_单键不出词组() {
 }
 
 #[test]
-fn 全拼词组排序高于单字和简拼() {
+fn 全拼词组排序高于前缀候选和简拼() {
     let mut eng = engine();
     type_str(&mut eng, "nihao");
     let page = page_texts(&eng);
     let ni_hao = page.iter().position(|t| t == "你好").unwrap();
-    let hao = page.iter().position(|t| *t == "好").unwrap();
-    assert!(ni_hao < hao, "词组全拼(0.95)应排在末音节单字(0.90)之前");
+    // 前缀候选「你」只消费 ni,层级低于一切整缓冲命中,全拼词组必须在它之前。
+    let ni = page.iter().position(|t| *t == "你").expect("前缀候选 你 应在列");
+    assert!(ni_hao < ni, "词组全拼应排在前缀候选之前:{page:?}");
 }
 
 // ======================================================================
@@ -1005,6 +1047,112 @@ fn 关闭中文标点_直通放行() {
         ..Config::default()
     });
     assert!(is_pass(&eng.process_key(LKey::Punct(','))));
+}
+
+#[test]
+fn 中文态标点默认映射_逐个精确断言() {
+    let mut eng = engine();
+    for (input, want) in [
+        (',', '\u{FF0C}'),
+        ('.', '\u{3002}'),
+        ('?', '\u{FF1F}'),
+        ('!', '\u{FF01}'),
+        (';', '\u{FF1B}'),
+        (':', '\u{FF1A}'),
+    ] {
+        assert_eq!(
+            commits(&eng.process_key(LKey::Punct(input))),
+            vec![want.to_string()],
+            "{input} 应映射为 {want}"
+        );
+    }
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct('\''))),
+        vec!["\u{2018}".to_string()]
+    );
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct('"'))),
+        vec!["\u{201C}".to_string()]
+    );
+}
+
+#[test]
+fn 窄化标点开关_保留组合缓冲候选与模式() {
+    // Ctrl+. 运行时切换走 set_chinese_punctuation:不重装载词表,
+    // 不动缓冲/候选/模式——正在打的字原样保留。
+    let mut eng = engine();
+    type_str(&mut eng, "ni");
+    let cands_before = page_texts(&eng);
+    assert!(!cands_before.is_empty());
+    eng.set_chinese_punctuation(false);
+    assert_eq!(eng.buffer(), "ni", "窄化开关不得清缓冲");
+    assert_eq!(page_texts(&eng), cands_before, "候选应原样保留");
+    assert_eq!(eng.mode(), Mode::Chinese);
+    // 关闭态标点键:有缓冲先提交组合,该键直通应用(ASCII 收尾)。
+    let fx = eng.process_key(LKey::Punct(','));
+    assert_eq!(commits(&fx), vec!["你".to_string()], "{fx:?}");
+    assert!(matches!(fx.last(), Some(Effect::Pass)), "{fx:?}");
+    // 切回中文标点:逗号上屏全角。
+    eng.set_chinese_punctuation(true);
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct(','))),
+        vec!["\u{FF0C}".to_string()]
+    );
+}
+
+#[test]
+fn 标点关闭时_ascii引号不得污染开合状态() {
+    let mut eng = engine();
+    // 中文态出一对双引号,开合位推进。
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct('"'))),
+        vec!["\u{201C}".to_string()]
+    );
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct('"'))),
+        vec!["\u{201D}".to_string()]
+    );
+    // 关闭中文标点:ASCII 引号直通——禁用态不得翻转开合位,
+    // 否则重开中文标点后首引号方向错乱。
+    eng.set_chinese_punctuation(false);
+    assert!(is_pass(&eng.process_key(LKey::Punct('"'))));
+    assert!(is_pass(&eng.process_key(LKey::Punct('"'))));
+    eng.set_chinese_punctuation(true);
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct('"'))),
+        vec!["\u{201C}".to_string()],
+        "开关复位后首引号应是开引号"
+    );
+}
+
+#[test]
+fn 标点开关翻转_返回值即新状态() {
+    let mut eng = engine();
+    assert!(eng.config().cn_punct, "默认中文标点");
+    assert!(!eng.toggle_chinese_punctuation());
+    assert!(is_pass(&eng.process_key(LKey::Punct(','))));
+    assert!(eng.toggle_chinese_punctuation());
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct(','))),
+        vec!["\u{FF0C}".to_string()]
+    );
+}
+
+#[test]
+fn set_config改写标点默认_引号配对复位() {
+    let mut eng = engine();
+    eng.process_key(LKey::Punct('"')); // 吃掉开引号位
+    let mut cfg = eng.config().clone();
+    cfg.cn_punct = false;
+    eng.set_config(cfg.clone());
+    assert!(is_pass(&eng.process_key(LKey::Punct('"'))));
+    cfg.cn_punct = true;
+    eng.set_config(cfg);
+    assert_eq!(
+        commits(&eng.process_key(LKey::Punct('"'))),
+        vec!["\u{201C}".to_string()],
+        "标点配置变更后引号应从头配对"
+    );
 }
 
 // ======================================================================
@@ -1650,8 +1798,16 @@ fn 快速功能键_总开关关闭不提示() {
         }],
         ..Config::default()
     });
-    type_str(&mut eng, "peizhi");
-    assert!(page_texts(&eng).is_empty());
+    // 契约是"不出功能候选":普通输入照常,自动上屏后还可能留联想行
+    // (联想默认开)——不得断言候选全空,断言无 Action 候选/效果。
+    let fx = type_str(&mut eng, "peizhi");
+    assert!(
+        eng.flush_page()
+            .iter()
+            .all(|c| !matches!(c.kind, CandKind::Action(_))),
+        "总开关关闭后不得出现功能候选"
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Action(_))));
 }
 
 #[test]
@@ -1696,4 +1852,494 @@ fn 快速功能键_标点收尾退回原始字母不上屏功能标签() {
     let cs = commits(&fx);
     assert_eq!(cs.first().map(String::as_str), Some("zzz"), "退回原始字母 {cs:?}");
     assert!(!cs.iter().any(|c| c == "打开配置"), "功能标签不得上屏 {cs:?}");
+}
+
+// ======================================================================
+// 拼音前缀候选(缺词兜底):consumed>0 的候选只消费缓冲开头若干字节,
+// 选中后立即上屏前缀、余下后缀留在组合里继续编辑;边界键无损收尾。
+// ======================================================================
+
+/// 缺词夹具:jie→截/接、ping→屏、pin→品;不写词组/五笔/英文表——
+/// 词库没有「截屏」正是前缀消费路径的确定性来源。
+/// 用户数据(user/pinned/blocked)放 ud/ 子目录,与词库目录分开。
+fn jieping_engine() -> (TempDir, Engine) {
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\npin\t品\t2000\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    (td, eng)
+}
+
+#[test]
+fn 前缀候选_三种选词路径都只上屏前缀() {
+    for select in 0..3 {
+        let (_td, mut eng) = jieping_engine();
+        let fx = type_str(&mut eng, "jieping");
+        assert!(commits(&fx).is_empty(), "键入过程不得产生上屏:{fx:?}");
+        assert_eq!(eng.buffer(), "jieping");
+        assert_eq!(
+            page_texts(&eng),
+            vec!["截".to_string(), "接".to_string()]
+        );
+        assert_eq!(eng.flush_page()[0].consumed, 3);
+        let fx = match select {
+            0 => eng.process_key(LKey::Space),
+            1 => eng.process_key(LKey::Digit(1)),
+            _ => eng.select_candidate(0),
+        };
+        assert_eq!(
+            commits(&fx),
+            vec!["截".to_string()],
+            "选词路径 {select} 应只上屏前缀"
+        );
+        assert_eq!(eng.buffer(), "ping", "余下后缀留在组合缓冲");
+        assert_eq!(last_preedit(&fx).as_deref(), Some("ping"));
+        assert_eq!(
+            page_texts(&eng),
+            vec!["屏".to_string()],
+            "后缀应继续出候选"
+        );
+        let fx = eng.process_key(LKey::Space);
+        assert_eq!(commits(&fx), vec!["屏".to_string()]);
+        assert!(eng.buffer().is_empty());
+    }
+}
+
+#[test]
+fn 前缀候选_部分后缀_jiepin与jiepi() {
+    // jiepin:完整音节后缀 pin。
+    let (_td, mut eng) = jieping_engine();
+    type_str(&mut eng, "jiepin");
+    assert_eq!(
+        page_texts(&eng),
+        vec!["截".to_string(), "接".to_string()]
+    );
+    let fx = eng.process_key(LKey::Digit(2));
+    assert_eq!(commits(&fx), vec!["接".to_string()]);
+    assert_eq!(eng.buffer(), "pin");
+    // pin 是完整音节、也是 ping 的前缀:整音节补全候选 品 与 屏 都合法。
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("品"));
+    assert!(page_texts(&eng).contains(&"屏".to_string()));
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["品".to_string()]);
+
+    // jiepi:不完整但语法可续的后缀;满四键(jiep)不得自动上屏。
+    let (_td, mut eng) = jieping_engine();
+    let fx = type_str(&mut eng, "jiepi");
+    assert!(commits(&fx).is_empty(), "前缀候选不得触发四码上屏:{fx:?}");
+    assert_eq!(eng.buffer(), "jiepi");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["截".to_string()]);
+    assert_eq!(eng.buffer(), "pi");
+    eng.process_key(LKey::Char('n'));
+    assert_eq!(eng.buffer(), "pin");
+    // 同上:完整音节 pin 的补全候选同时含 品/屏。
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("品"));
+    assert!(page_texts(&eng).contains(&"屏".to_string()));
+}
+
+#[test]
+fn 前缀词组候选_nihaoni_消费五字节() {
+    let mut eng = engine(); // 共享夹具:你好(ni hao)
+    type_str(&mut eng, "nihaoni");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "你好");
+    assert_eq!(page[0].consumed, 5, "前缀词组候选只消费 nihao");
+    // 不得出现对应尾部音节的孤立单字(它们要丢弃前段才说得通)。
+    for tail in ["哈", "好", "海", "哦"] {
+        assert!(
+            !page.iter().any(|c| c.text == tail),
+            "nihaoni 不得出尾部孤字 {tail}:{page:?}"
+        );
+    }
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["你好".to_string()]);
+    assert_eq!(eng.buffer(), "ni");
+    assert_eq!(page_texts(&eng), vec!["你".to_string(), "尼".to_string()]);
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["你".to_string()]);
+    assert!(eng.buffer().is_empty());
+}
+
+#[test]
+fn 前缀候选_混合大小写_预编辑保留敲入原形() {
+    let (_td, mut eng) = jieping_engine();
+    for c in "jIePing".chars() {
+        eng.process_key(LKey::Char(c));
+    }
+    assert_eq!(eng.buffer(), "jieping", "内部按小写组词");
+    let fx = eng.select_candidate(0);
+    assert_eq!(commits(&fx), vec!["截".to_string()]);
+    assert_eq!(eng.buffer(), "ping");
+    assert_eq!(
+        last_preedit(&fx).as_deref(),
+        Some("Ping"),
+        "预编辑保留大写敲入原形"
+    );
+    // Enter 收尾:上屏的也是敲入原形(含大写)。
+    let fx = eng.process_key(LKey::Enter);
+    assert_eq!(commits(&fx), vec!["Ping".to_string()]);
+}
+
+#[test]
+fn 前缀选词后_退格Esc回车Shift逐键行为() {
+    let (_td, mut eng) = jieping_engine();
+    type_str(&mut eng, "jieping");
+    eng.process_key(LKey::Space); // 截 → ping
+    let fx = eng.process_key(LKey::Backspace);
+    assert_eq!(eng.buffer(), "pin");
+    assert_eq!(last_preedit(&fx).as_deref(), Some("pin"));
+    // pin 音节补全:品 首选,屏 同列(pin 也是 ping 的前缀)。
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("品"));
+    assert!(page_texts(&eng).contains(&"屏".to_string()));
+    // Esc:只清未选后缀,不得重复上屏已选的前缀。
+    let fx = eng.process_key(LKey::Esc);
+    assert!(commits(&fx).is_empty(), "Esc 不得再次上屏 截:{fx:?}");
+    assert!(eng.buffer().is_empty());
+
+    // Enter:上屏剩余原串(默认临时去向,保持中文模式)。
+    type_str(&mut eng, "jieping");
+    eng.process_key(LKey::Space);
+    let fx = eng.process_key(LKey::Enter);
+    assert_eq!(commits(&fx), vec!["ping".to_string()]);
+    assert!(eng.buffer().is_empty());
+    assert_eq!(eng.mode(), Mode::Chinese);
+
+    // Shift:上屏剩余原串并按配置切英文(默认 shift_english=en)。
+    type_str(&mut eng, "jieping");
+    eng.process_key(LKey::Space);
+    let fx = eng.process_key(LKey::ShiftPress);
+    assert_eq!(commits(&fx), vec!["ping".to_string()]);
+    assert_eq!(eng.mode(), Mode::English);
+}
+
+#[test]
+fn 前缀候选_标点收尾_无损拼接原后缀且不学习() {
+    let (td, mut eng) = jieping_engine();
+    type_str(&mut eng, "jieping"); // 首选是前缀候选「截」
+    let fx = eng.process_key(LKey::Punct(','));
+    assert_eq!(
+        commits(&fx),
+        vec!["截ping".to_string(), "\u{FF0C}".to_string()],
+        "标点收尾 = 前缀文本 + 原始后缀 + 中文标点:{fx:?}"
+    );
+    assert!(eng.buffer().is_empty());
+    // 拼接串不是用户确认过的词:绝不得入学习库(否则学到「截ping」)。
+    eng.flush_user_dict().unwrap();
+    let learned = std::fs::read_to_string(td.join("ud/user.tsv")).unwrap_or_default();
+    assert!(
+        !learned
+            .lines()
+            .any(|l| l.split('\t').next() == Some("截ping")),
+        "拼接串不得进 user.tsv:{learned}"
+    );
+
+    // 关闭中文标点:同样无损拼接,标点键放行给应用。
+    let (_td2, mut eng2) = jieping_engine();
+    eng2.set_chinese_punctuation(false);
+    type_str(&mut eng2, "jieping");
+    let fx = eng2.process_key(LKey::Punct(','));
+    assert_eq!(commits(&fx), vec!["截ping".to_string()], "{fx:?}");
+    assert!(matches!(fx.last(), Some(Effect::Pass)), "{fx:?}");
+}
+
+#[test]
+fn 前缀候选_学习与固定不改变消费量() {
+    let (td, mut eng) = jieping_engine();
+    type_str(&mut eng, "jieping");
+    let fx = eng.select_candidate(0);
+    assert_eq!(commits(&fx), vec!["截".to_string()]);
+    eng.process_key(LKey::Esc); // 丢弃 ping 余串
+    // 学习后「截」标 User 且加成,消费量仍 = 3。
+    type_str(&mut eng, "jieping");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "截");
+    assert_eq!(page[0].kind, CandKind::User, "学习后应标用户词");
+    assert_eq!(page[0].consumed, 3, "学习不得改变消费量");
+    eng.process_key(LKey::Esc);
+
+    // 固定「接」到 jieping 首位:消费量同样保持 3,重启引擎依旧。
+    type_str(&mut eng, "jieping");
+    let idx = page_texts(&eng)
+        .iter()
+        .position(|t| t == "接")
+        .expect("候选应有 接");
+    eng.cand_op(idx, CandOp::PinToggle);
+    assert_eq!(eng.flush_page()[0].text, "接", "固定后应居首");
+    assert_eq!(eng.flush_page()[0].consumed, 3);
+    drop(eng);
+    let mut eng2 = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng2, "jieping");
+    let page = eng2.flush_page();
+    assert_eq!(page[0].text, "接", "重启后固定仍居首");
+    assert_eq!(page[0].consumed, 3, "固定不得改变消费量");
+    let fx = eng2.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["接".to_string()]);
+    assert_eq!(eng2.buffer(), "ping");
+}
+
+#[test]
+fn 前缀候选_单页一条翻页后选第二候选仍留后缀() {
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\npin\t品\t2000\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            page_size: 1,
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "jieping");
+    assert_eq!(eng.page_count(), 2);
+    assert_eq!(page_texts(&eng), vec!["截".to_string()]);
+    eng.process_key(LKey::PageDown);
+    assert_eq!(page_texts(&eng), vec!["接".to_string()]);
+    let fx = eng.process_key(LKey::Digit(1));
+    assert_eq!(commits(&fx), vec!["接".to_string()]);
+    assert_eq!(eng.buffer(), "ping");
+    assert_eq!(page_texts(&eng), vec!["屏".to_string()]);
+}
+
+#[test]
+fn 前缀候选屏蔽后_语法可续缓冲仍接收_死码仍吞键() {
+    let (td, eng) = jieping_engine();
+    drop(eng); // 屏蔽表须在引擎装载前写好,先建一个只为拿到隔离目录
+    // 屏蔽 jie 的全部单字:词库缺词/屏蔽 ≠ 拼音非法,可续拼写必须收下。
+    std::fs::write(td.join("ud/blocked.tsv"), "截\n接\n").unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "jieping");
+    assert!(
+        page_texts(&eng).is_empty(),
+        "屏蔽后无候选:{:?}",
+        page_texts(&eng)
+    );
+    assert_eq!(
+        eng.buffer(),
+        "jieping",
+        "候选为空但语法可续,缓冲不得丢键"
+    );
+    // 真正的死码扩展仍被吞:'q' 不在本夹具的音节前缀里。
+    let fx = eng.process_key(LKey::Char('q'));
+    assert!(is_consumed(&fx), "{fx:?}");
+    assert_eq!(eng.buffer(), "jieping", "jiepingq 属死码应吞键");
+}
+
+#[test]
+fn 前缀候选_选中后联想不盖未完成组合_结束后上下文仍可联想() {
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\npin\t品\t2000\n",
+    )
+    .unwrap();
+    // suggestion 供联想索引:上屏「屏」后应能联想尾巴「幕」。
+    std::fs::write(td.join("suggestion.tsv"), "屏幕\t9000\n").unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            next_word_prediction: true,
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "jieping");
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["截".to_string()]);
+    // 联想/提示不得盖住未完成组合:候选是 ping 的真实候选,preedit 是 ping。
+    assert_eq!(eng.buffer(), "ping");
+    assert_eq!(page_texts(&eng), vec!["屏".to_string()]);
+    // 整词收齐后上下文照常续接:上屏「屏」→ 联想尾巴「幕」。
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["屏".to_string()]);
+    assert_eq!(
+        page_texts(&eng),
+        vec!["幕".to_string()],
+        "组合结束后应按上下文继续联想:{fx:?}"
+    );
+}
+
+// ======================================================================
+// 内嵌补充词表(data/pinyin_supplement.tsv)与前缀候选的相互作用。
+// 补充表由 dict.rs 装载时合并:仅当 base 词组文件非空、主词库无该词、
+// 且标注音节全部存在时才补入;本组用例锁定这三条门槛。
+// ======================================================================
+
+#[test]
+fn 补充词表_主词组非空且缺词时补入_整词优先于前缀候选() {
+    // base 词组文件非空(接屏 jie ping)且不含「截屏」→ 内嵌补充表补入
+    // 截屏(jie ping):与 base 词同层整缓冲候选(consumed=0),
+    // 词库补齐后前缀兜底自动让位,这正是"缺词兜底"的设计意图。
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\n",
+    )
+    .unwrap();
+    std::fs::write(td.join("pinyin_phrase.tsv"), "接屏\tjie ping\t30\n").unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "jieping");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "接屏", "同层内按词频接屏应在前:{page:?}");
+    assert_eq!(page[0].consumed, 0);
+    let jp = page
+        .iter()
+        .position(|c| c.text == "截屏")
+        .expect("补充词 截屏 应在列:{page:?}");
+    assert_eq!(page[jp].consumed, 0, "补充词是整缓冲候选,不是前缀候选");
+    // 前缀兜底候选仍在列(层级低于一切整缓冲候选)。
+    assert!(
+        page.iter().any(|c| c.text == "截" && c.consumed == 3),
+        "前缀候选 截 应仍在列:{page:?}"
+    );
+    // 选中补充词:整词一次上屏(消费整个 jieping)。
+    let fx = eng.select_candidate(jp);
+    assert_eq!(commits(&fx), vec!["截屏".to_string()], "{fx:?}");
+    assert!(eng.buffer().is_empty());
+}
+
+#[test]
+fn 补充词表_主词库已有该词则不补入_jieping不冒错词() {
+    // base 已有「截屏」但标注读音是 jie pin → 补充行(词面相同)被跳过;
+    // 打 jieping 不得冒出与缓冲不符的 截屏,它只在 jiepin 下整词命中。
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\npin\t品\t2000\n",
+    )
+    .unwrap();
+    std::fs::write(td.join("pinyin_phrase.tsv"), "截屏\tjie pin\t40\n").unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "jieping");
+    let page = eng.flush_page();
+    assert!(
+        !page.iter().any(|c| c.text == "截屏"),
+        "jieping 不得出现补充词 截屏(base 已有同名词):{page:?}"
+    );
+    assert_eq!(
+        page_texts(&eng),
+        vec!["截".to_string(), "接".to_string()],
+        "仍是缺词兜底的前缀候选形态"
+    );
+    // 对照:jiepin 下 base 词正常整词命中(证明词确已装载)。
+    let mut eng2 = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user2.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng2, "jiepin");
+    assert_eq!(eng2.flush_page()[0].text, "截屏");
+    assert_eq!(eng2.flush_page()[0].consumed, 0);
+}
+
+#[test]
+fn 补充词表_主词组文件缺失或为空不激活() {
+    // jieping_engine 不写 pinyin_phrase.tsv:补充表不激活,
+    // jieping 保持缺词兜底形态(只有 consumed=3 的前缀候选)。
+    let (_td, mut eng) = jieping_engine();
+    type_str(&mut eng, "jieping");
+    assert_eq!(page_texts(&eng), vec!["截".to_string(), "接".to_string()]);
+
+    // 词组文件存在但为空同理:补充表仍不激活。
+    let td = TempDir::new();
+    std::fs::write(
+        td.join("pinyin_char.tsv"),
+        "jie\t截\t6000\njie\t接\t3000\nping\t屏\t5000\n",
+    )
+    .unwrap();
+    std::fs::write(td.join("pinyin_phrase.tsv"), "").unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let mut eng = engine_with_fixtures(
+        &td.path,
+        Config {
+            user_dict: Some(td.join("ud/user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "jieping");
+    assert_eq!(
+        page_texts(&eng),
+        vec!["截".to_string(), "接".to_string()],
+        "空词组文件不得激活补充表"
+    );
+}
+
+#[test]
+fn 补充词表_不扩展到小词库没有的音节() {
+    // 夹具音节表只有 ni/hao:补充词 截屏 需要 jie/ping 音节,
+    // 均不存在 → 补充行被过滤,小词库行为与无补充表时一致。
+    let td = TempDir::new();
+    std::fs::write(td.join("pinyin_char.tsv"), "ni\t你\t6000\nhao\t好\t5000\n")
+        .unwrap();
+    std::fs::write(td.join("pinyin_phrase.tsv"), "你好\tni hao\t9000\n").unwrap();
+    std::fs::create_dir_all(td.join("ud")).unwrap();
+    let mk = || {
+        engine_with_fixtures(
+            &td.path,
+            Config {
+                user_dict: Some(td.join("ud/user.tsv")),
+                ..Config::default()
+            },
+        )
+    };
+    let mut eng = mk();
+    type_str(&mut eng, "nihao");
+    let page = eng.flush_page();
+    assert_eq!(page[0].text, "你好");
+    assert_eq!(page[0].consumed, 0);
+    assert!(
+        page.iter().any(|c| c.text == "你" && c.consumed == 2),
+        "前缀候选 你 应在列:{page:?}"
+    );
+    assert!(!page.iter().any(|c| c.text == "截屏"), "{page:?}");
+    // 词库没有的音节照旧无候选、原串直通(补充表没有凭空造出 jie/ping)。
+    let mut eng = mk();
+    type_str(&mut eng, "jieping");
+    assert!(page_texts(&eng).is_empty());
+    let fx = eng.process_key(LKey::Space);
+    assert_eq!(commits(&fx), vec!["jieping".to_string()], "{fx:?}");
 }

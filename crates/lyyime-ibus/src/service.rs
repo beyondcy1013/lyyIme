@@ -44,6 +44,11 @@ pub enum Action {
     QuickRun(usize),
     /// 自定义查询(§15 菜单第 4 项):xdg-open 打开已代入词的网址,调用方单独执行
     OpenUrl(String),
+    /// 菜单触发确认(2026-09-30):值 = core 可信目录 MENU_CATALOG 下标,
+    /// 调用方按目录动作分派(settings/help/english/…),绝不落 shell
+    MenuRun(usize),
+    /// 菜单提示撤下:隐藏辅助区(仅在我们贴的菜单提示仍显示时产生)
+    AuxClear,
 }
 
 impl logic::Host for CollectingHost {
@@ -87,6 +92,12 @@ impl logic::Host for CollectingHost {
     }
     fn on_open_url(&mut self, url: &str) {
         self.actions.push(Action::OpenUrl(url.to_string()));
+    }
+    fn on_menu_action(&mut self, index: usize) {
+        self.actions.push(Action::MenuRun(index));
+    }
+    fn on_menu_hint_clear(&mut self) {
+        self.actions.push(Action::AuxClear);
     }
 }
 
@@ -361,6 +372,12 @@ impl EngineService {
             Action::Shot => Ok(()),        // 由调用方单独处理
             Action::QuickRun(_) => Ok(()), // 由调用方单独处理(§14)
             Action::OpenUrl(_) => Ok(()),  // 由调用方单独处理(§15 自定义查询)
+            Action::MenuRun(_) => Ok(()),  // 由调用方单独处理(2026-09-30 菜单触发)
+            Action::AuxClear => {
+                // 菜单提示撤下:只隐藏辅助区;同时作废未到的 notice 清除定时
+                self.0.notice_gen.fetch_add(1, Ordering::SeqCst);
+                self.emit("HideAuxiliaryText", &()).await
+            }
         }
     }
 
@@ -604,6 +621,162 @@ impl EngineService {
         }
     }
 
+    /// 菜单触发确认动作(2026-09-30,与 Mode B 同合同):可信目录下标 →
+    /// 内置动作分派;绝无 shell 命令路径。XIM 侧工具(悬浮窗/主窗口)经
+    /// lyyime-float / lyyime-xim --mainwin 拉起,缺失时辅助区提示而不是
+    /// 静默失败。
+    async fn run_menu_action(&self, index: usize) {
+        let Some(item) = lyyime_core::menu_trigger::MENU_CATALOG.get(index) else {
+            crate::logger::warn(&format!("菜单触发下标越界:{index}"));
+            return;
+        };
+        crate::logger::info(&format!(
+            "菜单触发:确认执行 {}(idx={index})",
+            item.id
+        ));
+        use lyyime_core::MenuAction as A;
+        match item.action {
+            A::OpenSettings => self.launch_setup(),
+            A::OpenSettingsPage(p) => self.launch_setup_page(p),
+            A::Help => {
+                self.emit_menu_hint(
+                    "帮助:Shift单击=中英切换  1-9选词  -/=翻页  Ctrl+=造词  \
+                     Ctrl+Alt+A截屏  /AI+提示词=AI",
+                )
+                .await;
+            }
+            A::EnglishMode => {
+                // 语义=切英文(非 toggle):已英文则无操作
+                let actions = {
+                    let mut logic = self.0.logic.lock().unwrap();
+                    if logic.mode != 0 {
+                        Vec::new()
+                    } else {
+                        let mut host = CollectingHost::default();
+                        logic.switch_mode(&mut host);
+                        host.actions
+                    }
+                };
+                for a in &actions {
+                    let _ = self.emit_action(a).await;
+                }
+            }
+            A::Shot => self.spawn_shot(),
+            A::FixIme => {
+                self.run_in_terminal(
+                    &["lyyime-doctor", "fix", "--all", "--dry-run"],
+                    "lyyIme 修复输入法(dry-run 预览)",
+                );
+            }
+            A::ManageIme => {
+                self.run_in_terminal(
+                    &["lyyime-doctor", "ime-list"],
+                    "lyyIme 输入法管理(列表)",
+                );
+            }
+            A::ReloadDict => {
+                let actions = {
+                    let mut logic = self.0.logic.lock().unwrap();
+                    let mut host = CollectingHost::default();
+                    match logic.reload_dict(&mut host) {
+                        Ok(()) => host
+                            .actions
+                            .push(Action::Notice("词库已重载".into())),
+                        Err(e) => host
+                            .actions
+                            .push(Action::Notice(format!("词库重载失败:{e:#}"))),
+                    }
+                    host.actions
+                };
+                for a in &actions {
+                    let _ = self.emit_action(a).await;
+                }
+            }
+            A::OpenLog => {
+                let log_dir = crate::logger::log_dir();
+                let _ = std::fs::create_dir_all(&log_dir);
+                if let Err(e) = std::process::Command::new("xdg-open")
+                    .arg(&log_dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    crate::logger::error(&format!("打开日志目录失败:{e}"));
+                }
+            }
+            A::FloatWindow => self.spawn_tool(
+                &["lyyime-float"],
+                "未找到 lyyime-float:请先安装直输悬浮窗组件",
+            ),
+            A::MainWindow => self.spawn_tool(
+                &["lyyime-xim", "--mainwin"],
+                "未找到 lyyime-xim:主窗口由 Mode B 组件提供",
+            ),
+        }
+    }
+
+    /// 辅助区提示(notice 通道,4s 自清)
+    async fn emit_menu_hint(&self, text: &str) {
+        let _ = self
+            .emit("UpdateAuxiliaryText", &(wire::ibus_text(text, false), true))
+            .await;
+        self.schedule_notice_clear();
+    }
+
+    /// 同步辅助区提示:spawn/探测失败等错误路径给用户可见反馈(人话)
+    fn aux_notice(&self, msg: &str) {
+        let _ = zbus::block_on(
+            self.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true)),
+        );
+    }
+
+    /// 拉起外部工具(PATH 探测;argv[0] 为程序名)。缺失时辅助区提示。
+    fn spawn_tool(&self, argv: &[&str], missing_msg: &str) {
+        let Some(prog) = which(argv[0]) else {
+            crate::logger::warn(&format!("菜单触发:{missing_msg}"));
+            self.aux_notice(missing_msg);
+            return;
+        };
+        match std::process::Command::new(&prog)
+            .args(&argv[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => crate::logger::info(&format!("菜单触发:已拉起 {prog}")),
+            Err(e) => {
+                crate::logger::error(&format!("菜单触发拉起失败({prog}):{e}"));
+                self.aux_notice(&format!("菜单功能拉起失败:{e}"));
+            }
+        }
+    }
+
+    /// 打开设置窗指定子页(0 基):经 lyyime-xim --settings-page N
+    /// (单实例信号机制不变);无 XIM 组件时回退主设置入口。
+    fn launch_setup_page(&self, page: u8) {
+        let Some(prog) = which("lyyime-xim") else {
+            crate::logger::warn(&format!(
+                "菜单触发:未找到 lyyime-xim,无法打开设置页 {page}"
+            ));
+            self.aux_notice(&format!(
+                "无法打开设置页 {page}:未找到 lyyime-xim 组件,改开主设置界面"
+            ));
+            self.launch_setup();
+            return;
+        };
+        crate::logger::info(&format!("菜单触发:打开设置页 {page}(经 lyyime-xim)"));
+        if let Err(e) = std::process::Command::new(&prog)
+            .arg("--settings-page")
+            .arg(page.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            crate::logger::error(&format!("拉起设置页失败({prog}):{e}"));
+            self.aux_notice(&format!("打开设置页 {page} 失败:{e}"));
+        }
+    }
+
     /// 自定义查询(§15 菜单第 4 项):xdg-open 拉起浏览器(与 Mode B/C
     /// 同一执行方式;异步,不阻塞按键流)。
     fn open_query_url(&self, url: &str) {
@@ -625,12 +798,7 @@ impl EngineService {
             .or_else(|| which("lyyime-xim").map(|a| vec![a, "--settings".into()]));
         let Some(argv) = argv else {
             crate::logger::warn("未找到 lyyime-app/lyyime-xim,无法打开设置界面");
-            let this = self.clone();
-            let msg = "未找到设置程序:请先安装 lyyIme 应用或 lyyime-xim";
-            let _ = zbus::block_on(async {
-                this.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true))
-                    .await
-            });
+            self.aux_notice("未找到设置程序:请先安装 lyyIme 应用或 lyyime-xim");
             return;
         };
         // 防重复拉起:已记录的 setup pid 仍在运行则忽略
@@ -645,13 +813,17 @@ impl EngineService {
                 *pid = 0;
             }
         }
-        if let Ok(child) = std::process::Command::new(&argv[0])
+        match std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            *self.0.setup_pid.lock().unwrap() = child.id();
+            Ok(child) => *self.0.setup_pid.lock().unwrap() = child.id(),
+            Err(e) => {
+                crate::logger::error(&format!("拉起设置界面失败({}):{e}", argv[0]));
+                self.aux_notice(&format!("打开设置界面失败:{e}"));
+            }
         }
     }
 }
@@ -687,6 +859,7 @@ impl EngineService {
         let mut shot = false;
         let mut quick: Option<usize> = None;
         let mut open_url: Option<String> = None;
+        let mut menu: Option<usize> = None;
         let consumed = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
@@ -697,6 +870,7 @@ impl EngineService {
                     Action::Shot => shot = true,
                     Action::QuickRun(i) => quick = Some(i),
                     Action::OpenUrl(u) => open_url = Some(u),
+                    Action::MenuRun(i) => menu = Some(i),
                     other => actions.push(other),
                 }
             }
@@ -718,6 +892,9 @@ impl EngineService {
         }
         if let Some(u) = open_url {
             self.open_query_url(&u);
+        }
+        if let Some(i) = menu {
+            self.run_menu_action(i).await;
         }
         consumed
     }
@@ -789,11 +966,25 @@ impl EngineService {
             let c = lyyime_ai::load_config();
             Some(c)
         };
+        // core 配置一次热读:菜单触发三键 + 实际工具快捷键(冲突已消解)
+        let core_cfg = crate::read_core_config();
         let (actions, mode) = {
             let mut logic = self.0.logic.lock().unwrap();
             logic.set_ai_cfg(cfg);
             // §15 自定义查询同样热读(config.toml custom_query_*)
             logic.set_custom_query(crate::read_custom_query());
+            // 菜单触发三键与工具热键同帧热读(2026-09-30;设置保存即生效)
+            logic.set_menu_trigger_cfg(
+                core_cfg.menu_trigger_enabled,
+                core_cfg.menu_trigger_key,
+                &core_cfg.menu_trigger_disabled,
+            );
+            logic.set_tool_hotkeys(&core_cfg.coin_hotkey, &core_cfg.shot_hotkey);
+            // 联想开关联动热读(设置保存即生效;关闭时 core 自清联想行)
+            logic.set_next_word_prediction(core_cfg.next_word_prediction);
+            // 中文标点默认热读:仅默认值变更才下发(运行时 Ctrl+.
+            // 切换跨焦点保留),窄化下发不打断输入也不动缓冲。
+            logic.set_punctuation_default(core_cfg.cn_punct);
             let mut host = CollectingHost::default();
             logic.reset_session(&mut host);
             (host.actions, logic.mode)

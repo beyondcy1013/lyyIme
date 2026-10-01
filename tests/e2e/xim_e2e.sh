@@ -48,7 +48,9 @@ custom_query_label = "查词典"
 custom_query_url = "https://dict.example.test/lookup?q={q}"
 CFG
 
-export DISPLAY="${LYYIME_E2E_DISPLAY:-:98}"
+# :98 常被 Xvnc 等真实显示占用;本脚本对已有占用一律拒绝(不杀外来
+# 进程/不删外来 lock/socket)。默认 :95,可用 LYYIME_E2E_DISPLAY 覆盖。
+export DISPLAY="${LYYIME_E2E_DISPLAY:-:95}"
 export XMODIFIERS=@im=lyyime
 export GTK_IM_MODULE=xim
 export LANG=zh_CN.utf8 LC_ALL=zh_CN.utf8
@@ -103,12 +105,11 @@ echo "== [2/9] 清理并启动 Xvfb $DISPLAY =="
 XDNUM="${DISPLAY%%.*}"; XDNUM="${XDNUM#:}"
 XSOCK="/tmp/.X11-unix/X${XDNUM}"
 XLOCK="/tmp/.X${XDNUM}-lock"
-if [[ -f "$XLOCK" ]]; then
-    oldpid="$(cat "$XLOCK" 2>/dev/null || true)"
-    [[ -n "$oldpid" ]] && kill "$oldpid" 2>/dev/null || true
-    rm -f "$XLOCK"
+# 安全边界:lock 或 socket 已存在 ⇒ 该显示归他人(Xvfb/Xvnc/Xorg)
+# 所有,拒绝使用;绝不 kill 外来进程、不 rm 外来文件
+if [[ -f "$XLOCK" || -S "$XSOCK" ]]; then
+    fail "显示 $DISPLAY 已被占用(lock/socket 存在);请用 LYYIME_E2E_DISPLAY 指定空闲显示号"
 fi
-rm -f "$XSOCK"
 Xvfb "$DISPLAY" -screen 0 1024x768x24 -nolisten tcp &
 XVFB_PID=$!
 for _ in $(seq 1 50); do [[ -S "$XSOCK" ]] && break; sleep 0.1; done

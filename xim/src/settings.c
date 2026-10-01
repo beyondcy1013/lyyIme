@@ -9,6 +9,7 @@
 #include "ai_capture.h"
 #include "common.h"
 #include "keysym_map.h"
+#include "skin.h"
 
 /* ---- 构建控件状态 ←→ 配置 ---- */
 static void ui_from_config(SettingsUi *ui)
@@ -33,6 +34,9 @@ static void ui_from_config(SettingsUi *ui)
         c->commit_first_at_four);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint),
                                  c->phrase_hint);
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(ui->chk_next_word_prediction),
+        c->next_word_prediction);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_exact_freq_rank),
                                  c->exact_char_freq_rank);
     /* 英文上屏去向(§6):0=临时 temp,1=切英文模式 en(两行同一映射) */
@@ -67,9 +71,50 @@ static void ui_from_config(SettingsUi *ui)
     /* 自定义查询(§15 候选右键菜单第 4 项) */
     gtk_entry_set_text(GTK_ENTRY(ui->ent_cq_label), c->custom_query_label);
     gtk_entry_set_text(GTK_ENTRY(ui->ent_cq_url), c->custom_query_url);
+    /* 菜单触发页(动态控件;目录行勾选=禁止文字触发) */
+    if (ui->chk_mt_enabled)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_mt_enabled),
+                                     c->menu_trigger_enabled);
+    if (ui->combo_mt_key) {
+        int k = c->menu_trigger_key;
+        if (k < 1 || k > 12)
+            k = 7;
+        gtk_combo_box_set_active(GTK_COMBO_BOX(ui->combo_mt_key), k - 1);
+    }
+    for (int i = 0; i < ui->mt_count; i++)
+        gtk_toggle_button_set_active(
+            GTK_TOGGLE_BUTTON(ui->mt_rows[i]),
+            lyy_config_csv_contains(c->menu_trigger_disabled, ui->mt_ids[i]));
+    /* 皮肤页:选中配置对应卡片(未知/空 id 经注册表归一 system);
+     * 只复位草稿,不动真实候选窗 */
+    if (ui->skin_buttons[0]) {
+        const LyySkin *cur = lyy_skin_find(c->skin);
+        int n = lyy_skin_count();
+        int cap = (int)(sizeof(ui->skin_buttons) / sizeof(ui->skin_buttons[0]));
+        if (n > cap)
+            n = cap;
+        for (int i = 0; i < n; i++)
+            if (ui->skin_buttons[i] && lyy_skin_at(i) == cur)
+                gtk_toggle_button_set_active(
+                    GTK_TOGGLE_BUTTON(ui->skin_buttons[i]), TRUE);
+    }
 }
 
-static void config_from_ui(SettingsUi *ui, LyyConfig *c)
+/* 逗号列表尾部追加 token(容量不足静默跳过;行数受目录上限约束) */
+static void csv_append(char *buf, size_t cap, const char *tok)
+{
+    size_t len = strlen(buf);
+    size_t need = strlen(tok) + (len ? 1 : 0);
+    if (len + need + 1 > cap)
+        return;
+    if (len)
+        strcat(buf, ",");
+    strcat(buf, tok);
+}
+
+/* UI → LyyConfig;返回 0=可保存,-1=黑名单合并不下(安全开关不得
+ * 静默保存失败,调用方必须中止保存并提示用户) */
+static int config_from_ui(SettingsUi *ui, LyyConfig *c)
 {
     c->page_size =
         (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_page));
@@ -91,6 +136,8 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
         GTK_TOGGLE_BUTTON(ui->chk_commit_first_at_four));
     c->phrase_hint =
         gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->chk_phrase_hint));
+    c->next_word_prediction = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_next_word_prediction));
     c->exact_char_freq_rank = gtk_toggle_button_get_active(
         GTK_TOGGLE_BUTTON(ui->chk_exact_freq_rank));
     snprintf(c->enter_english, sizeof(c->enter_english), "%s",
@@ -141,6 +188,53 @@ static void config_from_ui(SettingsUi *ui, LyyConfig *c)
     snprintf(c->custom_query_url, sizeof(c->custom_query_url), "%s",
              gtk_entry_get_text(GTK_ENTRY(ui->ent_cq_url)));
     g_strstrip(c->custom_query_url);
+    /* 菜单触发页:总开关/确认键/目录黑名单(勾选=禁止文字触发) */
+    if (ui->chk_mt_enabled)
+        c->menu_trigger_enabled = gtk_toggle_button_get_active(
+            GTK_TOGGLE_BUTTON(ui->chk_mt_enabled));
+    if (ui->combo_mt_key) {
+        int k = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->combo_mt_key)) + 1;
+        c->menu_trigger_key = (k >= 1 && k <= 12) ? k : 7;
+    }
+    if (ui->mt_count > 0) {
+        /* 结果 = 勾选 id(目录序) + 原串中不在目录内的 token(未知 id
+         * 前向兼容,原序保留);mt_count==0(旧 core)时原配置不动 */
+        char checked[2048] = "", known[2048] = "";
+        char base[LYY_CFG_STR_CMD];
+        snprintf(base, sizeof(base), "%s", c->menu_trigger_disabled);
+        for (int i = 0; i < ui->mt_count; i++) {
+            csv_append(known, sizeof(known), ui->mt_ids[i]);
+            if (gtk_toggle_button_get_active(
+                    GTK_TOGGLE_BUTTON(ui->mt_rows[i])))
+                csv_append(checked, sizeof(checked), ui->mt_ids[i]);
+        }
+        char merged[LYY_CFG_STR_CMD];
+        if (lyy_config_merge_menu_disabled(merged, sizeof(merged), base,
+                                           known, checked) != 0) {
+            /* 黑名单合并不下=安全开关丢失风险:整体中止保存 */
+            lyy_log(&lyy_app()->log,
+                    "ERROR 菜单触发黑名单超出配置容量,保存已中止");
+            return -1;
+        }
+        snprintf(c->menu_trigger_disabled,
+                 sizeof(c->menu_trigger_disabled), "%s", merged);
+    }
+    /* 皮肤页:取勾选卡片对应的注册表 id(防御性归一在写回时再做一次) */
+    if (ui->skin_buttons[0]) {
+        int n = lyy_skin_count();
+        int cap = (int)(sizeof(ui->skin_buttons) / sizeof(ui->skin_buttons[0]));
+        if (n > cap)
+            n = cap;
+        for (int i = 0; i < n; i++) {
+            if (ui->skin_buttons[i] &&
+                gtk_toggle_button_get_active(
+                    GTK_TOGGLE_BUTTON(ui->skin_buttons[i]))) {
+                snprintf(c->skin, sizeof(c->skin), "%s", lyy_skin_at(i)->id);
+                break;
+            }
+        }
+    }
+    return 0;
 }
 
 /* ---- 快捷键弹窗提示(写法非法/冲突避让结果,人话) ---- */
@@ -189,6 +283,14 @@ static gboolean hotkeys_validate_and_resolve(SettingsUi *ui, LyyConfig *c,
         gtk_entry_set_text(GTK_ENTRY(ui->ent_shot_hotkey), saved->shot_hotkey);
         snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s",
                  saved->shot_hotkey);
+        return FALSE;
+    }
+    /* 保留键:Ctrl+. 固定为中文态中英文标点切换,不允许再分配给
+     * 造词/截屏——保存拒绝但输入框保持可编辑(不还原、不静默改写)。 */
+    if (!strcmp(coin, "ctrl+period") || !strcmp(shot, "ctrl+period")) {
+        hotkey_msg_dialog(ui, GTK_MESSAGE_ERROR,
+                          "Ctrl+. 已用于切换中英文标点,"
+                          "请选择其他快捷键。");
         return FALSE;
     }
     if (strcmp(coin, shot) != 0)
@@ -243,7 +345,14 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     App *app = lyy_app();
 
     LyyConfig c = app->config;
-    config_from_ui(ui, &c);
+    if (config_from_ui(ui, &c) != 0) {
+        /* 菜单触发黑名单合并不下:禁用开关可能失效,绝不静默保存 */
+        hotkey_msg_dialog(ui, GTK_MESSAGE_ERROR,
+                          "菜单触发黑名单超出配置容量,保存已取消。\n"
+                          "请减少勾选项或精简 config.toml 中 "
+                          "menu_trigger_disabled 的自定义条目。");
+        return;
+    }
     /* 快捷键校验 + 冲突自动升级(合同 §13):非法/无法避让时已弹窗还原,
      * 不保存不关窗 */
     if (!hotkeys_validate_and_resolve(ui, &c, &app->config))
@@ -261,19 +370,23 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     lyy_engine_reload(app);
     lyy_app_reload_hotkey(app); /* 造词/截屏热键即时生效 */
     lyy_candwin_set_font_size(&app->candwin, c.font_size);
+    lyy_candwin_set_skin(&app->candwin, c.skin); /* 皮肤即时生效 */
     /* §15 自定义查询(候选右键菜单第 4 项)即时生效 */
     lyy_candwin_set_query(&app->candwin, c.custom_query_label,
                           c.custom_query_url);
     lyy_log(&app->log,
-            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d first4=%d unique4=%d hint=%d freq_rank=%d enter_en=%s shift_en=%s font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s stats=%d pause=%d idle=%d",
+            "设置已保存并生效:page_size=%d mixed=%d auto=%d punct=%d learn=%d four=%d first4=%d unique4=%d hint=%d pred=%d freq_rank=%d enter_en=%s shift_en=%s font=%d autostart=%d qa=%d(%d条) ai=%d base=%s model=%s coin=%s shot=%s stats=%d pause=%d idle=%d mt=%d mtkey=F%d mtdis=[%s]",
             c.page_size, c.mixed_english, c.auto_commit_english,
             c.chinese_punct, c.learning, c.commit_after_four,
             c.commit_first_at_four, c.commit_unique_four, c.phrase_hint,
-            c.exact_char_freq_rank,
+            c.next_word_prediction, c.exact_char_freq_rank,
             c.enter_english, c.shift_english, c.font_size, c.autostart,
             c.quick_actions_enabled, c.quick_actions_count, c.ai_enabled,
             c.ai_api_base, c.ai_model, c.coin_hotkey, c.shot_hotkey,
-            c.stats_enabled, c.stats_pause_secs, c.stats_idle_exclude_secs);
+            c.stats_enabled, c.stats_pause_secs, c.stats_idle_exclude_secs,
+            c.menu_trigger_enabled, c.menu_trigger_key,
+            c.menu_trigger_disabled);
+    lyy_log(&app->log, "设置已保存:skin=%s", c.skin);
     gtk_widget_hide(ui->window);
 }
 
@@ -413,6 +526,291 @@ static void on_ai_test(GtkWidget *widget, gpointer user_data)
     g_child_watch_add(pid, on_ai_check_exit, ck);
 }
 
+/* ---- 菜单触发页(2026-09-30):目录勾选行运行时由 core 可选符号组
+ * lyyime_menu_trigger_* 生成(单一目录源,不写死 label/id);旧库缺符号
+ * 时页内降级为说明文字。勾选语义=「禁止文字触发」,只影响上屏文字匹配,
+ * 与快捷键页的快速功能键(§14 字母缓冲触发)互不相关。 */
+static void build_menu_tab(SettingsUi *ui)
+{
+    App *app = lyy_app();
+    if (!ui->notebook)
+        return;
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_set_border_width(GTK_CONTAINER(outer), 10);
+
+    GtkWidget *desc = gtk_label_new(
+        "输入的中文短语正常上屏;若命中下方菜单功能名,候选条提示\n"
+        "「匹配了菜单功能,按 Fn 进入该功能」,按下确认键才执行。");
+    gtk_label_set_xalign(GTK_LABEL(desc), 0.0);
+    gtk_box_pack_start(GTK_BOX(outer), desc, FALSE, FALSE, 0);
+
+    ui->chk_mt_enabled = gtk_check_button_new_with_label(
+        "启用菜单触发(上屏文字命中菜单功能名后按功能键进入)");
+    gtk_box_pack_start(GTK_BOX(outer), ui->chk_mt_enabled, FALSE, FALSE, 0);
+
+    GtkWidget *krow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_pack_start(GTK_BOX(krow), gtk_label_new("确认键:"), FALSE, FALSE, 0);
+    ui->combo_mt_key = gtk_combo_box_text_new();
+    for (int i = 1; i <= 12; i++) {
+        char t[8];
+        snprintf(t, sizeof(t), "F%d", i);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->combo_mt_key),
+                                       t);
+    }
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui->combo_mt_key), 6); /* 默认 F7 */
+    gtk_box_pack_start(GTK_BOX(krow), ui->combo_mt_key, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outer), krow, FALSE, FALSE, 0);
+
+    GtkWidget *tip = gtk_label_new(
+        "文字先正常上屏,匹配后按确认键执行;继续输入或切换窗口即取消\n"
+        "下方勾选 = 禁止该功能被文字触发(不影响「快捷键」页的快速功能键)");
+    gtk_label_set_xalign(GTK_LABEL(tip), 0.0);
+    gtk_box_pack_start(GTK_BOX(outer), tip, FALSE, FALSE, 0);
+
+    GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(sw, -1, 220);
+    GtkWidget *rows = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+
+    if (app->core.mt_ok) {
+        int n = app->core.lyyime_menu_trigger_count();
+        int cap = (int)(sizeof(ui->mt_rows) / sizeof(ui->mt_rows[0]));
+        if (n > cap)
+            n = cap;
+        for (int i = 0; i < n; i++) {
+            char id[64], label[128];
+            app->core.lyyime_menu_trigger_id(i, id, (int)sizeof(id));
+            app->core.lyyime_menu_trigger_label(i, label, (int)sizeof(label));
+            snprintf(ui->mt_ids[i], sizeof(ui->mt_ids[0]), "%s", id);
+            /* 行标签只显示中文功能名(技术 id 放 tooltip,不干扰用户) */
+            ui->mt_rows[i] = gtk_check_button_new_with_label(
+                label[0] ? label : "?");
+            char tip[96];
+            snprintf(tip, sizeof(tip), "文字触发 id:%s", id);
+            gtk_widget_set_tooltip_text(ui->mt_rows[i], tip);
+            gtk_box_pack_start(GTK_BOX(rows), ui->mt_rows[i], FALSE, FALSE, 0);
+        }
+        ui->mt_count = n;
+    } else {
+        GtkWidget *warn = gtk_label_new(
+            "当前 core 库缺少菜单触发符号组(lyyime_menu_trigger_*),\n"
+            "该特性不可用;请更新 liblyyime_core.so 后重启 lyyime-xim。");
+        gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
+        gtk_box_pack_start(GTK_BOX(rows), warn, FALSE, FALSE, 0);
+    }
+    gtk_container_add(GTK_CONTAINER(sw), rows);
+    gtk_box_pack_start(GTK_BOX(outer), sw, TRUE, TRUE, 0);
+
+    GtkWidget *tab = gtk_label_new("菜单触发");
+    gtk_notebook_append_page(GTK_NOTEBOOK(ui->notebook), outer, tab);
+    gtk_widget_show_all(tab);
+    gtk_widget_show_all(outer);
+}
+
+/* ---- 皮肤页(页 6):注册表驱动画廊 -----------------------------------
+ * 预览与真实候选窗共用同一份 CSS 生成器(skin.c):卡内 .lyy-frame 预览
+ * 子树各挂独立 provider(APPLICATION 优先级,只挂本子树),不透染真实
+ * 候选窗与邻卡;选择只改草稿,确定保存后才写盘并对候选窗即时生效。
+ * 作用域仅 lyyIme 自绘候选窗,不影响 IBus 系统面板。 */
+
+/* 迷你候选窗预览:与真实窗口同一份类名,所见即所得(不可交互) */
+static GtkWidget *skin_preview_build(void)
+{
+    GtkWidget *frame = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_style_context_add_class(gtk_widget_get_style_context(frame),
+                                "lyy-frame");
+
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(header),
+                                "lyy-header");
+    GtkWidget *preedit = gtk_label_new("nihao");
+    gtk_style_context_add_class(gtk_widget_get_style_context(preedit),
+                                "lyy-preedit");
+    gtk_widget_set_halign(preedit, GTK_ALIGN_START);
+    GtkWidget *page = gtk_label_new("1/3");
+    gtk_style_context_add_class(gtk_widget_get_style_context(page),
+                                "lyy-page");
+    gtk_box_pack_start(GTK_BOX(header), preedit, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(header), page, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(frame), header, FALSE, FALSE, 0);
+
+    const char *cells[2][3] = { { "1.", "你好", "nihao" },
+                                { "2.", "你们", "nimen" } };
+    for (int i = 0; i < 2; i++) {
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        gtk_style_context_add_class(gtk_widget_get_style_context(row),
+                                    "lyy-row");
+        if (i == 0)
+            gtk_style_context_add_class(gtk_widget_get_style_context(row),
+                                        "lyy-first");
+        const char *cls[3] = { "lyy-num", "lyy-word", "lyy-comment" };
+        for (int j = 0; j < 3; j++) {
+            GtkWidget *cell = gtk_label_new(cells[i][j]);
+            gtk_style_context_add_class(gtk_widget_get_style_context(cell),
+                                        cls[j]);
+            gtk_widget_set_halign(cell, GTK_ALIGN_START);
+            gtk_box_pack_start(GTK_BOX(row), cell, FALSE, FALSE, 0);
+        }
+        gtk_box_pack_start(GTK_BOX(frame), row, FALSE, FALSE, 0);
+    }
+    return frame;
+}
+
+/* 全部预览卡按当前草稿字号重建皮肤 CSS(字号 spin 改动时调用;
+ * 只刷预览,不动真实候选窗——字体对候选窗的生效仍在保存后) */
+static void skin_previews_refresh(SettingsUi *ui)
+{
+    if (!ui->skin_providers[0])
+        return;
+    int font =
+        (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_font));
+    gboolean dark = lyy_skin_system_is_dark();
+    int n = lyy_skin_count();
+    int cap = (int)(sizeof(ui->skin_providers) / sizeof(ui->skin_providers[0]));
+    if (n > cap)
+        n = cap;
+    for (int i = 0; i < n; i++) {
+        if (!ui->skin_providers[i])
+            continue;
+        char *css = lyy_skin_css(lyy_skin_at(i)->id, dark, font);
+        gtk_css_provider_load_from_data(ui->skin_providers[i], css, -1,
+                                        NULL);
+        g_free(css);
+    }
+}
+
+static void on_font_changed(GtkSpinButton *spin, gpointer user_data)
+{
+    (void)spin;
+    skin_previews_refresh(user_data);
+}
+
+/* 整张卡片都可点选:EventBox 窗置于子控件之上,命中即激活对应单选 */
+static gboolean on_skin_card_press(GtkWidget *w, GdkEventButton *ev,
+                                   gpointer user_data)
+{
+    SettingsUi *ui = user_data;
+    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "lyy-skin-idx"));
+    if (ev->button == 1 && idx >= 0 && idx < 9 && ui->skin_buttons[idx]) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->skin_buttons[idx]),
+                                     TRUE);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void build_skin_tab(SettingsUi *ui)
+{
+    if (!ui->notebook)
+        return;
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(outer), 12);
+
+    GtkWidget *title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title),
+                         "<b>让每一次输入,都有自己的风格</b>");
+    gtk_box_pack_start(GTK_BOX(outer), title, FALSE, FALSE, 0);
+
+    GtkWidget *note = gtk_label_new(
+        "点击预览,确定后生效 · 仅用于 lyyIme 自绘候选窗");
+    gtk_label_set_xalign(GTK_LABEL(note), 0.0);
+    gtk_widget_set_opacity(note, 0.7);
+    gtk_box_pack_start(GTK_BOX(outer), note, FALSE, FALSE, 0);
+
+    /* 双列卡片区:纵向滚动。窗口 resizable=FALSE,自然尺寸取各页最大——
+     * 现有最高页把窗口钉在 825x544(menu_trigger_e2e 实测断言);本页
+     * 自然高须不超过它:边框/标题/说明/间距约 92px,滚动区上限取 340,
+     * 保证窗口几何不变;最小 300 防极端矮屏裁到不可用 */
+    GtkWidget *sw = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(sw), 296);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(sw), 332);
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 12);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+    gtk_grid_set_column_homogeneous(GTK_GRID(grid), TRUE);
+
+    gboolean dark = lyy_skin_system_is_dark();
+    int font =
+        (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(ui->spin_font));
+    int n = lyy_skin_count();
+    int cap = (int)(sizeof(ui->skin_buttons) / sizeof(ui->skin_buttons[0]));
+    if (n > cap)
+        n = cap;
+    GtkWidget *leader = NULL;
+    for (int i = 0; i < n; i++) {
+        const LyySkin *s = lyy_skin_at(i);
+
+        GtkWidget *card = gtk_event_box_new();
+        gtk_event_box_set_visible_window(GTK_EVENT_BOX(card), FALSE);
+        gtk_event_box_set_above_child(GTK_EVENT_BOX(card), TRUE);
+        gtk_widget_add_events(card, GDK_BUTTON_PRESS_MASK);
+        g_object_set_data(G_OBJECT(card), "lyy-skin-idx", GINT_TO_POINTER(i));
+        g_signal_connect(card, "button-press-event",
+                         G_CALLBACK(on_skin_card_press), ui);
+
+        GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        gtk_container_add(GTK_CONTAINER(card), vbox);
+
+        /* 头部:单选(皮肤名)+ 右侧分类标签。
+         * 单选带数字助记符「(_N) 名字」:显示为 (N) 名字、N 带下划线,
+         * Alt+N 窗口级直达该卡 —— 无需滚动/坐标即可选中,键盘与
+         * 自动化(E2E)都走这条确定性路径 */
+        GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        gchar *rlabel =
+            g_strdup_printf("(_%d) %s", i + 1, s->name);
+        GtkWidget *radio;
+        if (i == 0) {
+            radio = gtk_radio_button_new_with_mnemonic(NULL, rlabel);
+            leader = radio;
+        } else {
+            radio = gtk_radio_button_new_with_mnemonic_from_widget(
+                GTK_RADIO_BUTTON(leader), rlabel);
+        }
+        g_free(rlabel);
+        ui->skin_buttons[i] = radio;
+        gtk_box_pack_start(GTK_BOX(head), radio, FALSE, FALSE, 0);
+        GtkWidget *cat = gtk_label_new(NULL);
+        gchar *mark = g_markup_printf_escaped("<small>%s</small>",
+                                              s->category);
+        gtk_label_set_markup(GTK_LABEL(cat), mark);
+        g_free(mark);
+        gtk_widget_set_opacity(cat, 0.6);
+        gtk_box_pack_end(GTK_BOX(head), cat, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(vbox), head, FALSE, FALSE, 0);
+
+        GtkWidget *desc = gtk_label_new(s->description);
+        gtk_label_set_xalign(GTK_LABEL(desc), 0.0);
+        gtk_label_set_line_wrap(GTK_LABEL(desc), TRUE);
+        gtk_label_set_lines(GTK_LABEL(desc), 2);
+        gtk_label_set_max_width_chars(GTK_LABEL(desc), 26);
+        gtk_widget_set_opacity(desc, 0.7);
+        gtk_box_pack_start(GTK_BOX(vbox), desc, FALSE, FALSE, 0);
+
+        GtkWidget *pv = skin_preview_build();
+        ui->skin_previews[i] = pv;
+        ui->skin_providers[i] = gtk_css_provider_new();
+        char *css = lyy_skin_css(s->id, dark, font);
+        gtk_css_provider_load_from_data(ui->skin_providers[i], css, -1,
+                                        NULL);
+        g_free(css);
+        lyy_skin_apply_tree(pv, ui->skin_providers[i]); /* 只挂本预览子树 */
+        gtk_box_pack_start(GTK_BOX(vbox), pv, FALSE, FALSE, 0);
+
+        gtk_grid_attach(GTK_GRID(grid), card, i % 2, i / 2, 1, 1);
+    }
+    gtk_container_add(GTK_CONTAINER(sw), grid);
+    gtk_box_pack_start(GTK_BOX(outer), sw, TRUE, TRUE, 0);
+
+    GtkWidget *tab = gtk_label_new("皮肤");
+    gtk_notebook_append_page(GTK_NOTEBOOK(ui->notebook), outer, tab);
+    gtk_widget_show_all(tab);
+    gtk_widget_show_all(outer);
+}
+
 void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
 {
     memset(ui, 0, sizeof(*ui));
@@ -469,6 +867,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         gtk_builder_get_object(builder, "chk_commit_first_at_four"));
     ui->chk_phrase_hint =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_phrase_hint"));
+    ui->chk_next_word_prediction = GTK_WIDGET(
+        gtk_builder_get_object(builder, "chk_next_word_prediction"));
     ui->chk_exact_freq_rank =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_exact_freq_rank"));
     ui->combo_enter_en =
@@ -512,7 +912,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         !ui->chk_auto || !ui->chk_punct || !ui->chk_learn ||
         !ui->chk_commit_four || !ui->chk_commit_unique_four ||
         !ui->chk_commit_first_at_four ||
-        !ui->chk_phrase_hint || !ui->chk_exact_freq_rank ||
+        !ui->chk_phrase_hint || !ui->chk_next_word_prediction ||
+        !ui->chk_exact_freq_rank ||
         !ui->combo_enter_en || !ui->combo_shift_en ||
         !ui->chk_autostart ||
         !ui->chk_quick_actions || !ui->chk_ai_enabled ||
@@ -535,6 +936,17 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
     if (cancel)
         g_signal_connect(cancel, "clicked", G_CALLBACK(on_cancel), ui);
     g_signal_connect(ui->btn_ai_test, "clicked", G_CALLBACK(on_ai_test), ui);
+
+    /* 菜单触发页/皮肤页:运行时生成(不依赖 settings.ui 静态定义);
+     * 页签变多后允许标签栏滚动,防止窗口被页签撑宽 */
+    ui->notebook = GTK_WIDGET(gtk_builder_get_object(builder, "notebook"));
+    build_menu_tab(ui);
+    build_skin_tab(ui);
+    if (ui->notebook)
+        gtk_notebook_set_scrollable(GTK_NOTEBOOK(ui->notebook), TRUE);
+    /* 字号草稿联动:皮肤页预览跟随 spin_font 即时缩放(不动真实候选窗) */
+    g_signal_connect(ui->spin_font, "value-changed",
+                     G_CALLBACK(on_font_changed), ui);
 
     /* 字体大一号:主题默认字号 +1(反馈:设置窗口与相关文字过小)。
      * override_font 在 GTK3.16 标记弃用但功能完好,与文件头 StatusIcon 同理。 */
@@ -559,6 +971,21 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         g_free(fname);
     }
 
+    /* 自身 XIM server 与本窗同进程同主循环:设置窗内 GtkEntry(含
+     * SpinButton 子类)若沿用 xim 模块会在 realize 时同步 XOpenIM
+     * 打自己的服务,主循环自锁(2026-09-30 gdb 栈实证:
+     * present→realize→im-xim→_XimOpenIM→XIfEvent→poll)。本进程内
+     * 控件一律 gtk-im-context-simple;仅本进程生效,拉起的工具与
+     * 外部客户端的中文输入不受影响(中文仍可粘贴进这些输入框)。 */
+    {
+        GSList *objs = gtk_builder_get_objects(builder);
+        for (GSList *l = objs; l; l = l->next)
+            if (GTK_IS_ENTRY(l->data))
+                g_object_set(l->data, "im-module",
+                             "gtk-im-context-simple", NULL);
+        g_slist_free(objs); /* 释放链表;控件引用仍归 builder/父容器 */
+    }
+
     ui->built = 1;
     ui_from_config(ui);
     g_object_unref(builder); /* gtk_builder 保活控件引用,g_object_unref 安全 */
@@ -566,6 +993,10 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
 
 void lyy_settings_show(SettingsUi *ui)
 {
+    /* 打开自身设置窗是硬边界:托盘/右键/CLI/第二实例 --settings-page
+     * 都经此缝;无 WM 环境客户端不发焦点 UNSET,残留待执行会越窗
+     * 误执行(2026-09-30 E2E F 实证)——与弹窗成败无关,先复位。 */
+    lyy_mt_reset(lyy_app());
     if (!ui->built) {
         GtkWidget *dlg = gtk_message_dialog_new(
             NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
@@ -579,4 +1010,12 @@ void lyy_settings_show(SettingsUi *ui)
     }
     ui_from_config(ui);
     gtk_window_present(GTK_WINDOW(ui->window));
+    lyy_log(&lyy_app()->log, "settings show: 设置窗已呈现");
+}
+
+void lyy_settings_show_page(SettingsUi *ui, int page)
+{
+    lyy_settings_show(ui);
+    if (ui->built && ui->notebook && page >= 0)
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(ui->notebook), page);
 }

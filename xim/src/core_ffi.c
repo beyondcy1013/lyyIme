@@ -125,6 +125,54 @@ int lyy_core_ffi_load(CoreFfi *ffi)
     ffi->lyyime_cand_pinned = dlsym(handle, "lyyime_cand_pinned");
     ffi->lyyime_cand_op = dlsym(handle, "lyyime_cand_op");
     ffi->cand_ops_ok = ffi->lyyime_cand_pinned && ffi->lyyime_cand_op;
+
+    /* 菜单触发(2026-09-30)可选符号组:旧 core 库缺任一符号时只禁用该特性
+     * (mt_ok=0;不建对象、不喂上屏、F 键照常直通),不整体降级。 */
+    ffi->lyyime_menu_trigger_new = dlsym(handle, "lyyime_menu_trigger_new");
+    ffi->lyyime_menu_trigger_free = dlsym(handle, "lyyime_menu_trigger_free");
+    ffi->lyyime_menu_trigger_configure =
+        dlsym(handle, "lyyime_menu_trigger_configure");
+    ffi->lyyime_menu_trigger_commit =
+        dlsym(handle, "lyyime_menu_trigger_commit");
+    ffi->lyyime_menu_trigger_cancel =
+        dlsym(handle, "lyyime_menu_trigger_cancel");
+    ffi->lyyime_menu_trigger_reset = dlsym(handle, "lyyime_menu_trigger_reset");
+    ffi->lyyime_menu_trigger_take = dlsym(handle, "lyyime_menu_trigger_take");
+    ffi->lyyime_menu_trigger_pending =
+        dlsym(handle, "lyyime_menu_trigger_pending");
+    ffi->lyyime_menu_trigger_count = dlsym(handle, "lyyime_menu_trigger_count");
+    ffi->lyyime_menu_trigger_id = dlsym(handle, "lyyime_menu_trigger_id");
+    ffi->lyyime_menu_trigger_label = dlsym(handle, "lyyime_menu_trigger_label");
+    /* 快捷键注入是增符号:旧库可为 NULL,不影响 mt_ok(特性整体可用性) */
+    ffi->lyyime_menu_trigger_set_shot_hotkey =
+        dlsym(handle, "lyyime_menu_trigger_set_shot_hotkey");
+    /* 上屏后联想(可选符号):旧 core 库缺失时无法使用/配置联想
+     * (config.toml 的 next_word_prediction 不生效),保留原输入行为,
+     * 不整体降级。 */
+    ffi->lyyime_set_next_word_prediction =
+        dlsym(handle, "lyyime_set_next_word_prediction");
+    ffi->pred_ok = ffi->lyyime_set_next_word_prediction != NULL;
+    /* 中英文标点运行时切换(可选符号组,Ctrl+.):旧 core 库缺任一
+     * 符号时无法切换/配置标点开关(沿用启动默认中文标点,Ctrl+.
+     * 不拦截直通应用),保留原输入行为,不整体降级。 */
+    ffi->lyyime_set_chinese_punctuation =
+        dlsym(handle, "lyyime_set_chinese_punctuation");
+    ffi->lyyime_toggle_chinese_punctuation =
+        dlsym(handle, "lyyime_toggle_chinese_punctuation");
+    ffi->punct_ok = ffi->lyyime_set_chinese_punctuation &&
+                    ffi->lyyime_toggle_chinese_punctuation;
+
+    ffi->mt_ok = ffi->lyyime_menu_trigger_new &&
+                 ffi->lyyime_menu_trigger_free &&
+                 ffi->lyyime_menu_trigger_configure &&
+                 ffi->lyyime_menu_trigger_commit &&
+                 ffi->lyyime_menu_trigger_cancel &&
+                 ffi->lyyime_menu_trigger_reset &&
+                 ffi->lyyime_menu_trigger_take &&
+                 ffi->lyyime_menu_trigger_pending &&
+                 ffi->lyyime_menu_trigger_count &&
+                 ffi->lyyime_menu_trigger_id &&
+                 ffi->lyyime_menu_trigger_label;
     return 0;
 }
 

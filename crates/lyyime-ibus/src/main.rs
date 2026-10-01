@@ -120,6 +120,9 @@ fn read_core_config() -> Config {
             if let Some(v) = data.get("phrase_hint").and_then(|v| v.as_bool()) {
                 cfg.phrase_hint = v;
             }
+            if let Some(v) = data.get("next_word_prediction").and_then(|v| v.as_bool()) {
+                cfg.next_word_prediction = v;
+            }
             if let Some(v) = data.get("coin_hotkey").and_then(|v| v.as_str()) {
                 if !v.trim().is_empty() {
                     cfg.coin_hotkey = v.trim().to_string();
@@ -152,6 +155,7 @@ fn read_core_config() -> Config {
                     .collect();
                 cfg.quick_actions = list;
             }
+            apply_menu_trigger_toml(&data, &mut cfg);
         }
     }
     // 热键冲突自动升级(合同 §13):加载即自愈,截屏热键让位并留痕日志
@@ -159,6 +163,24 @@ fn read_core_config() -> Config {
         crate::logger::warn(&note);
     }
     cfg
+}
+
+/// 菜单触发三键(menu_trigger_enabled/_key/_disabled)套用进 Config;
+/// 缺项保留默认,key 越界回退默认 7(与 core Config 校验同口径)。
+fn apply_menu_trigger_toml(data: &toml::Value, cfg: &mut Config) {
+    if let Some(v) = data.get("menu_trigger_enabled").and_then(|v| v.as_bool()) {
+        cfg.menu_trigger_enabled = v;
+    }
+    if let Some(v) = data.get("menu_trigger_key").and_then(|v| v.as_integer()) {
+        cfg.menu_trigger_key = if (1..=12).contains(&v) {
+            v as usize
+        } else {
+            Config::default().menu_trigger_key
+        };
+    }
+    if let Some(v) = data.get("menu_trigger_disabled").and_then(|v| v.as_str()) {
+        cfg.menu_trigger_disabled = v.to_string();
+    }
 }
 
 /// §15 自定义查询(config.toml 顶层 custom_query_label/custom_query_url):

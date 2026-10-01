@@ -81,6 +81,7 @@ void lyy_mainwin_show(MainWin *mw)
 {
     if (!mw->built || !mw->window)
         return;
+    lyy_mt_reset(lyy_app());   /* 打开自身主窗同为硬边界(见 settings.c) */
     lyy_mainwin_refresh(mw);
     gtk_widget_show_all(mw->window);
     gtk_window_present(GTK_WINDOW(mw->window));

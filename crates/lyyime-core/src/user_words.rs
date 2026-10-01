@@ -162,10 +162,12 @@ impl UserWords {
     }
 
     /// 覆盖造词库路径并重新装载(路径来自 user_dict 同目录推导)。
-    pub(crate) fn set_path_and_load(&mut self, dict: &mut DictIndex, path: PathBuf) {
+    /// 返回 true = 路径变了、词表已重新装载(词典索引随之变化)。
+    pub(crate) fn set_path_and_load(&mut self, dict: &mut DictIndex, path: PathBuf) -> bool {
         if path == self.path {
-            return;
+            return false;
         }
         self.load(dict, &path);
+        true
     }
 }

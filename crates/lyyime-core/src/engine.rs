@@ -31,6 +31,11 @@
 //!   (默认切英文模式——效果流附 [`Effect::ModeChanged`],宿主同步指示/
 //!   trigger;配成临时则仅上屏,英文短词改用回车);空缓冲吞键,宿主判定
 //!   单击后调 [`Engine::toggle_mode`];
+//! - 拼音前缀候选(缺词兜底):缓冲能切成"合法音节前缀 + 可续接后缀"时,
+//!   词库虽无整词仍给出前缀候选(`Candidate.consumed` = 前缀字节数);
+//!   选中(空格/数字/点选共用)只上屏候选文本,剩余后缀以原敲入形态留在
+//!   组合里继续编辑/选词;标点、造词等边界键按"首选文本 + 原始后缀"
+//!   无损收尾,不猜后缀汉字;学习/上屏历史只记消费掉的前缀。
 //! - 其它键:Pass(有缓冲先清缓冲)。
 //!
 //! ## 两段式按键处理(合同 §3 v1.1 重试纪律)
@@ -49,6 +54,7 @@ use crate::config::{Config, EnCommit, QuickAction};
 use crate::dict::{char_corpus_freq, char_tier_of, suggestion_of, DictIndex};
 use crate::learner::Learner;
 use crate::pinyin;
+use crate::prediction::{self, PredictionIndex};
 use crate::punct::{to_chinese, QuoteState};
 use crate::rank;
 use crate::rank::exact_char_tier;
@@ -88,9 +94,14 @@ struct RawCand {
     score: f32,
     kind: CandKind,
     sug: u64,
+    /// 消费语义同 [`Candidate::consumed`]:0 = 整缓冲;非零 = 只消费开头
+    /// 这么多 ASCII 字节(前缀候选,选中后剩余后缀留在组合内继续编辑)。
+    consumed: usize,
 }
 
-/// 向候选池插入一条候选:同词保留 (tier, spec, norm) 词典序更大者。
+/// 向候选池插入一条候选(默认消费整个缓冲),同词去重规则见
+/// [`insert_cand_with_consumed`]。
+#[allow(clippy::too_many_arguments)]
 fn insert_cand(
     pool: &mut HashMap<String, RawCand>,
     text: String,
@@ -101,13 +112,43 @@ fn insert_cand(
     kind: CandKind,
     sug: u64,
 ) {
+    insert_cand_with_consumed(pool, text, comment, tier, spec, norm, kind, sug, 0);
+}
+
+/// 同词保留 (tier, spec, norm) 词典序更大者;层级打平时消费更多者优先
+/// (consumed=0 视为消费整个缓冲,即 usize::MAX,整缓冲候选压过前缀候选)。
+/// 替换时连同 kind 一并更新 consumed——消费量与候选来源绑定,不随排序漂移。
+#[allow(clippy::too_many_arguments)]
+fn insert_cand_with_consumed(
+    pool: &mut HashMap<String, RawCand>,
+    text: String,
+    comment: String,
+    tier: f32,
+    spec: f32,
+    norm: f32,
+    kind: CandKind,
+    sug: u64,
+    consumed: usize,
+) {
+    // 0 = 整缓冲,平级比较时记为最大消费。
+    fn cons_ord(c: usize) -> usize {
+        if c == 0 {
+            usize::MAX
+        } else {
+            c
+        }
+    }
     if let Some(e) = pool.get_mut(&text) {
-        if (tier, spec, norm) > (e.tier, e.spec, e.norm) {
+        if (tier, spec, norm) > (e.tier, e.spec, e.norm)
+            || ((tier, spec, norm) == (e.tier, e.spec, e.norm)
+                && cons_ord(consumed) > cons_ord(e.consumed))
+        {
             e.tier = tier;
             e.spec = spec;
             e.norm = norm;
             e.comment = comment;
             e.kind = kind;
+            e.consumed = consumed;
         }
         if sug > e.sug {
             e.sug = sug;
@@ -125,6 +166,7 @@ fn insert_cand(
             score: 0.0,
             kind,
             sug,
+            consumed,
         },
     );
 }
@@ -162,6 +204,12 @@ pub(crate) struct Plan {
     pub(crate) blocked_override: Option<HashSet<String>>,
     /// §15 apply 阶段执行的持久化动作(固定/取消固定/删除词组)。
     pub(crate) persist_op: Option<PersistOp>,
+    /// 上屏后联想的上下文(最近上屏的连续 CJK 尾串,≤6 字);与造词
+    /// recent/recent_cost 相互独立。
+    pub(crate) prediction_context: String,
+    /// 当前候选行是否为联想行(true 时空格/数字/点选选中的是"接下来
+    /// 的词句尾巴",按尾巴上屏;字母/边界键按联想规则分派)。
+    pub(crate) predicting: bool,
 }
 
 /// §15 右键菜单操作在 apply_plan 阶段的持久化动作(plan 纯演算不落盘)。
@@ -190,6 +238,8 @@ impl Plan {
             pins_override: None,
             blocked_override: None,
             persist_op: None,
+            prediction_context: eng.prediction_context.clone(),
+            predicting: eng.predicting,
         }
     }
 }
@@ -228,6 +278,12 @@ pub struct Engine {
     zh_en: RefCell<Option<ZhEn>>,
     /// 词库目录(`zh_en.tsv` 所在,Engine::new 的 data_dir)。
     data_dir: PathBuf,
+    /// 上屏后联想索引(本地词表,建引擎时一次合并;造词并入即时更新)。
+    prediction_index: PredictionIndex,
+    /// 联想上下文:最近上屏的连续 CJK 尾串(≤[`prediction::MAX_CTX_CHARS`] 字)。
+    prediction_context: String,
+    /// 当前候选行是否为联想行。
+    predicting: bool,
 }
 
 impl Engine {
@@ -254,6 +310,8 @@ impl Engine {
         pins.load(&wordops_path(&cfg, "pinned.tsv"));
         let mut blocked = BlockList::new();
         blocked.load(&wordops_path(&cfg, "blocked.tsv"));
+        // 联想索引在用户词并入之后构建(造词也参与联想)。
+        let prediction_index = PredictionIndex::new(&dict);
         Ok(Self {
             dict,
             cfg,
@@ -274,6 +332,9 @@ impl Engine {
             blocked,
             zh_en: RefCell::new(None),
             data_dir: data_dir.to_path_buf(),
+            prediction_index,
+            prediction_context: String::new(),
+            predicting: false,
         })
     }
 
@@ -289,7 +350,20 @@ impl Engine {
         self.learner.set_path(path);
         self.learner.set_enabled(cfg.learning);
         // 造词库随用户词典目录走:目录变化才重装载(造的词跟着数据目录迁移)。
-        self.user_words.set_path_and_load(&mut self.dict, user_words_path(&cfg));
+        if self
+            .user_words
+            .set_path_and_load(&mut self.dict, user_words_path(&cfg))
+        {
+            // 词典索引变了(新目录的造词并入):联想索引随之重建,
+            // 旧上下文作废(避免跨目录词表错配);正在展示的联想行一并撤下。
+            self.prediction_index = PredictionIndex::new(&self.dict);
+            self.prediction_context.clear();
+            if self.predicting {
+                self.predicting = false;
+                self.cands.clear();
+                self.page = 0;
+            }
+        }
         // §15 固定/屏蔽表同目录:配置下发即重载(目录迁移与外部改动都覆盖)。
         self.pins.load(&wordops_path(&cfg, "pinned.tsv"));
         self.blocked.load(&wordops_path(&cfg, "blocked.tsv"));
@@ -297,12 +371,42 @@ impl Engine {
             self.mode = cfg.mode;
             self.clear_buf();
         }
+        // 中文标点默认值被改写时复位引号开合状态(新配置的首个引号
+        // 应从头开始配对,不继承旧配置下的半对状态)。
+        if cfg.cn_punct != self.cfg.cn_punct {
+            self.quotes = QuoteState::new();
+        }
+        // 联想开关转关:正在展示的联想行与上下文一并作废(组合缓冲不动)。
+        if !cfg.next_word_prediction {
+            self.prediction_context.clear();
+            if self.predicting {
+                self.predicting = false;
+                self.cands.clear();
+                self.page = 0;
+            }
+        }
         self.cfg = cfg;
     }
 
     /// 当前配置快照。
     pub fn config(&self) -> &Config {
         &self.cfg
+    }
+
+    /// 窄化设置中文标点开关:只改 `cn_punct` 并复位引号配对状态,
+    /// 不动组合缓冲/候选/联想上下文/模式(运行时 Ctrl+. 切换走这里,
+    /// 避免 set_config 顺带重装载词表或打断正在输入的组合)。
+    pub fn set_chinese_punctuation(&mut self, enabled: bool) {
+        if self.cfg.cn_punct != enabled {
+            self.cfg.cn_punct = enabled;
+            self.quotes = QuoteState::new();
+        }
+    }
+
+    /// 翻转中文标点开关并返回新状态(Ctrl+. 热键路径)。
+    pub fn toggle_chinese_punctuation(&mut self) -> bool {
+        self.set_chinese_punctuation(!self.cfg.cn_punct);
+        self.cfg.cn_punct
     }
 
     /// 词库是否加载到了数据(任一通道非空)。
@@ -406,6 +510,10 @@ impl Engine {
     /// - `Some(false)` = 普通候选,未固定(菜单显示"固定首位");
     /// - `None`        = 功能键候选或越界,宿主应禁用整个右键菜单。
     pub fn cand_pinned(&self, idx: usize) -> Option<bool> {
+        // 联想行不是编码候选:无码可固定/删除,右键菜单禁用。
+        if self.predicting {
+            return None;
+        }
         let cand = self.flush_page().get(idx)?;
         if matches!(cand.kind, CandKind::Action(_)) {
             return None;
@@ -426,7 +534,8 @@ impl Engine {
     /// 反查英文把计划候选页替换为 zh_en 结果(可继续数字/点选上屏)。
     pub(crate) fn plan_cand_op(&self, idx: usize, op: CandOp) -> (Vec<Effect>, Plan) {
         let p = Plan::unchanged(self);
-        if self.coin.is_some() {
+        // 联想行同理不开放右键操作(没有码可固定;尾巴删除会误伤整词)。
+        if self.coin.is_some() || self.predicting {
             return (vec![Effect::Consumed], p);
         }
         let Some(cand) = plan_page_slice(self, &p).get(idx).cloned() else {
@@ -521,6 +630,7 @@ impl Engine {
                 comment: format!("←{word}"),
                 score: 0.0,
                 kind: CandKind::English,
+                consumed: 0,
             })
             .collect();
         p.page = 0;
@@ -561,12 +671,110 @@ impl Engine {
             };
         }
         let mut p = Plan::unchanged(self);
-        let effects = match key {
-            LKey::Coin => self.plan_coin_start(&mut p),
-            _ if self.coin.is_some() => self.plan_coin_key(&mut p, key),
-            LKey::Char(c) => self.plan_char(&mut p, c),
-            LKey::Digit(n) => self.plan_digit(&mut p, n),
-            LKey::Space => self.plan_space(&mut p),
+        // 联想态按键分派(先于普通路径):候选条里是"接下来的词句尾巴"。
+        // 空格/数字/点选 = 上屏所选尾巴(可连选续接);翻页键翻联想页;
+        // Esc = 关联想(上下文一并作废);字母 = 撤联想行、保留上下文、
+        // 开始新组合;其余键 = 硬边界(联想与上下文清空)后按普通规则处理。
+        if p.predicting {
+            match key {
+                LKey::Space => return (self.plan_space(&mut p), p),
+                LKey::Digit(n) => {
+                    let idx = if n == 0 { 9 } else { (n - 1) as usize };
+                    if let Some(c) = plan_page_slice(self, &p).get(idx).cloned() {
+                        return (plan_select(self, &mut p, &c, true), p);
+                    }
+                    // 越界数字:撤销联想行并直通(数字交给应用,不吞)。
+                    p.predicting = false;
+                    p.cands.clear();
+                    p.page = 0;
+                    p.prediction_context.clear();
+                    return (
+                        vec![Effect::Preedit(None), empty_cands(), Effect::Pass],
+                        p,
+                    );
+                }
+                LKey::PageUp | LKey::PageDown => {
+                    // 单页联想不放行:翻页键(-/= 等)放行会落进应用而联想行
+                    // 仍在原位,吞键保持原页(多页时仍走 plan_page 翻页)。
+                    if p.cands.len() <= self.page_size() {
+                        return (vec![Effect::Consumed], p);
+                    }
+                    return (self.plan_page(&mut p, key == LKey::PageDown), p);
+                }
+                LKey::Esc => {
+                    p.predicting = false;
+                    p.cands.clear();
+                    p.page = 0;
+                    p.prediction_context.clear();
+                    return (
+                        vec![Effect::Preedit(None), empty_cands(), Effect::Consumed],
+                        p,
+                    );
+                }
+                LKey::Char(c) => {
+                    p.predicting = false;
+                    p.cands.clear();
+                    p.page = 0;
+                    let mut fx = vec![Effect::Preedit(None), empty_cands()];
+                    fx.extend(self.plan_char(&mut p, c));
+                    return (fx, p);
+                }
+                LKey::Coin => {
+                    // 造词:撤联想行后正常进入(上下文与造词历史都保留)。
+                    p.predicting = false;
+                    p.cands.clear();
+                    p.page = 0;
+                    let mut fx = vec![Effect::Preedit(None), empty_cands()];
+                    fx.extend(self.plan_coin_start(&mut p));
+                    return (fx, p);
+                }
+                _ => {
+                    p.predicting = false;
+                    p.cands.clear();
+                    p.page = 0;
+                    p.prediction_context.clear();
+                    let mut fx = vec![Effect::Preedit(None), empty_cands()];
+                    fx.extend(self.plan_key_normal(&mut p, key));
+                    return (fx, p);
+                }
+            }
+        }
+        let effects = self.plan_key_normal(&mut p, key);
+        // 输入边界截断联想上下文:标点/回车/退格/方向/Esc/Other/Shift 按下,
+        // 或效果流出现直通/功能动作/模式切换(直通即边界——宿主放行后
+        // 后续按键与本次上屏不再连续)。
+        let boundary = matches!(
+            key,
+            LKey::Punct(_)
+                | LKey::Enter
+                | LKey::Backspace
+                | LKey::Esc
+                | LKey::ArrowLeft
+                | LKey::ArrowRight
+                | LKey::ArrowUp
+                | LKey::ArrowDown
+                | LKey::Other
+                | LKey::ShiftPress
+        ) || effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::Pass | Effect::Action(_) | Effect::ModeChanged(_)
+            )
+        });
+        if boundary {
+            p.prediction_context.clear();
+        }
+        (effects, p)
+    }
+
+    /// 普通(非联想态)按键分派:原 [`Engine::plan_key`] 的主匹配体。
+    fn plan_key_normal(&self, p: &mut Plan, key: LKey) -> Vec<Effect> {
+        match key {
+            LKey::Coin => self.plan_coin_start(p),
+            _ if self.coin.is_some() => self.plan_coin_key(p, key),
+            LKey::Char(c) => self.plan_char(p, c),
+            LKey::Digit(n) => self.plan_digit(p, n),
+            LKey::Space => self.plan_space(p),
             LKey::Enter => {
                 if p.buf.is_empty() {
                     vec![Effect::Pass]
@@ -574,7 +782,7 @@ impl Engine {
                     // 合同 §6:Enter 上屏原始字母——单个英文词的输入方式;
                     // 模式去向按 enter_english(默认临时:保持中文模式)。
                     let to = self.cfg.enter_english;
-                    self.plan_commit_raw_en(&mut p, to)
+                    self.plan_commit_raw_en(p, to)
                 }
             }
             LKey::Backspace => {
@@ -584,20 +792,20 @@ impl Engine {
                     p.buf.pop();
                     p.buf_raw.pop();
                     p.page = 0;
-                    self.recompute_into(&mut p);
-                    composition_effects(self, &p)
+                    self.recompute_into(p);
+                    composition_effects(self, p)
                 }
             }
             LKey::Esc => {
                 if p.buf.is_empty() {
                     vec![Effect::Pass]
                 } else {
-                    plan_clear(&mut p);
+                    plan_clear(p);
                     vec![Effect::Preedit(None), empty_cands(), Effect::Consumed]
                 }
             }
-            LKey::PageUp | LKey::PageDown => self.plan_page(&mut p, key == LKey::PageDown),
-            LKey::Punct(c) => self.plan_punct(&mut p, c),
+            LKey::PageUp | LKey::PageDown => self.plan_page(p, key == LKey::PageDown),
+            LKey::Punct(c) => self.plan_punct(p, c),
             LKey::ShiftPress => {
                 // Shift 按下:有缓冲上屏英文原串,去向按 shift_english
                 // (默认 English:上屏即进入英文模式,临时英文改用回车);
@@ -606,14 +814,14 @@ impl Engine {
                     vec![Effect::Consumed]
                 } else {
                     let to = self.cfg.shift_english;
-                    self.plan_commit_raw_en(&mut p, to)
+                    self.plan_commit_raw_en(p, to)
                 }
             }
             LKey::Other => {
                 if p.buf.is_empty() {
                     vec![Effect::Pass]
                 } else {
-                    plan_clear(&mut p);
+                    plan_clear(p);
                     vec![Effect::Preedit(None), empty_cands(), Effect::Pass]
                 }
             }
@@ -622,12 +830,11 @@ impl Engine {
                 if p.buf.is_empty() {
                     vec![Effect::Pass]
                 } else {
-                    plan_clear(&mut p);
+                    plan_clear(p);
                     vec![Effect::Preedit(None), empty_cands(), Effect::Pass]
                 }
             }
-        };
-        (effects, p)
+        }
     }
 
     /// 把计划落为引擎内部状态(FFI 在 JSON 确认写入后调用)。
@@ -643,6 +850,8 @@ impl Engine {
         self.recent_cost = plan.recent_cost;
         self.last_run = plan.last_run;
         self.coin = plan.coin;
+        self.prediction_context = plan.prediction_context;
+        self.predicting = plan.predicting;
         if let Some((word, code)) = plan.user_word {
             // 重新造词视为解除屏蔽(§15:删过的词再造回来要能再见到)。
             let _ = self.blocked.remove(&word);
@@ -650,6 +859,17 @@ impl Engine {
             // 此处属罕见竞态),保 dirty 让下次造词重试。
             if let Err(e) = self.user_words.add(&mut self.dict, &word, &code) {
                 eprintln!("lyyime-core: {e}");
+            } else {
+                // 造的词并入联想索引(频次取词库内该词的实际值,查不到给 0)。
+                let freq = self
+                    .dict
+                    .wubi
+                    .iter()
+                    .filter(|e| e.word == word)
+                    .map(|e| e.freq)
+                    .max()
+                    .unwrap_or(0);
+                self.prediction_index.insert(&word, freq);
             }
         }
         // §15 右键操作的持久化落地(plan 只演算;JSON 确认写出后才到这里)。
@@ -708,6 +928,9 @@ impl Engine {
                     .map(|top| top.text.clone());
                 if let Some(text) = top_text {
                     let mut effects = plan_commit(self, p, &text, true);
+                    // 顶屏后立刻进入新组合:联想行不得盖在新组合候选上;
+                    // 上下文保留——新词上屏后续接同一上下文窗口。
+                    strip_prediction_tail(p, &mut effects, false);
                     p.buf.push(c.to_ascii_lowercase());
                     p.buf_raw.push(c);
                     p.page = 0;
@@ -721,11 +944,18 @@ impl Engine {
         p.buf_raw.push(c);
         p.page = 0;
         self.recompute_into(p);
-        // 死码保护:原组合还有中文命中时,本键把缓冲推进完全无候选的死胡同
-        // (五笔码 ≤4、拼音/简拼索引均前缀单调,加长后不可能再救回中文命中),
-        // 则该字母不进缓冲、原样保留候选状态——四码未选继续敲击不再把候选
-        // 清空,避免随后空格/标点把整串字母当英文直通上屏。
-        if self.cn_hit && p.cands.is_empty() {
+        // 死码保护:原组合还有中文命中时,本键把缓冲推进完全无候选且
+        // 拼音语法上也不可达的死胡同,则该字母不进缓冲、原样保留候选状态
+        // ——四码未选继续敲击不再把候选清空,避免随后空格/标点把整串字母
+        // 当英文直通上屏。
+        // 注意:无候选不等于拼音非法——词库缺词时缓冲可能仍是可续接的合法
+        // 拼音(如前缀候选被屏蔽后只剩拼写);只要语法上还能续拼就必须收下
+        // 该键,交给后续输入或边界键原样处理;只有当前音节表不支持的后缀
+        // (如最小夹具无 q 起头音节时的 `jieq`)才走吞键保护。
+        if self.cn_hit
+            && p.cands.is_empty()
+            && !pinyin::can_continue(&p.buf, &self.dict.syllables, &self.dict.syllable_prefixes)
+        {
             // 快速功能键触发词的前缀不受死码保护(§14):触发词允许是任意
             // 小写字母串,若中间态无候选会被吞键,触发词将永远敲不完。
             let trigger_prefix = self.cfg.quick_actions_enabled
@@ -754,6 +984,7 @@ impl Engine {
         // 触发词(或其前缀)时同样不上屏——功能候选须经用户确认(§14)。
         if p.buf.chars().count() == 4
             && !p.cands.is_empty()
+            && p.cands[0].consumed == 0
             && !matches!(p.cands[0].kind, CandKind::Action(_))
             && !(self.cfg.quick_actions_enabled
                 && self
@@ -794,7 +1025,8 @@ impl Engine {
     }
 
     fn plan_space(&self, p: &mut Plan) -> Vec<Effect> {
-        if p.buf.is_empty() {
+        // 联想态空缓冲:空格确认联想首选(尾巴上屏);非联想态空缓冲放行。
+        if p.buf.is_empty() && !p.predicting {
             return vec![Effect::Pass];
         }
         // Space 是确认键:只要有候选,一律上屏当前选中(首选),不做英文抢占。
@@ -826,6 +1058,12 @@ impl Engine {
     }
 
     fn plan_punct(&self, p: &mut Plan, c: char) -> Vec<Effect> {
+        if !self.cfg.cn_punct {
+            // 用户关闭中文标点:一律直通(有缓冲同样先提交组合)。
+            // 必须先判禁用再碰 to_chinese/QuoteState——ASCII 引号若在
+            // 禁用态翻转了引号状态,会污染下一次中文引号对的开合方向。
+            return self.plan_commit_then(p, Effect::Pass);
+        }
         let mut quotes = p.quotes;
         let punct = to_chinese(c, &mut quotes);
         if punct.is_some() {
@@ -835,10 +1073,6 @@ impl Engine {
             // 未映射标点:有缓冲先提交组合再放行,空缓冲直接放行。
             return self.plan_commit_then(p, Effect::Pass);
         };
-        if !self.cfg.cn_punct {
-            // 用户关闭中文标点:一律直通(有缓冲同样先提交组合)。
-            return self.plan_commit_then(p, Effect::Pass);
-        }
         if p.buf.is_empty() {
             // 中文态空缓冲:输出对应中文标点(合同 §6)。
             return vec![Effect::Commit(punct.to_string())];
@@ -848,6 +1082,8 @@ impl Engine {
         let learned = self.learn_worthy(p);
         let mut effects = plan_commit(self, p, &text, learned);
         effects.insert(1, Effect::Commit(punct.to_string()));
+        // 标点紧跟在上屏之后:联想行不得残留(候选条不能停在陈旧联想上)。
+        strip_prediction_tail(p, &mut effects, true);
         effects
     }
 
@@ -879,6 +1115,7 @@ impl Engine {
             comment,
             score: 0.0,
             kind: CandKind::User,
+            consumed: 0,
         };
         p.cands = vec![cand.clone()];
         p.page = 0;
@@ -900,6 +1137,8 @@ impl Engine {
             let learned = self.learn_worthy(p);
             let text = self.finish_text(p);
             let mut effects = plan_commit(self, p, &text, learned);
+            // 上屏后进入造词展示:联想行让位给造词候选。
+            strip_prediction_tail(p, &mut effects, false);
             effects.extend(self.plan_coin_start(p));
             return effects;
         }
@@ -1030,6 +1269,8 @@ impl Engine {
         let learned = self.learn_worthy(p);
         let text = self.finish_text(p);
         let mut effects = plan_commit(self, p, &text, learned);
+        // tail(直通等)在上屏之后:联想行不得残留。
+        strip_prediction_tail(p, &mut effects, true);
         effects.push(tail);
         effects
     }
@@ -1048,8 +1289,14 @@ impl Engine {
     }
 
     /// 本次组合结束是否值得学习(来自候选顶屏)。
+    /// 只有"页内首选且消费整个缓冲"的普通候选才计:前缀候选的组合收尾
+    /// 会把未选后缀原样拼在上屏文本里(如 截ping),这种拼接串不是用户
+    /// 确认过的词,绝不能让原始后缀混进学习库。
     fn learn_worthy(&self, p: &Plan) -> bool {
-        !plan_page_slice(self, p).is_empty()
+        match plan_page_slice(self, p).first() {
+            Some(top) => !matches!(top.kind, CandKind::Action(_)) && top.consumed == 0,
+            None => false,
+        }
     }
 
     /// 词组效率提示(借鉴万能五笔的高效词提示):最近上屏的连续汉字若
@@ -1088,9 +1335,18 @@ impl Engine {
 
     /// 组合结束时应上屏的文本:页内首选 > 原始字母。
     /// 功能键候选不能当文本上屏:退回原始字母(标点等收尾场景不误触发功能)。
+    /// 首选是前缀候选(consumed>0)时,上屏 = 候选文本 + 剩余后缀的敲入
+    /// 原形(如 截 + ping → "截ping"),不猜测后缀对应的汉字——后缀的
+    /// 转换只能由用户显式选词完成,边界键只做无损拼接。
     fn finish_text(&self, p: &Plan) -> String {
         match plan_page_slice(self, p).first() {
-            Some(top) if !matches!(top.kind, CandKind::Action(_)) => top.text.clone(),
+            Some(top) if !matches!(top.kind, CandKind::Action(_)) => {
+                let mut text = top.text.clone();
+                if top.consumed > 0 && top.consumed < p.buf.len() {
+                    text.push_str(&raw_display(p)[top.consumed..]);
+                }
+                text
+            }
             _ => raw_display(p),
         }
     }
@@ -1116,6 +1372,9 @@ impl Engine {
         self.cn_hit = false;
         // 造词模式不跨焦点延续(预编辑已随 reset 消失,继续吞键会卡输入)。
         self.coin = None;
+        // 联想与会话同生死:reset/模式切换等硬边界连同上下文一并作废。
+        self.predicting = false;
+        self.prediction_context.clear();
     }
 
     // ------------------------------------------------------------------
@@ -1125,6 +1384,8 @@ impl Engine {
     /// 依据计划缓冲重算候选:wubi → pinyin → english(修订 §5.C 门控)。
     /// 只读引擎配置/词库/学习数据,结果写入 plan(纯函数语义,配合两段式处理)。
     fn recompute_into(&self, p: &mut Plan) {
+        // 重算 = 新组合候选:联想标记绝不带入(顶屏续打等路径经此重算)。
+        p.predicting = false;
         let buf = p.buf.clone();
         let mut pool: HashMap<String, RawCand> = HashMap::new();
         let mut cn_hits = 0usize;
@@ -1190,6 +1451,7 @@ impl Engine {
                 comment: rc.comment,
                 score: rc.score,
                 kind: rc.kind,
+                consumed: rc.consumed,
             })
             .collect();
         // §15 屏蔽词过滤(右键"删除词组"):计划态可用 blocked_override 预演,
@@ -1239,6 +1501,7 @@ impl Engine {
                     comment: self.action_comment(a),
                     score: 0.0,
                     kind: CandKind::Action(i as u8),
+                    consumed: 0,
                 },
             );
             off += 1;
@@ -1258,12 +1521,14 @@ impl Engine {
     /// wubi_exact 索引)。按词条归属判定而非候选 `kind`:学习过的拼音词
     /// 被标 User 不算五笔命中,学习过的五笔词仍算。四码上屏的"首选是
     /// 五笔命中"与四码顶屏的门控共用。
+    /// 前缀候选(consumed>0)永不视为五笔命中——即使词面恰好在五笔表内,
+    /// 它也只消费缓冲开头,不能当整码命中触发四码上屏/顶屏。
     fn plan_wubi_hit(&self, p: &Plan, cand: &Candidate) -> bool {
-        self.dict.wubi_exact.get(&p.buf).is_some_and(|idxs| {
-            idxs
-                .iter()
-                .any(|&i| self.dict.wubi[i as usize].word == cand.text)
-        })
+        cand.consumed == 0
+            && self.dict.wubi_exact.get(&p.buf).is_some_and(|idxs| {
+                idxs.iter()
+                    .any(|&i| self.dict.wubi[i as usize].word == cand.text)
+            })
     }
 
     /// 五笔通道(§5.2):完全同码(code == buffer,简码奖励并入该层)与前缀渐进分两路查询。
@@ -1401,20 +1666,24 @@ impl Engine {
                     hits += 1;
                 }
             }
-            let last = pinyin::seg_last(buf, &seg);
-            if let Some(list) = dict.py_chars.get(last) {
-                for (ch, freq) in list {
-                    insert_cand(
-                        pool,
-                        ch.to_string(),
-                        self.wubi_comment(&ch.to_string(), last.to_string()),
-                        rank::TIER_PINYIN_FULL,
-                        1.0,
-                        rank::norm10(*freq, dict.py_char_max),
-                        CandKind::Pinyin,
-                        suggestion_of(dict, &ch.to_string()),
-                    );
-                    hits += 1;
+            // 末音节单字只允许在"整个缓冲恰好是一个音节"时出(seg.len()==1):
+            // 多音节切分下展示尾音节单字会丢弃前面已敲音节(如 nihao 里出
+            // 孤立的"好"),前缀路径见下方 ⑤。
+            if seg.len() == 1 {
+                if let Some(list) = dict.py_chars.get(buf) {
+                    for (ch, freq) in list {
+                        insert_cand(
+                            pool,
+                            ch.to_string(),
+                            self.wubi_comment(&ch.to_string(), buf.to_string()),
+                            rank::TIER_PINYIN_FULL,
+                            1.0,
+                            rank::norm10(*freq, dict.py_char_max),
+                            CandKind::Pinyin,
+                            suggestion_of(dict, &ch.to_string()),
+                        );
+                        hits += 1;
+                    }
                 }
             }
         }
@@ -1450,31 +1719,6 @@ impl Engine {
                             suggestion_of(dict, &p.word),
                         );
                         hits += 1;
-                    }
-                }
-            }
-            // 不完整音节的单字:片段恰好是完整音节者更具体。
-            for syll in &dict.syllables {
-                if syll.starts_with(frag) {
-                    let spec = if syll == frag {
-                        2.0 + frag_len / 10.0
-                    } else {
-                        1.0 + frag_len / 10.0
-                    };
-                    if let Some(list) = dict.py_chars.get(syll) {
-                        for (ch, freq) in list {
-                            insert_cand(
-                                pool,
-                                ch.to_string(),
-                                self.wubi_comment(&ch.to_string(), syll.clone()),
-                                rank::TIER_PINYIN_PARTIAL,
-                                spec,
-                                rank::norm10(*freq, dict.py_char_max),
-                                CandKind::Pinyin,
-                                suggestion_of(dict, &ch.to_string()),
-                            );
-                            hits += 1;
-                        }
                     }
                 }
             }
@@ -1545,6 +1789,62 @@ impl Engine {
                 }
             }
         }
+
+        // ⑤ 前缀候选(缺词兜底):缓冲能切成"合法音节前缀 + 可续接后缀"时,
+        // 给前缀部分的词组/单字候选——选中只上屏前缀、剩余后缀留在组合里
+        // 继续组词(如 jieping 缺"截屏"词时仍可先上屏「截」再选「屏」)。
+        // 层级压在简拼之下:任何完整切分/补全/简拼候选都排它前面;
+        // 后缀必须语法可续(can_continue),否则不是"前缀+余量"而是死码。
+        for k in pinyin::prefix_ends(buf, &dict.syllables) {
+            if k >= buf.len()
+                || !pinyin::can_continue(
+                    &buf[k..],
+                    &dict.syllables,
+                    &dict.syllable_prefixes,
+                )
+            {
+                continue;
+            }
+            for seg in pinyin::segmentations(&buf[..k], &dict.syllables, SEGS_CAP) {
+                let joined = pinyin::seg_joined(&buf[..k], &seg);
+                if let Some(idxs) = dict.py_exact.get(&joined) {
+                    for &i in idxs {
+                        let phrase = &dict.phrases[i as usize];
+                        insert_cand_with_consumed(
+                            pool,
+                            phrase.word.clone(),
+                            self.wubi_comment(&phrase.word, joined.clone()),
+                            rank::TIER_PINYIN_ABBREV - 1.0,
+                            k as f32,
+                            rank::norm10(phrase.freq, dict.py_phrase_max),
+                            CandKind::Pinyin,
+                            suggestion_of(dict, &phrase.word),
+                            k,
+                        );
+                        hits += 1;
+                    }
+                }
+                if seg.len() == 1 {
+                    if let Some(chars) = dict.py_chars.get(&buf[..k]) {
+                        for (ch, freq) in chars {
+                            let text = ch.to_string();
+                            insert_cand_with_consumed(
+                                pool,
+                                text.clone(),
+                                self.wubi_comment(&text, buf[..k].to_string()),
+                                rank::TIER_PINYIN_ABBREV - 1.0,
+                                k as f32,
+                                rank::norm10(*freq, dict.py_char_max),
+                                CandKind::Pinyin,
+                                suggestion_of(dict, &text),
+                                k,
+                            );
+                            hits += 1;
+                        }
+                    }
+                }
+            }
+        }
         hits
     }
 
@@ -1581,6 +1881,7 @@ impl Engine {
                     comment: comment.to_string(),
                     score,
                     kind: CandKind::English,
+                    consumed: 0,
                 });
             }
         };
@@ -1663,13 +1964,14 @@ fn plan_page_slice<'a>(eng: &Engine, p: &'a Plan) -> &'a [Candidate] {
     &p.cands[start..(start + ps).min(p.cands.len())]
 }
 
-/// 清空计划中的组合状态。
+/// 清空计划中的组合状态(联想行也在其列;联想上下文由调用方按需取舍)。
 fn plan_clear(p: &mut Plan) {
     p.buf.clear();
     p.buf_raw.clear();
     p.cands.clear();
     p.page = 0;
     p.cn_hit = false;
+    p.predicting = false;
 }
 
 /// 结束本次组合并上屏 `text`;`learned` 表示该文本来自候选/自动直通,需要学习。
@@ -1692,33 +1994,116 @@ fn plan_commit(eng: &Engine, p: &mut Plan, text: &str, learned: bool) -> Vec<Eff
             p.recent_cost.drain(..overflow);
         }
     }
+    // 联想上下文:上屏文本全为 CJK 时续接(保留尾部 MAX_CTX_CHARS 字),
+    // 含标点/西文/数字的上屏一律打断(标点直通 commit 不走本函数,
+    // 由 plan_key 的边界清理兜底)。
+    if !text.is_empty() && text.chars().all(is_cjk) {
+        p.prediction_context.push_str(text);
+        let keep = prediction::MAX_CTX_CHARS;
+        let len = p.prediction_context.chars().count();
+        if len > keep {
+            p.prediction_context = p.prediction_context.chars().skip(len - keep).collect();
+        }
+    } else {
+        p.prediction_context.clear();
+    }
+    // plan_clear 已复位联想标记:本键若是联想尾巴上屏,清缓冲后才决定
+    // 是否再出下一批联想;落空时 predicting 不得残留(否则空候选页上
+    // 空格会走错分支)。
     plan_clear(p);
-    let mut effects = vec![
-        Effect::Commit(text.to_string()),
-        Effect::Preedit(None),
-        empty_cands(),
-    ];
-    // 词组效率提示排在清除之后:宿主候选条先隐藏再展示提示,
-    // 并保留到下一次输入产生新效果流时才替换/清除。
-    if let Some(hint) = eng.plan_phrase_hint(p) {
-        effects.push(hint);
+    // 上屏后联想:命中的可续接尾巴占候选条原位(可空格/数字/点选续打);
+    // 无联想才出词组效率提示——提示写在候选条同一位置,不能盖掉可点选的联想行。
+    let preds = if eng.cfg.next_word_prediction
+        && p.mode == Mode::Chinese
+        && !p.prediction_context.is_empty()
+    {
+        eng.prediction_index
+            .candidates(&p.prediction_context, &eng.blocked, usize::MAX)
+    } else {
+        Vec::new()
+    };
+    let mut effects = vec![Effect::Commit(text.to_string()), Effect::Preedit(None)];
+    if preds.is_empty() {
+        effects.push(empty_cands());
+        // 词组效率提示排在清除之后:宿主候选条先隐藏再展示提示,
+        // 并保留到下一次输入产生新效果流时才替换/清除。
+        if let Some(hint) = eng.plan_phrase_hint(p) {
+            effects.push(hint);
+        }
+    } else {
+        p.cands = preds;
+        p.page = 0;
+        p.predicting = true;
+        effects.push(Effect::Candidates(Arc::new(
+            plan_page_slice(eng, p).to_vec(),
+        )));
     }
     effects
 }
 
+/// plan_commit 已发出联想页、本帧还要继续追加效果(标点/顶屏续打/造词
+/// 入口等)时调用:撤销联想状态与效果流里的联想候选,末尾补空候选清除,
+/// 保证宿主候选条不会在标点等后续效果之后残留陈旧联想行。
+/// `boundary` = 本键属于输入边界时把联想上下文一并作废(标点直通等);
+/// 顶屏续打(随后即开始新组合)保留上下文。
+fn strip_prediction_tail(p: &mut Plan, effects: &mut Vec<Effect>, boundary: bool) {
+    if !p.predicting {
+        return;
+    }
+    if let Some(pos) = effects
+        .iter()
+        .rposition(|e| matches!(e, Effect::Candidates(_)))
+    {
+        effects.remove(pos);
+    }
+    p.predicting = false;
+    p.cands.clear();
+    p.page = 0;
+    if boundary {
+        p.prediction_context.clear();
+    }
+    effects.push(empty_cands());
+}
+
 /// 选中一条候选的上屏规划(数字/鼠标/空格确认共用):功能键候选(合同 §14)
 /// → [`Effect::Action`](宿主执行功能,不上屏文本、不学习、不入造词历史);
+/// 前缀候选(consumed>0)→ 只上屏候选文本、剩余后缀留在组合里继续编辑;
 /// 普通候选 → [`plan_commit`]。
 fn plan_select(eng: &Engine, p: &mut Plan, cand: &Candidate, learned: bool) -> Vec<Effect> {
     if let CandKind::Action(i) = cand.kind {
         plan_clear(p);
+        // 功能动作是输入边界:点选路径不经 plan_key 的边界清理,
+        // 联想上下文在此一并作废。
+        p.prediction_context.clear();
         return vec![
             Effect::Action(i as usize),
             Effect::Preedit(None),
             empty_cands(),
         ];
     }
-    plan_commit(eng, p, &cand.text, learned)
+    let learn = learned && !p.predicting;
+    // 前缀候选:只消费缓冲开头 consumed 个 ASCII 字节——先把缓冲截成前缀
+    // 长度再上屏(学习/实耗键数按前缀计,后缀不算入),随后把原始后缀
+    // 放回缓冲并重算候选。空格/数字/鼠标点选共用本路径,后缀保持可编辑。
+    if cand.consumed > 0 && cand.consumed < p.buf.len() {
+        let rest = p.buf[cand.consumed..].to_string();
+        let rest_raw = p.buf_raw[cand.consumed..].to_string();
+        p.buf.truncate(cand.consumed);
+        p.buf_raw.truncate(cand.consumed);
+        let mut effects = plan_commit(eng, p, &cand.text, learn);
+        // 上屏后联想/提示绝不能盖住未完成的组合:只保留真正的 Commit,
+        // 剩余编码的 preedit/候选由本帧末尾的效果重绘。
+        effects.retain(|e| matches!(e, Effect::Commit(_)));
+        plan_clear(p);
+        p.buf = rest;
+        p.buf_raw = rest_raw;
+        eng.recompute_into(p);
+        effects.extend(composition_effects(eng, p));
+        return effects;
+    }
+    // 联想行上屏的是"尾巴"而非整词:不写学习记录(半截尾巴入学会污染
+    // 用户词典排序;上屏统计仍按实际 commit 计)。
+    plan_commit(eng, p, &cand.text, learn)
 }
 
 /// CJK 统一表意字符(含扩展 A/兼容区;造词只认汉字)。

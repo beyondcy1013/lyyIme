@@ -154,6 +154,10 @@ pub struct Config {
     /// 词组效率提示:上屏后最近几个字若存在更省键的五笔词组,在候选条
     /// 提示「词 + 编码」,直到下一次输入才清除(借鉴万能五笔的高效词提示)。
     pub phrase_hint: bool,
+    /// 上屏后联想(默认关):中文词上屏后,候选条按本地词典给出接下来可能
+    /// 输入的词句尾巴(数字/空格/点选上屏尾巴,字母开始新组合,Esc 关闭);
+    /// 纯本地词表反查,无网络/AI 调用。关闭后不再出联想行。
+    pub next_word_prediction: bool,
     /// 造词热键(合同 §12):`修饰+键` 串,宿主解析;core 不消费该值,
     /// 收纳于此保证 config.toml 一份 schema 三端(doctor/ibus/xim)共用。
     /// 修饰:ctrl/alt/super/shift;键名:a-z 0-9 f1-f12 equal/minus/space 等。
@@ -165,6 +169,15 @@ pub struct Config {
     pub quick_actions_enabled: bool,
     /// 快速功能键列表(合同 §14);触发词整串命中时候选条追加功能候选。
     pub quick_actions: Vec<QuickAction>,
+    /// 菜单触发总开关(上屏文字命中菜单功能名 → 提示后按确认键执行;默认开)。
+    /// 与快速功能键不同源:本特性只匹配**真实上屏的中文文本**,不读字母缓冲;
+    /// core 不消费该值,收纳于此保证 config.toml 一份 schema 三端共用。
+    pub menu_trigger_enabled: bool,
+    /// 菜单触发确认键:F1–F12 序号(默认 7 = F7;越界回退默认,不判整份损坏)。
+    pub menu_trigger_key: usize,
+    /// 菜单触发黑名单:逗号分隔的稳定 id(默认仅 `fix_ime` 修复输入法;
+    /// 逐项精确比较,未知 id 原样保留以便前向兼容)。
+    pub menu_trigger_disabled: String,
 }
 
 impl Default for Config {
@@ -187,10 +200,14 @@ impl Default for Config {
             shift_english: EnCommit::English,
             exact_char_freq_rank: true,
             phrase_hint: true,
+            next_word_prediction: false,
             coin_hotkey: "ctrl+equal".to_string(),
             shot_hotkey: "ctrl+alt+a".to_string(),
             quick_actions_enabled: true,
             quick_actions: default_quick_actions(),
+            menu_trigger_enabled: true,
+            menu_trigger_key: crate::menu_trigger::MENU_KEY_DEFAULT as usize,
+            menu_trigger_disabled: crate::menu_trigger::MENU_DISABLED_DEFAULT.to_string(),
         }
     }
 }
@@ -205,7 +222,13 @@ struct ConfigToml {
     page_size: usize,
     mixed_en: bool,
     mixed_auto_commit: bool,
-    cn_punct: bool,
+    /// 旧别名(早期 core 写盘键名);规范键 `chinese_punct` 缺失时才生效。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cn_punct: Option<bool>,
+    /// 规范键名(XIM 设置窗写盘键名);与旧别名 `cn_punct` 并存时以本键
+    /// 为准——设置界面保存的值优先(见 [`ConfigToml::into_config`])。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chinese_punct: Option<bool>,
     learning: bool,
     user_dict: Option<String>,
     data_dir: Option<String>,
@@ -224,10 +247,14 @@ struct ConfigToml {
     shift_english: String,
     exact_char_freq_rank: bool,
     phrase_hint: bool,
+    next_word_prediction: bool,
     coin_hotkey: String,
     shot_hotkey: String,
     quick_actions_enabled: bool,
     quick_actions: Vec<QuickAction>,
+    menu_trigger_enabled: bool,
+    menu_trigger_key: usize,
+    menu_trigger_disabled: String,
 }
 
 impl Default for ConfigToml {
@@ -236,6 +263,8 @@ impl Default for ConfigToml {
         // 带别名的键以 Option 呈现,缺失(None)才可被别名/内置默认接管。
         t.commit_on_extra_after_four = None;
         t.commit_after_four = None;
+        t.cn_punct = None;
+        t.chinese_punct = None;
         t
     }
 }
@@ -250,7 +279,8 @@ impl From<&Config> for ConfigToml {
             page_size: c.page_size,
             mixed_en: c.mixed_en,
             mixed_auto_commit: c.mixed_auto_commit,
-            cn_punct: c.cn_punct,
+            cn_punct: Some(c.cn_punct),
+            chinese_punct: None,
             learning: c.learning,
             user_dict: c
                 .user_dict
@@ -270,10 +300,14 @@ impl From<&Config> for ConfigToml {
             shift_english: c.shift_english.as_toml().to_string(),
             exact_char_freq_rank: c.exact_char_freq_rank,
             phrase_hint: c.phrase_hint,
+            next_word_prediction: c.next_word_prediction,
             coin_hotkey: c.coin_hotkey.clone(),
             shot_hotkey: c.shot_hotkey.clone(),
             quick_actions_enabled: c.quick_actions_enabled,
             quick_actions: c.quick_actions.clone(),
+            menu_trigger_enabled: c.menu_trigger_enabled,
+            menu_trigger_key: c.menu_trigger_key,
+            menu_trigger_disabled: c.menu_trigger_disabled.clone(),
         }
     }
 }
@@ -328,8 +362,12 @@ impl Config {
             "\n# 混合直通:高频英文词(见 en_freq_top_n)遇标点自动上屏原词"
         );
         let _ = writeln!(s, "mixed_auto_commit = {}", d.mixed_auto_commit);
-        let _ = writeln!(s, "\n# 中文态输出中文标点(如 , 。 ?;关闭则标点原样直通)");
-        let _ = writeln!(s, "cn_punct = {}", d.cn_punct);
+        let _ = writeln!(
+            s,
+            "\n# 中文态输出中文标点(如 ， 。 ？ ！;关闭则标点原样直通;Ctrl+. 可临时切换;"
+        );
+        let _ = writeln!(s, "# 旧别名 cn_punct 仍被识别,两键并存时以本键为准)");
+        let _ = writeln!(s, "chinese_punct = {}", d.cn_punct);
         let _ = writeln!(s, "\n# 用户词学习:上屏候选累计词频,越用越顺手");
         let _ = writeln!(s, "learning = {}", d.learning);
         let _ = writeln!(
@@ -440,6 +478,19 @@ impl Config {
         let _ = writeln!(s, "phrase_hint = {}", d.phrase_hint);
         let _ = writeln!(
             s,
+            "\n# 上屏后联想(默认关):中文词上屏后候选条给出接下来可能输入的词句尾巴"
+        );
+        let _ = writeln!(
+            s,
+            "# (数字/空格/点选上屏,字母开始新组合,Esc 关闭;纯本地词表,无网络调用)"
+        );
+        let _ = writeln!(
+            s,
+            "next_word_prediction = {}",
+            d.next_word_prediction
+        );
+        let _ = writeln!(
+            s,
             "\n# 造词快捷键:上屏汉字后按此键进入造词模式(方向键 →/↑ 多选一字、"
         );
         let _ = writeln!(
@@ -469,6 +520,30 @@ impl Config {
             "# @help(宿主内置)或任意 shell 命令;总开关关闭则整表不生效。"
         );
         let _ = writeln!(s, "quick_actions_enabled = {}", d.quick_actions_enabled);
+        let _ = writeln!(
+            s,
+            "\n# 菜单触发(与快速功能键不同源):上屏的中文文字结尾命中菜单功能名时,"
+        );
+        let _ = writeln!(
+            s,
+            "# 候选条提示「按 Fn 进入该功能」,按确认键执行一次;继续输入/切换窗口即取消"
+        );
+        let _ = writeln!(s, "menu_trigger_enabled = {}", d.menu_trigger_enabled);
+        let _ = writeln!(s, "# 确认键:F1–F12 的功能键序号(默认 7 = F7,无修饰单独按)");
+        let _ = writeln!(s, "menu_trigger_key = {}", d.menu_trigger_key);
+        let _ = writeln!(
+            s,
+            "# 禁用项:逗号分隔的功能稳定 id(默认仅禁 fix_ime 修复输入法;"
+        );
+        let _ = writeln!(
+            s,
+            "# 逐项精确匹配,未知 id 保留;只影响本特性,不影响快速功能键)"
+        );
+        let _ = writeln!(
+            s,
+            "menu_trigger_disabled = \"{}\"",
+            d.menu_trigger_disabled
+        );
         for a in &d.quick_actions {
             let _ = writeln!(s, "\n[[quick_actions]]");
             let _ = writeln!(s, "trigger = \"{}\"", a.trigger);
@@ -532,7 +607,9 @@ impl ConfigToml {
             page_size: self.page_size,
             mixed_en: self.mixed_en,
             mixed_auto_commit: self.mixed_auto_commit,
-            cn_punct: self.cn_punct,
+            // 规范键 chinese_punct(XIM 设置窗写盘键名)优先,旧别名
+            // cn_punct 兜底,再落内置默认 true——设置界面保存值优先。
+            cn_punct: self.chinese_punct.or(self.cn_punct).unwrap_or(true),
             learning: self.learning,
             user_dict: self
                 .user_dict
@@ -558,6 +635,7 @@ impl ConfigToml {
                 .unwrap_or(EnCommit::English),
             exact_char_freq_rank: self.exact_char_freq_rank,
             phrase_hint: self.phrase_hint,
+            next_word_prediction: self.next_word_prediction,
             coin_hotkey: {
                 let hk = self.coin_hotkey.trim().to_string();
                 if hk.is_empty() {
@@ -576,6 +654,14 @@ impl ConfigToml {
             },
             quick_actions_enabled: self.quick_actions_enabled,
             quick_actions: validate_quick_actions(&self.quick_actions, path)?,
+            menu_trigger_enabled: self.menu_trigger_enabled,
+            // 越界序号回退默认(宿主下拉框只出 F1–F12;手写非法值宽恕处理)
+            menu_trigger_key: if (1..=12).contains(&self.menu_trigger_key) {
+                self.menu_trigger_key
+            } else {
+                Config::default().menu_trigger_key
+            },
+            menu_trigger_disabled: self.menu_trigger_disabled,
         })
     }
 }
@@ -740,6 +826,39 @@ mod tests {
     }
 
     #[test]
+    fn 中文标点_别名键兼容与规范键优先() {
+        // 缺省 = 内置默认(中文标点开)。
+        let cfg: Config = toml::from_str::<ConfigToml>("mode = \"cn\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(cfg.cn_punct);
+        // 规范键 chinese_punct(XIM 设置窗写盘键名)。
+        let cfg: Config = toml::from_str::<ConfigToml>("chinese_punct = false")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.cn_punct);
+        // 旧别名 cn_punct 单独使用时仍生效。
+        let cfg: Config = toml::from_str::<ConfigToml>("cn_punct = false")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.cn_punct);
+        // 两键矛盾:无论书写顺序,规范键(设置界面保存值)优先。
+        for text in [
+            "cn_punct = true\nchinese_punct = false",
+            "chinese_punct = false\ncn_punct = true",
+        ] {
+            let cfg: Config = toml::from_str::<ConfigToml>(text)
+                .unwrap()
+                .into_config(Path::new("x"))
+                .unwrap();
+            assert!(!cfg.cn_punct, "规范键应覆盖旧别名: {text}");
+        }
+    }
+
+    #[test]
     fn quick_actions_自定义表解析与非法触发词() {
         let text = r#"
 quick_actions_enabled = false
@@ -769,5 +888,71 @@ command = "@help"
                 .and_then(|raw| raw.into_config(Path::new("x")));
             assert!(r.is_err(), "trigger {bad} 应判不合法");
         }
+    }
+
+    #[test]
+    fn 菜单触发_默认值与解析() {
+        // 默认:开 / F7 / 黑名单仅 fix_ime
+        let d = Config::default();
+        assert!(d.menu_trigger_enabled);
+        assert_eq!(d.menu_trigger_key, 7);
+        assert_eq!(d.menu_trigger_disabled, "fix_ime");
+
+        // 缺项回默认;显式值解析(含未知 id 原样保留)
+        let cfg: Config = toml::from_str::<ConfigToml>(
+            "menu_trigger_enabled = false\n\
+             menu_trigger_key = 8\n\
+             menu_trigger_disabled = \"help,future_entry\"",
+        )
+        .unwrap()
+        .into_config(Path::new("x"))
+        .unwrap();
+        assert!(!cfg.menu_trigger_enabled);
+        assert_eq!(cfg.menu_trigger_key, 8);
+        assert_eq!(cfg.menu_trigger_disabled, "help,future_entry");
+
+        // 键序号越界宽恕回退默认 7(与 C 宿主钳制一致,不判整份损坏)
+        for bad in [0usize, 13, 99] {
+            let cfg: Config = toml::from_str::<ConfigToml>(&format!(
+                "menu_trigger_key = {bad}"
+            ))
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+            assert_eq!(cfg.menu_trigger_key, 7, "menu_trigger_key = {bad} 应回退默认");
+        }
+
+        // example_toml 包含三键且完整回读
+        let text = Config::example_toml();
+        assert!(text.contains("menu_trigger_enabled = true"));
+        assert!(text.contains("menu_trigger_key = 7"));
+        assert!(text.contains("menu_trigger_disabled = \"fix_ime\""));
+    }
+
+    #[test]
+    fn 上屏后联想_默认关与显式开启回读() {
+        assert!(!Config::default().next_word_prediction);
+        // 缺项回默认(关)
+        let cfg: Config = toml::from_str::<ConfigToml>("mode = \"cn\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.next_word_prediction);
+        // 显式 true / false 均按书写解析
+        let cfg: Config = toml::from_str::<ConfigToml>("next_word_prediction = true")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(cfg.next_word_prediction);
+        let cfg: Config = toml::from_str::<ConfigToml>("next_word_prediction = false")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.next_word_prediction);
+        // example_toml 含该键且完整回读为默认
+        let text = Config::example_toml();
+        assert!(text.contains("next_word_prediction = false"));
+        let raw: ConfigToml = toml::from_str(&text).unwrap();
+        assert_eq!(raw.into_config(Path::new("x")).unwrap(), Config::default());
     }
 }

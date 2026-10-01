@@ -171,12 +171,48 @@ pub fn escalate_hotkey(spec: &str, occupied: &[&str]) -> Option<String> {
     None
 }
 
-/// 配置内冲突自愈(加载路径):造词与截屏热键规范化相同时,截屏热键按
-/// 升级阶梯逐级让位(工具键让位打字键),就地改写 `cfg.shot_hotkey`。
-/// 返回人话说明(无冲突或任一写法非法时为空 —— 非法热键由宿主按各自
-/// 合同回退默认,不参与冲突)。
+/// 保留组合:Ctrl+.(句点)固定为中文态中英文标点切换键,不可被
+/// 造词/截屏热键占用(配置加载时自动让位,设置窗保存时直接拒绝)。
+pub const PUNCT_TOGGLE_HOTKEY: &str = "ctrl+period";
+
+/// 配置内冲突自愈(加载路径):先把占用了保留键 Ctrl+. 的造词/截屏热键
+/// 逐级让位(+alt → +alt+shift,避开另一侧已占组合),再造词与截屏热键
+/// 规范化相同时截屏热键按升级阶梯让位(工具键让位打字键),就地改写
+/// `cfg.*_hotkey`。返回人话说明(无冲突或写法非法时为空 —— 非法热键
+/// 由宿主按各自合同回退默认,不参与冲突)。
 pub fn resolve_config_hotkeys(cfg: &mut crate::config::Config) -> Vec<String> {
     let mut notes = Vec::new();
+    // 保留键让位:Ctrl+. 是内置标点切换键,造词/截屏热键配成它时
+    // 在加载路径自动让位(原组合 → +alt → +alt+shift),不静默共存;
+    // 让位候选须避开另一侧字段已占组合(如另一侧已是 ctrl+alt+period
+    // 则落到 ctrl+alt+shift+period)。先于两两互斥判定执行。
+    for is_coin in [true, false] {
+        let (label, cur, other) = if is_coin {
+            ("造词", cfg.coin_hotkey.clone(), cfg.shot_hotkey.clone())
+        } else {
+            ("截屏", cfg.shot_hotkey.clone(), cfg.coin_hotkey.clone())
+        };
+        if canon_hotkey(&cur).as_deref() != Some(PUNCT_TOGGLE_HOTKEY) {
+            continue;
+        }
+        // 保留键自身也计入占用:否则另一侧已占 +alt 档时让位会原样
+        // 返回 ctrl+period(它恰是"空闲"候选),等于没让位。
+        match escalate_hotkey(&cur, &[other.as_str(), PUNCT_TOGGLE_HOTKEY]) {
+            Some(next) => {
+                notes.push(format!(
+                    "{label}快捷键 {cur} 已保留给中英文标点切换,已自动改为 {next}(可在设置中修改)"
+                ));
+                if is_coin {
+                    cfg.coin_hotkey = next;
+                } else {
+                    cfg.shot_hotkey = next;
+                }
+            }
+            None => notes.push(format!(
+                "{label}快捷键 {cur} 已保留给中英文标点切换且无法自动升级,请修改其中一项"
+            )),
+        }
+    }
     let conflict = match (
         parse_hotkey(&cfg.coin_hotkey),
         parse_hotkey(&cfg.shot_hotkey),
@@ -316,6 +352,39 @@ mod tests {
         cfg.coin_hotkey = "a".into();
         cfg.shot_hotkey = "a".into();
         assert!(resolve_config_hotkeys(&mut cfg).is_empty());
+    }
+
+    #[test]
+    fn resolve_config_hotkeys_保留键标点切换让位() {
+        // Ctrl+. 保留给中英文标点切换:造词配成它 → +alt 让位
+        let mut cfg = Config::default();
+        cfg.coin_hotkey = "ctrl+period".into();
+        let notes = resolve_config_hotkeys(&mut cfg);
+        assert_eq!(cfg.coin_hotkey, "ctrl+alt+period");
+        assert!(notes.iter().any(|n| n.contains("标点切换")), "{notes:?}");
+
+        // 截屏配成它 → 同样让位;另一侧若已占 ctrl+alt+period 则落到
+        // ctrl+alt+shift+period
+        let mut cfg = Config::default();
+        cfg.coin_hotkey = "ctrl+alt+period".into();
+        cfg.shot_hotkey = "ctrl+period".into();
+        resolve_config_hotkeys(&mut cfg);
+        assert_eq!(cfg.shot_hotkey, "ctrl+alt+shift+period");
+        assert_eq!(cfg.coin_hotkey, "ctrl+alt+period");
+
+        // 两侧都配成保留键:各让一级,互不冲突
+        let mut cfg = Config::default();
+        cfg.coin_hotkey = "ctrl+period".into();
+        cfg.shot_hotkey = "ctrl+period".into();
+        resolve_config_hotkeys(&mut cfg);
+        assert_eq!(cfg.coin_hotkey, "ctrl+alt+period");
+        assert_eq!(cfg.shot_hotkey, "ctrl+alt+shift+period");
+
+        // 别名写法(Ctrl + . / ctrl+.)同归保留键,同样让位
+        let mut cfg = Config::default();
+        cfg.coin_hotkey = "Ctrl + .".into();
+        resolve_config_hotkeys(&mut cfg);
+        assert_eq!(cfg.coin_hotkey, "ctrl+alt+period");
     }
 
     #[test]

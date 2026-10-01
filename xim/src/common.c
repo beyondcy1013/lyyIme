@@ -1,4 +1,5 @@
 #include "common.h"
+#include "keysym_map.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -39,6 +40,25 @@ int lyy_engine_ensure(App *app)
                            "commit_first_at_four 不生效(请更新 liblyyime_core.so)");
     }
     app->core.lyyime_set_phrase_hint(app->engine, app->config.phrase_hint);
+    /* 上屏后联想(可选符号):旧 core 库缺符号时无法配置联想,
+     * 保留原输入行为,不整体降级。 */
+    if (app->core.pred_ok) {
+        app->core.lyyime_set_next_word_prediction(
+            app->engine, app->config.next_word_prediction);
+    } else {
+        lyy_log(&app->log, "INFO core 库无上屏后联想符号,"
+                           "next_word_prediction 不生效(请更新 liblyyime_core.so)");
+    }
+    /* 中文标点默认(可选符号组):旧 core 库缺符号时无法配置,
+     * 沿用 core 默认(中文标点开),保留原输入行为,不整体降级。 */
+    if (app->core.punct_ok) {
+        app->core.lyyime_set_chinese_punctuation(app->engine,
+                                                 app->config.chinese_punct);
+    } else {
+        lyy_log(&app->log, "INFO core 库无中英文标点切换符号,"
+                           "chinese_punct 不生效且 Ctrl+. 不拦截"
+                           "(请更新 liblyyime_core.so)");
+    }
     /* 精确单字按词频排位(§5,可选符号):旧 core 库缺符号时沿用 core 默认。 */
     if (app->core.freq_rank_ok) {
         app->core.lyyime_set_exact_char_freq_rank(app->engine,
@@ -79,7 +99,44 @@ int lyy_engine_ensure(App *app)
                            "(请更新 liblyyime_core.so 后重启)");
     }
     lyy_log(&app->log, "core 引擎已创建:data_dir=%s", app->data_dir);
+    lyy_menu_trigger_apply(app); /* 菜单触发器:与引擎解耦,引擎就绪后配置 */
     return 0;
+}
+
+/* 菜单触发器:创建(首次)并按当前配置重配;configure 内部即复位
+ * 尾串与待执行(配置重载=硬边界)。mt_ok=0(旧 core 库)时为空操作。 */
+void lyy_menu_trigger_apply(App *app)
+{
+    if (!app->core.mt_ok)
+        return;
+    if (!app->menu_trigger) {
+        app->menu_trigger = app->core.lyyime_menu_trigger_new();
+        if (!app->menu_trigger) {
+            lyy_log(&app->log, "WARN 菜单触发器创建失败(内存?)");
+            return;
+        }
+    }
+    if (app->core.lyyime_menu_trigger_configure(
+            app->menu_trigger, app->config.menu_trigger_enabled,
+            app->config.menu_trigger_key,
+            app->config.menu_trigger_disabled) != 0) {
+        lyy_log(&app->log, "WARN 菜单触发配置失败(disabled=\"%s\")",
+                app->config.menu_trigger_disabled);
+        return;
+    }
+    /* 截屏提示须显示「实际生效」的快捷键:与 lyy_app_reload_hotkey 同一
+     * 解析与回退(配置合法用配置,非法回退 ctrl+alt+a),避开设置页
+     * 「先重载引擎(触发本函数)后重载热键」的顺序差;旧库符号为 NULL 即跳。 */
+    if (app->core.lyyime_menu_trigger_set_shot_hotkey) {
+        uint32_t mods = 0, sym = 0;
+        const char *spec =
+            lyy_hotkey_parse(app->config.shot_hotkey, &mods, &sym)
+                ? app->config.shot_hotkey : "ctrl+alt+a";
+        app->core.lyyime_menu_trigger_set_shot_hotkey(app->menu_trigger, spec);
+    }
+    lyy_log(&app->log, "菜单触发:enabled=%d key=F%d disabled=[%s]",
+            app->config.menu_trigger_enabled, app->config.menu_trigger_key,
+            app->config.menu_trigger_disabled);
 }
 
 void lyy_engine_reload(App *app)
@@ -112,6 +169,12 @@ void lyy_core_mark_degraded(App *app, const char *why)
 
 void lyy_request_show_settings(App *app)
 {
+    app->settings_requested = 1;
+}
+
+void lyy_request_show_settings_page(App *app, int page)
+{
+    app->settings_page = page;
     app->settings_requested = 1;
 }
 

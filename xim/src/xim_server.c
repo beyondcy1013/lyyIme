@@ -12,6 +12,7 @@
 /* keysymdef.h 功能宏(标准用法,必须先于 include 定义) */
 #define XK_MISCELLANY
 #define XK_XKB_KEYS
+#define XK_LATIN1
 #include <X11/keysymdef.h>
 
 #include "common.h"
@@ -44,6 +45,13 @@ typedef struct {
     int shift_pending;  /* on 态:Shift 已按未放,等待单击判定 */
     int combo_guard;    /* off→on 后的组合键防护窗 */
     long long guard_ms; /* 防护窗起点(单调毫秒) */
+    /* 菜单触发:确认键 Fn 的 press 已吞 → 配对的 release 同样吞掉,
+     * 不把半个按键事件漏给应用 */
+    int mt_eat_release;
+    /* Ctrl+. 标点切换:press 已吞 → 配对的 period release 同样吞掉
+     * (release 时修饰可能已松,不能按修饰再认,靠本锁存判配对);
+     * 兼作按住连发的去抖(按住不放只翻转一次) */
+    int punct_key_down;
 } IcState;
 
 static long long now_ms(void)
@@ -137,6 +145,167 @@ static void show_hint(App *app, const char *text)
     lyy_candwin_commit_layout(&app->candwin);
 }
 
+/* ---- 帮助提示 / 截屏动作(§14 @help/@shot 与菜单触发共用同一宿主路径) ---- */
+static void show_help_hint(App *app)
+{
+    lyy_show_notice(app,
+                    "帮助:Shift单击=中英切换  1-9选词  -/=翻页  "
+                    "Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  "
+                    "peizhi/shezhi=设置 jietu=截图 bangzhu=帮助");
+}
+
+static void run_shot_action(App *app)
+{
+    /* 工具提示带配置的热键;助手缺失时 lyy_spawn_shot 的安装指引
+     * 会覆盖本提示(候选条文本替换) */
+    char msg[320];
+    snprintf(msg, sizeof(msg), "已拉起截屏(热键 %.200s)",
+             app->config.shot_hotkey);
+    lyy_show_notice(app, msg);
+    lyy_spawn_shot(app);
+}
+
+/* ---- 菜单触发(2026-09-30,core 可选符号组):上屏中文尾串命中菜单功能名
+ * → 候选条持续提示 → 无修饰配置 Fn 执行一次。
+ * 对象由 App 持有(common.c lyy_menu_trigger_apply 在引擎就绪后创建/重配),
+ * 与引擎 Plan、AI 会话相互独立:只消费 do_commit 的真实上屏文本
+ * (AI 采集态的 commit 进提示词,不喂匹配器),不占效果流重试路径。 */
+
+/* 提示展示:与词组效率提示同一通道(候选窗预编辑行),持久到下一次输入覆盖 */
+static void mt_show_hint(App *app, const char *text)
+{
+    show_hint(app, text);
+    app->mt_hint_shown = 1;
+}
+
+/* 撤下菜单提示:仅当候选条预编辑行确实是我们贴的才动手,
+ * 避免误删 core/AI 正在展示的内容 */
+static void mt_hide_hint(App *app)
+{
+    if (app->mt_hint_shown) {
+        app->mt_hint_shown = 0;
+        hide_preedit(app);
+    }
+}
+
+/* 非确认键按下:仅取消待执行(尾串保留,多词连打仍可继续命中) */
+static void mt_cancel(App *app)
+{
+    if (app->menu_trigger &&
+        app->core.lyyime_menu_trigger_cancel(app->menu_trigger) > 0)
+        lyy_log(&app->log, "menu-trigger: 待执行已取消(非确认键)");
+    mt_hide_hint(app);
+}
+
+/* 硬边界(焦点进出/IC 销毁/模式切换/会话复位/AI 进出/退格导航):
+ * 尾串与待执行一并清空 */
+void lyy_mt_reset(App *app)
+{
+    if (app->menu_trigger)
+        app->core.lyyime_menu_trigger_reset(app->menu_trigger);
+    mt_hide_hint(app);
+}
+
+/* 编辑/导航类按键 → 尾串硬边界(与 core 侧约定一致:退格/方向/翻页/
+ * Esc/Home/End/Delete/Tab);其余普通键只走 mt_cancel */
+static int mt_is_reset_key(uint32_t sym)
+{
+    switch (sym) {
+    case XK_BackSpace:
+    case XK_Tab:
+    case XK_Escape:
+    case XK_Delete:
+    case XK_Home:
+    case XK_End:
+    case XK_Left:
+    case XK_Up:
+    case XK_Right:
+    case XK_Down:
+    case XK_Page_Up:
+    case XK_Page_Down:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* 喂一次真实上屏文本;命中提示写入 out(cap 字节,含 \0),未命中写空串。
+ * 两段式容量协议:不足时按 -needed 扩容重试一次(core 侧重试不重复记尾串) */
+static void mt_feed_commit(App *app, const char *text, char *out, int cap)
+{
+    if (!app->menu_trigger || !out || cap <= 0)
+        return;
+    out[0] = '\0';
+    int64_t n = app->core.lyyime_menu_trigger_commit(
+        app->menu_trigger, text, out, (int64_t)cap);
+    if (n >= 0)
+        return;
+    int64_t need = -n;
+    if (need <= 0 || need > 4096)
+        return; /* 提示文本正常 <100 字节;异常上限防失控 */
+    char *big = malloc((size_t)need);
+    if (!big)
+        return;
+    n = app->core.lyyime_menu_trigger_commit(app->menu_trigger, text, big,
+                                             need);
+    if (n > 0 && big[0])
+        snprintf(out, (size_t)cap, "%s", big);
+    free(big);
+}
+
+/* 目录下标 → 内置动作分派(可信目录枚举,不经过 shell 命令) */
+static void mt_run_action(App *app, int idx)
+{
+    char id[64];
+    if (!app->core.mt_ok ||
+        app->core.lyyime_menu_trigger_id(idx, id, (int)sizeof(id)) <= 1) {
+        lyy_log(&app->log, "WARN 菜单触发下标无效:%d(忽略)", idx);
+        return;
+    }
+    lyy_log(&app->log, "menu-trigger: 确认执行 %s(idx=%d)", id, idx);
+    /* 动作执行=硬边界:清尾串防重入(english 经 set_trigger 再复位亦无害) */
+    lyy_mt_reset(app);
+
+    /* 设置子页:稳定 id → 设置窗 notebook 页号 */
+    static const struct {
+        const char *id;
+        int page;
+    } kPages[] = {
+        { "settings_general", 0 }, { "settings_input", 1 },
+        { "settings_hotkey", 2 },  { "settings_ai", 3 },
+        { "settings_stats", 4 },   { "settings_menu", 5 },
+    };
+    for (size_t i = 0; i < sizeof(kPages) / sizeof(kPages[0]); i++) {
+        if (!strcmp(id, kPages[i].id)) {
+            lyy_request_show_settings_page(app, kPages[i].page);
+            return;
+        }
+    }
+    if (!strcmp(id, "settings")) {
+        lyy_request_show_settings(app);
+    } else if (!strcmp(id, "help")) {
+        show_help_hint(app);
+    } else if (!strcmp(id, "english")) {
+        lyy_xim_set_trigger(app, 0); /* 语义=切英文(非 toggle) */
+    } else if (!strcmp(id, "shot")) {
+        run_shot_action(app);
+    } else if (!strcmp(id, "float")) {
+        lyy_tools_float_window(app);
+    } else if (!strcmp(id, "fix_ime")) {
+        lyy_tools_fix_ime(app);
+    } else if (!strcmp(id, "manage_ime")) {
+        lyy_tools_manage_ime(app);
+    } else if (!strcmp(id, "reload_dict")) {
+        lyy_tools_reload_dict(app);
+    } else if (!strcmp(id, "open_log")) {
+        lyy_tools_open_log(app);
+    } else if (!strcmp(id, "mainwin")) {
+        lyy_mainwin_show(&app->mainwin);
+    } else {
+        lyy_log(&app->log, "WARN 菜单触发 id 无对应宿主动作:%s(忽略)", id);
+    }
+}
+
 /* ---- 快速功能键执行(合同 §14):@settings/@shot/@help 宿主内置,其余按
  * shell 命令执行(sh -c,与 Mode A service.run_quick_action 同合同) ---- */
 void lyy_run_quick_action(App *app, int index)
@@ -156,23 +325,14 @@ void lyy_run_quick_action(App *app, int index)
         return;
     }
     if (!strcmp(cmd, "@shot")) {
-        /* 工具提示带配置的热键;助手缺失时 lyy_spawn_shot 的安装指引
-         * 会覆盖本提示(候选条文本替换) */
         lyy_log(&app->log, "快速功能键命中:截图(@shot),热键 %s",
                 app->config.shot_hotkey);
-        char msg[320];
-        snprintf(msg, sizeof(msg), "已拉起截屏(热键 %.200s)",
-                 app->config.shot_hotkey);
-        lyy_show_notice(app, msg);
-        lyy_spawn_shot(app);
+        run_shot_action(app);
         return;
     }
     if (!strcmp(cmd, "@help")) {
         lyy_log(&app->log, "快速功能键命中:帮助(@help)");
-        lyy_show_notice(app,
-                        "帮助:Shift单击=中英切换  1-9选词  -/=翻页  "
-                        "Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  "
-                        "peizhi/shezhi=设置 jietu=截图 bangzhu=帮助");
+        show_help_hint(app);
         return;
     }
     lyy_log(&app->log, "快速功能键命中[%d]:执行 %s", index, cmd);
@@ -263,6 +423,14 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
     int passed = 0;
     /* /AI 采集态:commit 进提示词、pass 进原字符,不再直达应用 */
     int ai_capture = lyy_ai_capturing(app);
+    /* 菜单触发:本次效果流最后一条真实上屏产生的命中提示,
+     * 压轴展示(盖过同帧候选清屏与词组提示) */
+    char mt_hint[256] = { 0 };
+    /* 四码顶屏自动重启组合:同帧 commit 后出现新预编辑时,提示不抢占 */
+    int mt_preedit_active = 0;
+    /* 帧末候选行数(取效果流最后一条 cands 为准):联想行也是真实候选,
+     * 菜单触发提示不得在它们之上盖写预编辑行 */
+    int mt_cands_active = 0;
     LyyEffect effects[16];
     int count = 0;
     if (lyy_effects_parse(json, effects, 16, &count) != 0) {
@@ -286,6 +454,9 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
                 } else {
                     do_commit(im, ic, e->s);
                     lyy_log(&app->log, "commit: %s", e->s);
+                    /* 菜单触发:真实上屏文本喂匹配器(AI 采集态的
+                     * commit 归提示词,不经此分支,天然排除) */
+                    mt_feed_commit(app, e->s, mt_hint, (int)sizeof(mt_hint));
                 }
             }
             break;
@@ -294,10 +465,16 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
             lyy_ai_mirror_preedit(app, e->s); /* 组词码镜像(触发门控用) */
             if (ai_capture)
                 lyy_ai_show_preedit(app);
-            else
+            else {
                 lyy_candwin_set_preedit(&app->candwin, e->s);
+                /* 引擎预编辑覆盖预编辑行 → 菜单提示所有权解除 */
+                app->mt_hint_shown = 0;
+            }
             if (e->s[0])
                 had_content = 1;
+            /* 末条 preedit 才是帧末状态(同帧 commit+clear+新 preedit
+             * 时以新预编辑为准),不再用 |= 累计历史 */
+            mt_preedit_active = e->s[0] != '\0';
             break;
         case LYY_EFF_CANDS: {
             lyy_candwin_begin_rows(&app->candwin);
@@ -316,6 +493,9 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
                                     comment ? comment : "");
             }
             lyy_candwin_set_page(&app->candwin, e->page + 1, e->pages);
+            /* 末条 cands 才是帧末状态(同帧先出联想行后被清空时以
+             * 清空为准,反之联想行登场时以有行为准),不再用 |= 累计 */
+            mt_cands_active = e->n > 0;
             break;
         }
         case LYY_EFF_PASS:
@@ -323,6 +503,13 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
                 /* 采集态不回放:字母/数字/标点按原字符归入提示词 */
                 lyy_ai_on_pass_key(app, sym);
             } else if (ev) {
+                /* 键按下产生的直通(空缓冲回车/空格、CapsLock 大写、
+                 * 转发标点、未处理功能键)= 菜单触发硬边界:复位尾串与
+                 * 待执行,作废本帧保存的命中提示;release 直通不复位。 */
+                if ((ev->response_type & 0x7f) == XCB_KEY_PRESS) {
+                    lyy_mt_reset(app);
+                    mt_hint[0] = '\0';
+                }
                 xcb_im_forward_event(im, ic, ev);
             }
             passed = 1;
@@ -350,7 +537,10 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
             lyy_log(&app->log, "mode 效果:core 切%s(trigger 同步)",
                     e->m == 1 ? "英文" : "中文");
             lyy_xim_set_trigger(app, e->m == 1 ? 0 : 1);
+            mt_hint[0] = '\0'; /* 模式复位后本帧命中提示不得再贴 */
             break;
+        /* 注:lyy_xim_set_trigger 内部已做 lyy_mt_reset(模式切换=硬边界),
+         * 此处只需作废本帧保存的提示文本 */
         case LYY_EFF_ACTION:
             /* §14 快速功能键命中:执行功能,不上屏文本
              * (效果流已含 preedit/cands 清除;采集态同样执行,与 Mode A 一致) */
@@ -362,6 +552,24 @@ static void apply_effects(App *app, xcb_im_input_context_t *ic,
         }
     }
     lyy_candwin_commit_layout(&app->candwin);
+    /* 菜单触发提示压轴展示:本帧所有效果(候选清屏/词组提示/notice)
+     * 都已落完,提示此后持续显示到下一次输入覆盖或取消/复位边界 */
+    /* 帧末存在新预编辑(四码顶屏续打):命中提示不可见 → 待执行一并
+     * 取消(尾串保留供续接);Fn 不得执行看不见的动作。不藏真实预编辑。 */
+    if (mt_preedit_active && app->menu_trigger &&
+        app->core.lyyime_menu_trigger_cancel(app->menu_trigger) > 0)
+        lyy_log(&app->log, "menu-trigger: 同帧新预编辑,待执行已取消");
+    /* 帧末存在候选行(含上屏后联想行):命中提示写在预编辑行会盖掉
+     * 可选中的联想词 → 待执行一并取消(看不见的动作 Fn 不得执行)。 */
+    if (mt_cands_active && app->menu_trigger &&
+        app->core.lyyime_menu_trigger_cancel(app->menu_trigger) > 0)
+        lyy_log(&app->log, "menu-trigger: 本帧有候选行,待执行已取消");
+    if (!ai_capture && mt_hint[0] && !mt_preedit_active &&
+        !mt_cands_active && app->menu_trigger &&
+        app->core.lyyime_menu_trigger_pending(app->menu_trigger) >= 0) {
+        mt_show_hint(app, mt_hint);
+        lyy_log(&app->log, "menu-trigger hint: %s", mt_hint);
+    }
     /* 新内容上屏时撤销未到的 notice 清除定时,避免误清组合显示 */
     if (had_content && app->notice_timer_id) {
         g_source_remove(app->notice_timer_id);
@@ -513,6 +721,9 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
             xcb_im_forward_event(xs->im, ic, ev);
             return;
         }
+        /* 菜单触发:Shift 按下即硬边界(release 才切换模式,组合键亦不
+         * 保留尾串/待执行,与 Mode A on_press 同合同) */
+        lyy_mt_reset(app);
         /* 组合守护:off→on 后立刻收到 Shift 按下,视为一次完整单击开新组合。 */
         if (st->combo_guard && now_ms() - st->guard_ms <= LYY_COMBO_GUARD_MS) {
             st->combo_guard = 0;
@@ -542,6 +753,88 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
                     (unsigned long)sym);
             xcb_im_forward_event(xs->im, ic, ev);
             return;
+        }
+    }
+
+    /* ---- 菜单触发按键分类(AI 采集态冻结匹配器,不进此分支) ----
+     * press:配置 Fn(无修饰;Caps/NumLock 忽略)且有待执行 → 吞键执行一次;
+     *       退格/导航/Esc/方向/Ctrl·Alt·Super 组合为硬边界 → 复位尾串;
+     *       其余普通键 → 仅取消待执行(尾串保留,多词连打仍续接)。
+     * release:仅吞确认键配对的 release(press 已吞则 release 不泄给应用),
+     *       其余 release 不干预。 */
+    if (app->menu_trigger && !lyy_ai_capturing(app)) {
+        int fn = (base_sym >= XK_F1 && base_sym <= XK_F12)
+                     ? (int)(base_sym - XK_F1) + 1
+                     : 0;
+        if (!is_press) {
+            /* 只吞与已吞按下配对的同一确认键 release;其它键 release 正常放行 */
+            if (fn != 0 && fn == st->mt_eat_release) {
+                st->mt_eat_release = 0;
+                return;
+            }
+        } else {
+            uint32_t hard_mods = ev->state & (XCB_MOD_MASK_CONTROL |
+                                              XCB_MOD_MASK_1 | XCB_MOD_MASK_4);
+            int clean_fn =
+                fn && !hard_mods && !(ev->state & XCB_MOD_MASK_SHIFT);
+            if (clean_fn &&
+                app->core.lyyime_menu_trigger_pending(app->menu_trigger) >= 0 &&
+                fn == app->config.menu_trigger_key) {
+                int idx =
+                    app->core.lyyime_menu_trigger_take(app->menu_trigger);
+                if (idx >= 0) {
+                    st->mt_eat_release = fn; /* 配对吞掉同序号 release */
+                    mt_hide_hint(app);
+                    lyy_log(&app->log, "menu-trigger: F%d 确认执行 idx=%d",
+                            fn, idx);
+                    mt_run_action(app, idx);
+                    return;
+                }
+            }
+            if (hard_mods || mt_is_reset_key(base_sym))
+                lyy_mt_reset(app);
+            else
+                mt_cancel(app);
+        }
+    }
+
+    /* ---- 中英文标点切换(固定保留键 Ctrl+.;仅 trigger on 中文态) ----
+     * press:干净修饰恰为 Ctrl(Lock/NumLock 已被 CLEAN 掩码忽略;
+     * Ctrl+Shift+/Alt/Super 不命中)且 core 处于中文态时,经可选符号
+     *   翻转运行时标点开关 —— 不写盘、不动组合缓冲/候选/联想行;
+     *   组合中或有候选行时静默切换,只有空缓冲无行且非 AI 采集才用
+     *   show_hint 亮当前状态(不走 notice:定时清除会连带撤行)。
+     *   按住连发由锁存去抖;配对 release 一律吞掉。
+     *   punct_ok=0(旧 core 缺符号)或英文态:不拦截,原样进 core/应用。
+     * 纯 Control_L/R 按下:原样转发、不进 core(OTHER 会清组合缓冲),
+     *   先按 Ctrl 再按 . 的预热键不得打断正在输入的组合。 */
+    if (base_sym == XK_Control_L || base_sym == XK_Control_R) {
+        xcb_im_forward_event(xs->im, ic, ev);
+        return;
+    }
+    if (app->core.punct_ok && base_sym == XK_period) {
+        if (!is_press) {
+            if (st->punct_key_down) {
+                st->punct_key_down = 0;
+                return; /* 吞掉与已消费按下配对的 release */
+            }
+        } else if (lyy_hotkey_match(ev->state & LYY_CLEAN_MOD_MASK,
+                                    (uint32_t)sym, XCB_MOD_MASK_CONTROL,
+                                    XK_period) &&
+                   app->core.lyyime_mode(app->engine) == 0) {
+            if (!st->punct_key_down) {
+                st->punct_key_down = 1;
+                int on =
+                    app->core.lyyime_toggle_chinese_punctuation(app->engine);
+                lyy_log(&app->log, "标点切换:%s(Ctrl+.)", on ? "中文" : "英文");
+                if (!lyy_ai_capturing(app) &&
+                    app->ai.core_preedit[0] == '\0' &&
+                    app->candwin.row_count == 0) {
+                    show_hint(app, on ? "中文标点:，。？！"
+                                      : "英文标点:,.?!");
+                }
+            }
+            return; /* press 消费:Ctrl+. 本身不产出 '.' */
         }
     }
 
@@ -673,6 +966,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
     case XCB_XIM_DISCONNECT:
         lyy_log(&app->log, "XIM client 断开");
         lyy_ai_reset(app);
+        lyy_mt_reset(app); /* 菜单触发:客户端断开=硬边界 */
         if (app->xim.focused_ic == ic)
             app->xim.focused_ic = NULL;
         hide_preedit(app);
@@ -683,6 +977,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         break;
     case XCB_XIM_DESTROY_IC:
         lyy_ai_reset(app);
+        lyy_mt_reset(app); /* 菜单触发:IC 销毁=硬边界 */
         if (app->xim.focused_ic == ic)
             app->xim.focused_ic = NULL;
         hide_preedit(app);
@@ -696,11 +991,13 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         app->xim.focused_ic = ic;
         cancel_shift_pending(app);
         lyy_ai_reset(app); /* 新焦点:AI 会话不跨上下文延续 */
+        lyy_mt_reset(app); /* 菜单触发:焦点进入=硬边界 */
         if (lyy_core_ready(app)) {
             IcState *st = ic_state(ic);
             if (st) {
                 st->shift_pending = 0;
                 st->combo_guard = 0;
+                st->punct_key_down = 0;
             }
             if (!resume_menu) {
                 /* 新焦点:进入中文态(trigger on)并复位 core 缓冲(§6 reset) */
@@ -714,9 +1011,15 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         lyy_app_update_mode_ui(app);
         break;
     }
-    case XCB_XIM_UNSET_IC_FOCUS:
+    case XCB_XIM_UNSET_IC_FOCUS: {
         cancel_shift_pending(app);
+        /* 焦点边界清锁存:跨焦点残留的 press 锁存会吃掉下个 IC 的首个
+         * period release(或反过来让下次按下不翻转) */
+        IcState *ust = xcb_im_input_context_get_data(ic);
+        if (ust)
+            ust->punct_key_down = 0;
         lyy_ai_reset(app);
+        lyy_mt_reset(app); /* 菜单触发:焦点离开=硬边界(含假焦,保守复位) */
         if (app->xim.focused_ic == ic) {
             app->xim.focused_ic = NULL;
             /* §15 候选右键菜单的 GTK grab 会让客户端发 UNSET focus
@@ -731,10 +1034,12 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
             hide_preedit(app);
         }
         break;
+    }
     case XCB_XIM_TRIGGER_NOTIFY: {
         xcb_im_trigger_notify_fr_t *nf = frame;
         IcState *st = ic_state(ic);
         lyy_ai_reset(app); /* 中英切换:AI 会话随之放弃 */
+        lyy_mt_reset(app); /* 菜单触发:模式切换=硬边界 */
         if (nf->flag == 0) {
             /* on:off(英文)态收到 Shift 按下 → 中文态 + 组合键防护窗 */
             if (lyy_core_ready(app)) {
@@ -745,6 +1050,7 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
                     st->combo_guard = 1;
                     st->guard_ms = now_ms();
                     st->shift_pending = 0;
+                    st->punct_key_down = 0;
                 }
                 lyy_app_update_mode_ui(app);
                 lyy_log(&app->log, "trigger on(Shift 按下,中文态+防护窗)");
@@ -866,6 +1172,7 @@ void lyy_xim_set_trigger(App *app, int to_chinese)
 {
     xcb_im_input_context_t *ic = app->xim.focused_ic;
     lyy_ai_reset(app); /* 模式切换:AI 会话随之放弃 */
+    lyy_mt_reset(app);     /* 菜单触发:模式切换=硬边界 */
     /* 同步 core 模式(降级时只改协议态) */
     if (app->core.loaded && !app->degraded && app->engine) {
         int want = to_chinese ? 0 : 1;
@@ -889,6 +1196,7 @@ void lyy_xim_set_enabled(App *app, int enabled)
         return;
     app->enabled = enabled;
     lyy_ai_reset(app);
+    lyy_mt_reset(app); /* 菜单触发:启停切换=硬边界 */
     if (enabled) {
         /* 恢复即回中文态(与获得焦点语义一致) */
         lyy_xim_set_trigger(app, 1);

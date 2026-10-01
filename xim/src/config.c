@@ -10,10 +10,11 @@
 #include <unistd.h>
 
 #include "keysym_map.h"
+#include "skin.h"
 
 /* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键。
  * 追加新键放表尾(索引 clamp_key/apply_value/write_value_buf 三处同步)。 */
-#define LYY_CFG_KEYS 28
+#define LYY_CFG_KEYS 33
 typedef enum { LYY_VT_INT, LYY_VT_BOOL, LYY_VT_STR } LyyValType;
 static const struct {
     const char *section;
@@ -66,6 +67,16 @@ static const struct {
       "候选右键·自定义查询菜单名(默认:自定义查询)" },
     { NULL, "custom_query_url", LYY_VT_STR,
       "候选右键·自定义查询网址模板,{q} 为查询词占位符(空=菜单不显示此项)" },
+    { NULL, "menu_trigger_enabled", LYY_VT_BOOL,
+      "菜单触发总开关(上屏中文命中菜单功能名,按确认键进入;默认开)" },
+    { NULL, "menu_trigger_key", LYY_VT_INT,
+      "菜单触发确认键(F1-F12 序号,无修饰单独按;默认 7)" },
+    { NULL, "menu_trigger_disabled", LYY_VT_STR,
+      "菜单触发黑名单(逗号分隔功能 id,逐项精确匹配;默认 fix_ime)" },
+    { NULL, "skin", LYY_VT_STR,
+      "候选窗皮肤 id(system=跟随系统,或商务/可爱等主题;仅自绘候选窗)" },
+    { NULL, "next_word_prediction", LYY_VT_BOOL,
+      "上屏后联想(中文词上屏后提示接下来可输入的词句;纯本地词表,默认关)" },
 };
 
 /* 内置默认功能键表(合同 §14;与 core Config::default 一致) */
@@ -119,6 +130,15 @@ void lyy_config_defaults(LyyConfig *c)
     /* §15 自定义查询:默认空(url 空 = 候选右键菜单不显示此项) */
     c->custom_query_label[0] = '\0';
     c->custom_query_url[0] = '\0';
+    /* 菜单触发:默认开 / F7 / 黑名单仅 fix_ime(系统级修复默认不可文字触发) */
+    c->menu_trigger_enabled = 1;
+    c->menu_trigger_key = 7;
+    snprintf(c->menu_trigger_disabled, sizeof(c->menu_trigger_disabled), "%s",
+             "fix_ime");
+    /* 候选窗皮肤:默认跟随系统(注册表见 skin.c) */
+    snprintf(c->skin, sizeof(c->skin), "%s", "system");
+    /* 上屏后联想:默认关(设置→输入 显式开启) */
+    c->next_word_prediction = 0;
 }
 
 int lyy_config_ai_active(const LyyConfig *c)
@@ -207,6 +227,20 @@ static int key_index_of(const char *line, const char *section,
             p++;
         *value_out = p;
         return i;
+    }
+    /* 旧别名:顶层 cn_punct ≡ chinese_punct(键 3);规范键命中已在
+     * 上方返回,这里只兜别名行(两键书写顺序无关,优先级在加载处判)。 */
+    if (section[0] == '\0' && strncmp(line, "cn_punct", 8) == 0) {
+        const char *p = line + 8;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '=') {
+            p++;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            *value_out = p;
+            return 3;
+        }
     }
     return -1;
 }
@@ -324,6 +358,17 @@ static void clamp_key(LyyConfig *c, int idx)
     case 24:
         /* 布尔无钳制;缺省由 defaults 给 1 */
         break;
+    case 28:
+        /* 布尔无钳制;缺省由 defaults 给 1 */
+        break;
+    case 29:
+        /* 菜单触发确认键:仅 F1-F12 序号,越界回退默认 7 */
+        if (c->menu_trigger_key < 1 || c->menu_trigger_key > 12)
+            c->menu_trigger_key = 7;
+        break;
+    case 32:
+        /* 布尔无钳制;缺省由 defaults 给 1 */
+        break;
     default:
         break;
     }
@@ -381,6 +426,22 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
         break;
     case 27:
         copy_bounded(c->custom_query_url, sizeof(c->custom_query_url), v);
+        break;
+    case 28:
+        c->menu_trigger_enabled = parse_bool(v, c->menu_trigger_enabled);
+        break;
+    case 29: c->menu_trigger_key = atoi(v); break;
+    case 30:
+        copy_bounded(c->menu_trigger_disabled,
+                     sizeof(c->menu_trigger_disabled), v);
+        break;
+    case 31:
+        /* 皮肤 id 经注册表归一:未知/空值落盘即回退 system */
+        copy_bounded(c->skin, sizeof(c->skin), lyy_skin_find(v)->id);
+        break;
+    case 32:
+        c->next_word_prediction =
+            parse_bool(v, c->next_word_prediction);
         break;
     default: break;
     }
@@ -455,6 +516,7 @@ int lyy_config_load(const char *path, LyyConfig *out)
     char section[64] = "";
     int in_qa = 0;      /* 正处于 [[quick_actions]] 块内 */
     int qa_overflow = 0; /* 条目超上限:继续消费但不入库 */
+    int punct_canonical_seen = 0; /* 规范键 chinese_punct 已出现 */
     while (fgets(line, sizeof(line), fp)) {
         char tmp[2048];
         snprintf(tmp, sizeof(tmp), "%s", line);
@@ -501,6 +563,16 @@ int lyy_config_load(const char *path, LyyConfig *out)
         int idx = key_index_of(p, section, &value);
         if (idx < 0)
             continue;
+        /* cn_punct / chinese_punct 同归键 3:规范键无论书写先后都优先
+         * (设置窗保存值优先)——别名行在规范键已出现后忽略。 */
+        if (idx == 3) {
+            if (!strncmp(p, "cn_punct", 8)) {
+                if (punct_canonical_seen)
+                    continue;
+            } else {
+                punct_canonical_seen = 1;
+            }
+        }
         char vbuf[2048], sbuf[256];
         split_value(value, vbuf, sizeof(vbuf), sbuf, sizeof(sbuf));
         /* 记录布尔书写风格(1/0 或 true/false),写回时保持用户习惯 */
@@ -534,29 +606,83 @@ int lyy_config_resolve_hotkey_conflicts(LyyConfig *c, char *note, size_t cap)
 {
     if (note && cap)
         note[0] = '\0';
+    /* 保留键 Ctrl+.(中文态中英文标点切换)先让位:造词/截屏热键配成
+     * 它时按 +alt → +alt+shift 逐级让位,候选避开另一侧已占组合;
+     * 先于两两互斥判定执行(让位结果仍可能互撞,交下方处理)。 */
+    int rc = 0;
+    {
+        char *fields[2] = { c->coin_hotkey, c->shot_hotkey };
+        const char *labels[2] = { "造词", "截屏" };
+        for (int i = 0; i < 2; i++) {
+            char cur[128], other[128];
+            const char *next = NULL;
+            if (!lyy_hotkey_canon(fields[i], cur, sizeof(cur)) ||
+                strcmp(cur, "ctrl+period") != 0)
+                continue;
+            /* 规范串必为 ctrl+period:让位档固定 +alt → +alt+shift,
+             * 跳过已被另一侧字段占用的候选(保留键自身不可选)。 */
+            int have_other =
+                lyy_hotkey_canon(fields[1 - i], other, sizeof(other));
+            static const char *const cands[] = {
+                "ctrl+alt+period", "ctrl+alt+shift+period"
+            };
+            for (size_t k = 0; k < sizeof(cands) / sizeof(cands[0]); k++) {
+                if (have_other && strcmp(other, cands[k]) == 0)
+                    continue;
+                next = cands[k];
+                break;
+            }
+            if (next) {
+                if (note && cap) {
+                    size_t off = strlen(note);
+                    snprintf(note + off, cap - off,
+                             "%s%s快捷键 %s 已保留给中英文标点切换,已自动改为 %s"
+                             "(可在设置中修改)",
+                             off ? ";" : "", labels[i], cur, next);
+                }
+                snprintf(fields[i], LYY_CFG_STR_BASE, "%s", next);
+                if (rc == 0)
+                    rc = 1;
+            } else {
+                if (note && cap) {
+                    size_t off = strlen(note);
+                    snprintf(note + off, cap - off,
+                             "%s%s快捷键 %s 已保留给中英文标点切换且无法自动升级,"
+                             "请修改其中一项",
+                             off ? ";" : "", labels[i], cur);
+                }
+                rc = -1;
+            }
+        }
+    }
     char coin[128], shot[128];
     /* 任一写法非法:宿主按各自合同回退默认并日志,不参与冲突 */
     if (!lyy_hotkey_canon(c->coin_hotkey, coin, sizeof(coin)) ||
         !lyy_hotkey_canon(c->shot_hotkey, shot, sizeof(shot)))
-        return 0;
+        return rc;
     if (strcmp(coin, shot) != 0)
-        return 0;
+        return rc;
     /* 占用同一组合:截屏热键逐级让位(工具键让位打字键,合同 §13) */
     char next[128];
     if (lyy_hotkey_escalate(c->shot_hotkey, c->coin_hotkey, next,
                             sizeof(next))) {
         snprintf(c->shot_hotkey, sizeof(c->shot_hotkey), "%s", next);
-        if (note && cap)
-            snprintf(note, cap,
-                     "截屏快捷键 %s 与造词快捷键冲突,已自动改为 %s"
+        if (note && cap) {
+            size_t off = strlen(note);
+            snprintf(note + off, cap - off,
+                     "%s截屏快捷键 %s 与造词快捷键冲突,已自动改为 %s"
                      "(可在设置中修改)",
-                     shot, next);
+                     off ? ";" : "", shot, next);
+        }
         return 1;
     }
-    if (note && cap)
-        snprintf(note, cap,
-                 "截屏快捷键 %s 与造词快捷键冲突且无法自动升级,请修改其中一项",
-                 shot);
+    if (note && cap) {
+        size_t off = strlen(note);
+        snprintf(note + off, cap - off,
+                 "%s截屏快捷键 %s 与造词快捷键冲突且无法自动升级,"
+                 "请修改其中一项",
+                 off ? ";" : "", shot);
+    }
     return -1;
 }
 
@@ -642,6 +768,11 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     case 25: val = c->commit_first_at_four; break;
     case 26: sval = c->custom_query_label; break;
     case 27: sval = c->custom_query_url; break;
+    case 28: val = c->menu_trigger_enabled; break;
+    case 29: val = c->menu_trigger_key; break;
+    case 30: sval = c->menu_trigger_disabled; break;
+    case 31: sval = lyy_skin_find(c->skin)->id; break;
+    case 32: val = c->next_word_prediction; break;
     default: return 0;
     }
     if (g_keys[idx].type == LYY_VT_STR) {
@@ -801,13 +932,17 @@ int lyy_config_save(const char *path, const LyyConfig *c)
                 const char *value = NULL;
                 int idx = key_index_of(p, section, &value);
                 if (idx >= 0) {
-                    seen[idx] = 1;
-                    if (write_value_buf(&out, idx, c) != 0)
-                        goto out;
-                    if (g_keys[idx].section &&
-                        !strcmp(g_keys[idx].section, "ai"))
-                        ai_ins_off = out.len;
-                    was_ai = 1;
+                    /* cn_punct/chinese_punct 同归键 3:重复命中(别名行
+                     * 或手写重复行)只消费不再写——保存统一为规范键一行。 */
+                    if (!(idx == 3 && seen[3])) {
+                        seen[idx] = 1;
+                        if (write_value_buf(&out, idx, c) != 0)
+                            goto out;
+                        if (g_keys[idx].section &&
+                            !strcmp(g_keys[idx].section, "ai"))
+                            ai_ins_off = out.len;
+                        was_ai = 1;
+                    }
                     handled = 1;
                 }
             }
@@ -909,6 +1044,108 @@ out:
     free(block.p);
     free(final.p);
     return rc;
+}
+
+/* ---- 逗号分隔 id 列表工具(菜单触发黑名单;逐项精确匹配,非子串) ---- */
+
+/* 取 csv 中第 idx 个 token(trim 后非空项才计数):命中把**未截断**的完整
+ * token 拷入 out 返回 1;无第 idx 项返回 0;token 超出 out 容量返回 -1
+ * (绝不静默截断——未知 id 前向兼容依赖逐字节原样往返) */
+static int csv_token_at(const char *csv, int idx, char *out, size_t cap)
+{
+    int seen = 0;
+    const char *p = csv ? csv : "";
+    while (*p) {
+        const char *end = strchr(p, ',');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        /* 原串上就位 trim(不经固定中转缓冲,长 token 不被裁短) */
+        const char *ts = p, *te = p + n;
+        while (ts < te && isspace((unsigned char)*ts))
+            ts++;
+        while (te > ts && isspace((unsigned char)te[-1]))
+            te--;
+        if (ts < te) {
+            if (seen == idx) {
+                size_t tlen = (size_t)(te - ts);
+                if (tlen + 1 > cap)
+                    return -1;
+                memcpy(out, ts, tlen);
+                out[tlen] = '\0';
+                return 1;
+            }
+            seen++;
+        }
+        p = end ? end + 1 : p + n;
+    }
+    return 0;
+}
+
+int lyy_config_csv_contains(const char *csv, const char *token)
+{
+    if (!token || !*token)
+        return 0;
+    char tok[LYY_CFG_STR_CMD];
+    for (int i = 0;; i++) {
+        int r = csv_token_at(csv, i, tok, sizeof(tok));
+        if (r == 0)
+            break;
+        if (r < 0)
+            continue; /* 超长存储 token 不可能等于较短的 id,跳过 */
+        if (!strcmp(tok, token))
+            return 1;
+    }
+    return 0;
+}
+
+int lyy_config_merge_menu_disabled(char *out, size_t cap, const char *base,
+                                   const char *known, const char *checked)
+{
+    if (!out || cap == 0)
+        return -1;
+    out[0] = '\0';
+    /* 勾选了「禁止文字触发」的目录 id(checked 顺序 = 目录顺序) */
+    char tok[LYY_CFG_STR_CMD];
+    for (int i = 0;; i++) {
+        int r = csv_token_at(checked, i, tok, sizeof(tok));
+        if (r == 0)
+            break;
+        if (r < 0)
+            return -1; /* checked 由 UI 生成,超长 = 异常 */
+        if (lyy_config_csv_contains(out, tok))
+            continue;
+        size_t need = strlen(out) + strlen(tok) + (out[0] ? 1 : 0);
+        if (need + 1 > cap) {
+            out[0] = '\0';
+            return -1;
+        }
+        if (out[0])
+            strcat(out, ",");
+        strcat(out, tok);
+    }
+    /* base 中不在目录内的 token:未知 id 前向兼容,原样保留在尾部;
+     * 保留不下(超字段容量)整体判失败,由调用方中止保存而不是静默丢串 */
+    for (int i = 0;; i++) {
+        int r = csv_token_at(base, i, tok, sizeof(tok));
+        if (r == 0)
+            break;
+        if (r < 0) {
+            out[0] = '\0';
+            return -1;
+        }
+        if (lyy_config_csv_contains(known, tok))
+            continue; /* 目录项:去留由勾选态决定 */
+        if (lyy_config_csv_contains(out, tok))
+            continue;
+        size_t need = strlen(out) + strlen(tok) + (out[0] ? 1 : 0);
+        if (need + 1 > cap) {
+            out[0] = '\0';
+            return -1;
+        }
+        if (out[0])
+            strcat(out, ",");
+        strcat(out, tok);
+    }
+    return 0;
 }
 
 int lyy_config_apply_autostart(int enable)

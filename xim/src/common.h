@@ -54,6 +54,18 @@ void lyy_core_mark_degraded(App *app, const char *why);
 /* 请求显示设置对话框(可从任意 GLib 回调/信号安全路径调用) */
 void lyy_request_show_settings(App *app);
 
+/* 请求显示设置对话框并切到指定页(菜单触发「常规/输入/…」子项用;
+ * page<0 与 lyy_request_show_settings 同义) */
+void lyy_request_show_settings_page(App *app, int page);
+
+/* 菜单触发器创建/重配(可选符号组;mt_ok=0 时为空操作)。
+ * 引擎就绪后与设置保存后调用;configure 内部即复位尾串与待执行。 */
+void lyy_menu_trigger_apply(App *app);
+
+/* 菜单触发硬边界复位(尾串+待执行清空,提示条撤下);实现在 xim_server.c,
+ * 声明在此供 ai_capture.c 的会话边界调用 */
+void lyy_mt_reset(App *app);
+
 /* 安装 SIGUSR1(唤起/设置)/SIGTERM/SIGINT(优雅退出)处理器 */
 void lyy_install_signal_handlers(void);
 
@@ -90,6 +102,13 @@ struct _App {
     int settings_requested;        /* SIGUSR1/--settings 唤起 → 主循环弹设置窗 */
     int mainwin_requested;         /* SIGUSR2/--mainwin 唤起 → 主循环弹主窗口 */
     int quit_requested;            /* SIGTERM/SIGINT → 优雅退出 */
+    /* 菜单触发(2026-09-30,core 可选符号组):上屏中文命中菜单功能名 →
+     * 候选条提示「按 Fn 进入该功能」,无修饰 Fn 执行一次。对象与引擎解耦,
+     * 由本进程持有;mt_ok=0(旧库)时 menu_trigger 为 NULL,特性整体禁用 */
+    void *menu_trigger;            /* lyyime_menu_trigger_new 句柄;NULL=不可用 */
+    int mt_hint_shown;             /* 菜单触发提示正占据候选条预编辑行 */
+    int settings_page;             /* --settings-page N 请求的设置页(-1=未指定) */
+    char settings_page_req[PATH_MAX]; /* 唤起已有实例时的页码请求文件 */
 };
 
 #endif /* LYY_COMMON_H_ */

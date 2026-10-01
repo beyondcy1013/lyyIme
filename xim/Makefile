@@ -46,16 +46,16 @@ VENDOR_LIB  := $(VENDOR_DIR)/libxcb-imdkit.a
 SRC_DIR := $(ROOT_DIR)/src
 APP_SRCS := main.c common.c log.c config.c core_ffi.c effects_json.c \
             keysym_map.c xim_server.c ai_capture.c candidate_window.c \
-            tray.c mainwin.c settings.c tools.c shot.c
+            skin.c tray.c mainwin.c settings.c tools.c shot.c
 APP_OBJS := $(addprefix $(BUILD_DIR)/app/,$(APP_SRCS:.c=.o))
 APP_HDRS := $(wildcard $(SRC_DIR)/*.h)
 
-.PHONY: all spike test e2e install uninstall clean help
+.PHONY: all spike test skin-test e2e install uninstall clean help
 
 all: $(VENDOR_LIB) $(BIN_DIR)/lyyime-xim spike
 
 help:
-	@echo "targets: all | libxcb-imdkit.a | lyyime-xim | spike | test | e2e | install | uninstall | clean"
+	@echo "targets: all | libxcb-imdkit.a | lyyime-xim | spike | test | skin-test | e2e | install | uninstall | clean"
 
 # ---- vendor:xcb-imdkit 静态库 ----
 # xcbimdkit_export.h 若缺失则按 CMake GenerateExportHeader 的默认形态补一个
@@ -132,12 +132,23 @@ $(BUILD_DIR)/tests/e2e_client: $(ROOT_DIR)/tests/e2e_client.c
 	@mkdir -p $(BUILD_DIR)/tests
 	$(CC) $(CFLAGS) -o $@ $< $(PKG_GTK)
 
-$(BUILD_DIR)/tests/unit_config: $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_config.c | $(BUILD_DIR)/tests
-	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_GTK) $(PKG_COMMON) -o $@ $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_config.c
+# config.c 经 skin.c 注册表归一 skin 键:单测同步链接
+$(BUILD_DIR)/tests/unit_config: $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(SRC_DIR)/skin.c $(ROOT_DIR)/tests/unit_config.c | $(BUILD_DIR)/tests
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_GTK) $(PKG_COMMON) -o $@ $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(SRC_DIR)/skin.c $(ROOT_DIR)/tests/unit_config.c $(PKG_GTK)
 
 # 造词热键解析(合同 §12;headless,仅链接 keysym_map.c)
 $(BUILD_DIR)/tests/unit_hotkey: $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c | $(BUILD_DIR)/tests
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_COMMON) -o $@ $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c $(PKG_XIM)
+
+# 皮肤单测(需要 X 显示:真 GTK 上下文核验解析色值;经 xvfb-run 自动配显示,
+# 绝不触碰已有桌面/显示。不在 headless `test` 目标里跑,由 skin-test 单独跑)
+$(BUILD_DIR)/tests/unit_skin: $(SRC_DIR)/skin.c $(SRC_DIR)/candidate_window.c $(ROOT_DIR)/tests/unit_skin.c | $(BUILD_DIR)/tests
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_COMMON) $(PKG_GTK) -o $@ \
+		$(SRC_DIR)/skin.c $(SRC_DIR)/candidate_window.c \
+		$(ROOT_DIR)/tests/unit_skin.c $(PKG_XIM) $(PKG_GTK)
+
+skin-test: $(BUILD_DIR)/tests/unit_skin
+	xvfb-run -a $(BUILD_DIR)/tests/unit_skin
 
 test: $(BUILD_DIR)/tests/unit_effects_json $(BUILD_DIR)/tests/unit_config $(BUILD_DIR)/tests/unit_hotkey \
       $(BUILD_DIR)/tests/liblyyime_core_stub.so $(BUILD_DIR)/tests/e2e_client

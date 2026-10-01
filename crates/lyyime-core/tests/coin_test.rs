@@ -8,11 +8,15 @@ use lyyime_core::{Config, Effect, Engine, LKey};
 use std::path::Path;
 
 /// 依次上屏 一串 wubi 编码(每码后跟空格顶屏),返回全部效果。
+/// 四码自动上屏后缓冲已空——此时空格会选中"上屏后联想"尾巴而非顶屏,
+/// 故只在仍有组合缓冲时补空格(联想行不影响 recent 造词历史)。
 fn type_words(eng: &mut Engine, words: &[&str]) -> Vec<Effect> {
     let mut all = Vec::new();
     for w in words {
         all.extend(type_str(eng, w));
-        all.extend(eng.process_key(LKey::Space));
+        if !eng.buffer().is_empty() {
+            all.extend(eng.process_key(LKey::Space));
+        }
     }
     all
 }

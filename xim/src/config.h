@@ -50,6 +50,7 @@ typedef struct {
     int commit_first_at_four;/* 恰好四码且首选是五笔命中、候选条只此一条时,免空格直接上屏首选(多候选待选/顶屏) */
     int commit_unique_four;  /* 恰好四码且候选唯一时,免空格直接上屏(first_at_four 开时被覆盖) */
     int phrase_hint;         /* 词组效率提示(上屏后提示更省键的词组与编码) */
+    int next_word_prediction; /* 上屏后联想(中文词上屏后提示接下来可输入的词句;默认关) */
     int exact_char_freq_rank; /* 精确单字按词频排位(默认开;关=恒居首位旧行为) */
     /* 英文上屏去向(§6,与 core Config::enter_english/shift_english 同名同值):
      * 回车/Shift 上屏英文原串后 "temp"=临时(仅上屏,保持中文模式)、
@@ -88,6 +89,16 @@ typedef struct {
      * url 为空 = 菜单不显示此项;label 为空 = 显示「自定义查询」 */
     char custom_query_label[LYY_CFG_STR_LABEL];
     char custom_query_url[LYY_CFG_STR_CMD];
+    /* 菜单触发(上屏文字匹配菜单功能名,按确认键执行;core 可选符号组
+     * lyyime_menu_trigger_*;与 §14 快速功能键不同源——本特性只匹配真实
+     * 上屏的中文文本,不读字母缓冲;确认键与禁用项即时生效) */
+    int menu_trigger_enabled;   /* 总开关(默认开) */
+    int menu_trigger_key;       /* 确认键 F 序号 1..12(默认 7=F7) */
+    /* 逗号分隔黑名单(稳定功能 id;逐项精确匹配,未知 id 原样保留) */
+    char menu_trigger_disabled[LYY_CFG_STR_CMD];
+    /* 候选窗皮肤(顶层键 skin;注册表见 src/skin.c,id 未知/空回退
+     * "system"=跟随系统;仅 Mode B 自绘候选窗,不影响 IBus 系统面板) */
+    char skin[32];
 } LyyConfig;
 
 void lyy_config_defaults(LyyConfig *c);
@@ -114,5 +125,18 @@ const char *lyy_en_mode_canon(const char *v, const char *def);
 
 /* 按配置落/删开机自启项 ~/.config/autostart/lyyime-xim.desktop */
 int lyy_config_apply_autostart(int enable);
+
+/* 逗号分隔 id 列表的逐项精确匹配(trim 空白后整段相等;非子串匹配)。
+ * 用于菜单触发黑名单:menu_trigger_disabled 与目录项稳定 id。 */
+int lyy_config_csv_contains(const char *csv, const char *token);
+
+/* 菜单触发黑名单合并(设置窗「菜单触发」页保存用):
+ * - checked:当前勾选了「禁止文字触发」的目录 id(逗号分隔,目录顺序);
+ * - base:配置文件现有 menu_trigger_disabled 原串;
+ * - known:目录全部稳定 id(逗号分隔);
+ * 结果 = 勾选项 + base 中不在 known 内的 token(未知 id 前向兼容,原序保留)。
+ * 返回 0 成功;-1 缓冲不足(out 置空串)。 */
+int lyy_config_merge_menu_disabled(char *out, size_t cap, const char *base,
+                                   const char *known, const char *checked);
 
 #endif /* LYY_CONFIG_H_ */

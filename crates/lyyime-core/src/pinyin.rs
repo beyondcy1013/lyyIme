@@ -85,6 +85,23 @@ pub(crate) fn prefix_ends(buf: &str, syllables: &HashSet<String>) -> Vec<usize> 
     ends
 }
 
+/// 缓冲内容在拼音语法上是否"还能继续":词库缺词(无候选)不等于非法。
+/// buf 本身是合法音节前缀,或某个可达切点之后剩余部分仍是音节前缀,
+/// 都算可续;否则属死码,交给既有死码保护直通。
+/// (判定相对当前音节表:测试夹具里没有 q 起头的音节,`jieq` 的 q
+/// 在该夹具下是不可续后缀;真实词库有 qi*/qia* 等,`jieq` 仍可续。)
+pub(crate) fn can_continue(
+    buf: &str,
+    syllables: &HashSet<String>,
+    prefixes: &HashSet<String>,
+) -> bool {
+    !buf.is_empty()
+        && (prefixes.contains(buf)
+            || prefix_ends(buf, syllables)
+                .into_iter()
+                .any(|k| k == buf.len() || prefixes.contains(&buf[k..])))
+}
+
 /// 按切分的音节长度序列,取回各音节字符串(空格连接形如 `ni hao`)。
 pub(crate) fn seg_joined(buf: &str, lens: &[usize]) -> String {
     let mut parts = Vec::with_capacity(lens.len());
@@ -97,6 +114,9 @@ pub(crate) fn seg_joined(buf: &str, lens: &[usize]) -> String {
 }
 
 /// 按切分的音节长度序列,取最后一个音节(切片)。
+/// 引擎已不再需要"末音节"视图(多音节末字候选改为前缀消费路径),
+/// 仅单元测试保留校验。
+#[cfg(test)]
 pub(crate) fn seg_last<'a>(buf: &'a str, lens: &[usize]) -> &'a str {
     let last = lens.last().copied().unwrap_or(0);
     let start = buf.len() - last;

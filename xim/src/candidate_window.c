@@ -4,89 +4,102 @@
 #include <string.h>
 #include <xcb/xproto.h>
 
-/* 检测 GTK 当前有效主题是否为深色。GTK 深色主题的前景色是亮色,因此用
- * 前景色亮度兜底;gtk-application-prefer-dark-theme 只是建议值,部分 XFCE
- * 主题/设置不导出或不变更,不能只依赖它。 */
-static gboolean theme_is_dark(void)
-{
-    GtkSettings *settings = gtk_settings_get_default();
-    gboolean preferred = FALSE;
-    if (settings)
-        g_object_get(settings,
-                     "gtk-application-prefer-dark-theme", &preferred,
-                     NULL);
+#include "skin.h"
 
-    GtkWidget *probe = gtk_window_new(GTK_WINDOW_POPUP);
-    GtkStyleContext *ctx = gtk_widget_get_style_context(probe);
-    GdkRGBA color;
-    gtk_style_context_get_color(ctx, GTK_STATE_FLAG_NORMAL, &color);
-    gtk_widget_destroy(probe);
-    double luminance = 0.2126 * color.red + 0.7152 * color.green +
-                       0.0722 * color.blue;
-    return preferred || luminance > 0.55;
+/* candidate.css 缺失/损坏时的内置布局兜底(颜色归皮肤层,这里只保骨架) */
+static const char LYY_LAYOUT_FALLBACK[] =
+    ".lyy-outer { background: transparent; }\n"
+    ".lyy-frame { border: 1px solid; border-radius: 8px; padding: 6px 10px; }\n"
+    ".lyy-header { margin-bottom: 2px; }\n"
+    ".lyy-row { padding: 1px 4px; border-radius: 4px; }\n"
+    ".lyy-first .lyy-num,.lyy-first .lyy-word,.lyy-first .lyy-comment {"
+    " font-weight: bold; }\n";
+
+/* gtk_css_provider_load_from_data 恒返回 TRUE;解析错误经 parsing-error
+ * 信号上报,先装临时 provider 计数,保证坏 CSS 不污染生效样式 */
+static void on_css_error(GtkCssProvider *p, GtkCssSection *section,
+                         const GError *error, gpointer user_data)
+{
+    (void)p;
+    (void)section;
+    int *n = user_data;
+    (*n)++;
+    g_warning("lyyime 候选窗 CSS 解析错误:%s",
+              error ? error->message : "(未知)");
 }
 
-/* CSS 提供者:自适应系统明暗主题;文件样式仍可覆盖主题细节 */
+static int css_error_count(const char *css)
+{
+    GtkCssProvider *probe = gtk_css_provider_new();
+    int errs = 0;
+    g_signal_connect(probe, "parsing-error", G_CALLBACK(on_css_error), &errs);
+    gtk_css_provider_load_from_data(probe, css, -1, NULL);
+    g_object_unref(probe);
+    return errs;
+}
+
+/* 样式装配:candidate.css(布局基准,可用户自定义)+ 皮肤层 CSS
+ * (颜色/圆角/字号,skin.c 生成,排在其后同优先级覆盖)。
+ * provider 复用同一对象、只挂候选窗子树(lyy_skin_apply_tree,APPLICATION
+ * 优先级),不走 screen 级注入——设置窗皮肤预览与本窗互不透染。
+ * 自定义布局损坏时回退内置骨架;皮肤 CSS 为程序生成不参与降级;
+ * 仍失败则保留上一份有效 CSS(不空窗)。 */
 static void apply_css(CandidateWindow *cw)
 {
-    if (!cw->css_provider)
-        cw->css_provider = gtk_css_provider_new();
-    GtkCssProvider *provider = cw->css_provider;
-    const char *theme = theme_is_dark()
-        ? ".lyy-frame { background: rgba(32,32,32,0.98);"
-          " border-color: #4d4d4d; }\n"
-          ".lyy-preedit,.lyy-word { color: #f2f2f2; }\n"
-          ".lyy-page,.lyy-num,.lyy-comment { color: #a8a8a8; }\n"
-        : ".lyy-frame { background: rgba(250,250,250,0.98);"
-          " border-color: #b0b0b0; }\n"
-          ".lyy-preedit,.lyy-word { color: #242424; }\n"
-          ".lyy-page,.lyy-num,.lyy-comment { color: #707070; }\n";
+    cw->last_dark = lyy_skin_system_is_dark();
+    const LyySkin *skin = lyy_skin_find(cw->skin);
 
-    gchar *builtin =
-        g_strdup_printf(".lyy-outer { background: rgba(0,0,0,0); }\n"
-                        ".lyy-frame { border: 1px solid; border-radius: 8px;"
-                        " padding: 6px 10px;"
-                        " box-shadow: 0 4px 16px rgba(0,0,0,0.35); }\n"
-                        ".lyy-header { margin-bottom: 2px; }\n"
-                        ".lyy-row { padding: 1px 4px; border-radius: 4px; }\n"
-                        ".lyy-first { background: #3584e4; }\n"
-                        ".lyy-first .lyy-num,.lyy-first .lyy-word,"
-                        ".lyy-first .lyy-comment { color: #ffffff;"
-                        " font-weight: bold; }\n"
-                        "%s", theme);
-
-    gchar *css = NULL;
-    gchar *file_css = NULL;
+    gchar *layout = NULL;
     if (cw->css_dir[0]) {
         char path[1200];
         snprintf(path, sizeof(path), "%s/candidate.css", cw->css_dir);
         gsize len = 0;
-        if (g_file_get_contents(path, &file_css, &len, NULL) && file_css)
-            css = g_strdup(file_css);
+        if (!g_file_get_contents(path, &layout, &len, NULL))
+            layout = NULL;
     }
-    if (!css)
-        css = g_steal_pointer(&builtin);
 
-    gchar *with_font = g_strdup_printf(
-        "%s\n.lyy-preedit,.lyy-word { font-size: %dpx; }\n"
-        ".lyy-num,.lyy-comment,.lyy-page { font-size: %dpx; }\n",
-        css, cw->font_size, cw->font_size - 2);
-    gtk_css_provider_load_from_data(provider, with_font, -1, NULL);
-    gtk_style_context_remove_provider_for_screen(
-        gdk_screen_get_default(), GTK_STYLE_PROVIDER(provider));
-    gtk_style_context_add_provider_for_screen(
-        gdk_screen_get_default(), GTK_STYLE_PROVIDER(provider),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_free(with_font);
+    gchar *skin_css = lyy_skin_css(skin->id, cw->last_dark, cw->font_size);
+    gchar *css = g_strdup_printf("%s\n%s\n",
+                                 layout ? layout : LYY_LAYOUT_FALLBACK,
+                                 skin_css);
+    int errs = css_error_count(css);
+    if (errs && layout) {
+        g_warning("lyyime 候选窗:%s/candidate.css 解析失败(%d 处),"
+                  "回退内置布局", cw->css_dir, errs);
+        g_free(css);
+        css = g_strdup_printf("%s\n%s\n", LYY_LAYOUT_FALLBACK, skin_css);
+        errs = css_error_count(css);
+    }
+    if (!errs) {
+        if (!cw->css_provider) {
+            cw->css_provider = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(cw->css_provider, css, -1,
+                                            NULL);
+            lyy_skin_apply_tree(cw->win, cw->css_provider);
+        } else {
+            gtk_css_provider_load_from_data(cw->css_provider, css, -1,
+                                            NULL);
+        }
+    } else {
+        g_warning("lyyime 候选窗:皮肤 CSS 异常(%d 处),保留上一份有效样式",
+                  errs);
+    }
     g_free(css);
-    g_free(file_css);
-    g_free(builtin);
+    g_free(skin_css);
+    g_free(layout);
 }
 
-/* 主题切换在 X11/GTK3 没有统一信号;低频复查让候选窗在运行中跟随系统切换 */
+/* 主题切换在 X11/GTK3 没有统一信号;低频复查让「跟随系统」皮肤在运行中
+ * 跟随明暗切换。显式皮肤不做定时重解析(固定调色板,与系统明暗无关);
+ * system 仅在明暗实际变化时才重建 CSS,避免无谓解析。 */
 static gboolean on_theme_timer(gpointer user_data)
 {
-    apply_css((CandidateWindow *)user_data);
+    CandidateWindow *cw = user_data;
+    if (strcmp(cw->skin, "system") != 0)
+        return G_SOURCE_CONTINUE;
+    gboolean dark = lyy_skin_system_is_dark();
+    if (dark != cw->last_dark)
+        apply_css(cw);
     return G_SOURCE_CONTINUE;
 }
 
@@ -296,7 +309,8 @@ static gboolean on_win_pressed(GtkWidget *win, GdkEventButton *ev,
 
 static GtkWidget *make_row(CandidateWindow *cw, int i)
 {
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    /* 单元格间距 6px:序号/候选词/注释不粘连,与皮肤预览一致 */
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_style_context_add_class(gtk_widget_get_style_context(row), "lyy-row");
     cw->num[i] = gtk_label_new(NULL);
     gtk_style_context_add_class(gtk_widget_get_style_context(cw->num[i]),
@@ -382,6 +396,8 @@ void lyy_candwin_init(CandidateWindow *cw, xcb_connection_t *conn,
     g_signal_connect(cw->win, "leave-notify-event",
                      G_CALLBACK(on_win_leave), cw);
 
+    /* 皮肤默认「跟随系统」;宿主(main.c)随后按 config.skin 调 set_skin */
+    snprintf(cw->skin, sizeof(cw->skin), "%s", "system");
     apply_css(cw);
     cw->theme_timer = g_timeout_add_seconds(5, on_theme_timer, cw);
 }
@@ -409,6 +425,15 @@ void lyy_candwin_set_font_size(CandidateWindow *cw, int font_size)
     if (font_size == cw->font_size)
         return;
     cw->font_size = font_size;
+    apply_css(cw);
+}
+
+void lyy_candwin_set_skin(CandidateWindow *cw, const char *id)
+{
+    const LyySkin *s = lyy_skin_find(id); /* 注册表归一,未知/空 → system */
+    if (!strcmp(cw->skin, s->id))
+        return;
+    snprintf(cw->skin, sizeof(cw->skin), "%s", s->id);
     apply_css(cw);
 }
 
@@ -463,6 +488,10 @@ void lyy_candwin_commit_layout(CandidateWindow *cw)
     }
     if (!gtk_widget_get_visible(cw->win)) {
         gtk_widget_show_all(cw->win);
+        /* show_all 递归复活 begin_rows 藏起的空行(rows[row_count..MAX)
+         * 会带陈旧文本残影:立即按 row_count 重新隐藏 */
+        for (int i = cw->row_count; i < LYY_MAX_ROWS; i++)
+            gtk_widget_hide(cw->rows[i]);
         on_pos_timer(cw); /* 先定位一次再等轮询 */
         cw->pos_timer = g_timeout_add(80, on_pos_timer, cw);
         if (!cw->theme_timer)

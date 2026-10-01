@@ -112,7 +112,8 @@
                 <child>
                   <object class="GtkCheckButton" id="chk_chinese_punct">
                     <property name="visible">True</property>
-                    <property name="label">中文标点(中文态输出 ,。?! 等)</property>
+                    <property name="label">默认使用中文标点(，。？！;Ctrl+. 临时切换)</property>
+                    <property name="tooltip-text">勾选后中文态标点按键输出 ，。？！ 等中文形式;不勾选则原样输出 ASCII。中文态按 Ctrl+. 可在中英文标点间临时切换(只影响本次运行,不改写此处默认值);英文态不受影响。</property>
                     <property name="halign">start</property>
                   </object>
                   <packing>
@@ -295,6 +296,19 @@
                   </packing>
                 </child>
                 <child>
+                  <object class="GtkCheckButton" id="chk_next_word_prediction">
+                    <property name="visible">True</property>
+                    <property name="label">输入后联想(上屏后提示接下来可输入的词句)</property>
+                    <property name="tooltip-text">默认关闭；开启后在中文上屏时显示接续候选。</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">6</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
+                <child>
                   <object class="GtkCheckButton" id="chk_exact_freq_rank">
                     <property name="visible">True</property>
                     <property name="label">四码/简码单字按词频排位(低频字让位高频词组,常用字仍在最前)</property>
@@ -302,7 +316,7 @@
                   </object>
                   <packing>
                     <property name="left-attach">0</property>
-                    <property name="top-attach">6</property>
+                    <property name="top-attach">7</property>
                     <property name="width">2</property>
                   </packing>
                 </child>
@@ -314,7 +328,7 @@
                   </object>
                   <packing>
                     <property name="left-attach">0</property>
-                    <property name="top-attach">7</property>
+                    <property name="top-attach">8</property>
                   </packing>
                 </child>
                 <child>
@@ -328,7 +342,7 @@
                   </object>
                   <packing>
                     <property name="left-attach">1</property>
-                    <property name="top-attach">7</property>
+                    <property name="top-attach">8</property>
                   </packing>
                 </child>
                 <child>
@@ -339,7 +353,7 @@
                   </object>
                   <packing>
                     <property name="left-attach">0</property>
-                    <property name="top-attach">8</property>
+                    <property name="top-attach">9</property>
                   </packing>
                 </child>
                 <child>
@@ -353,7 +367,7 @@
                   </object>
                   <packing>
                     <property name="left-attach">1</property>
-                    <property name="top-attach">8</property>
+                    <property name="top-attach">9</property>
                   </packing>
                 </child>
               </object>

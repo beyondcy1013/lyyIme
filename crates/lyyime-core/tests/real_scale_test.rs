@@ -50,15 +50,19 @@ fn 真尺度_nihao_首选你好() {
     let mut eng = engine_real();
     type_str(&mut eng, "nihao");
     let page = eng.flush_page();
-    assert_eq!(page[0].text, "你好", "词组全拼必须排在末音节单字之前");
+    assert_eq!(page[0].text, "你好", "词组全拼必须排在前缀候选之前");
     assert!(
         page[0].score >= 50.0 && page[0].score < 60.0,
         "应处拼音完整层"
     );
+    // 多音节缓冲不再出"只对应末音节"的孤立单字;前缀候选「你」
+    // (consumed=2)承担"先上屏前半"的需求。
     assert!(
-        page_texts(&eng).contains(&"好".to_string()),
-        "末音节单字仍在列"
+        !page.iter().any(|c| c.text == "好"),
+        "nihao 不得出尾音节孤字 好"
     );
+    let ni = page.iter().find(|c| c.text == "你").expect("前缀候选 你 应在列");
+    assert_eq!(ni.consumed, 2);
 }
 
 #[test]

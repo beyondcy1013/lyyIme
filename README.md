@@ -177,6 +177,16 @@ lyyime-doctor fix --all         # 一键修复(环境变量/总线/引擎注册/
 | 候选菜单真核心 E2E(隔离 Xvfb) | `tests/e2e/candidate_menu_e2e.sh --keep` |
 | 真机使用 | openEuler 24.03 + XFCE + X11 日常使用中 |
 
+## 社区与致谢
+
+[LINUX DO](https://linux.do/) 是一个技术交流社区。lyyIme 认可社区重视分享与交流的理念，欢迎通过社区交流 Linux 中文输入的使用经验，也欢迎在本项目 GitHub Issues 中反馈问题。
+
+## 开源范围与外部依赖
+
+本仓库公开 lyyIme 的输入核心、IBus 引擎、独立 XIM 前端、悬浮窗及配套工具的源码、构建脚本与测试。项目自有代码采用 [MIT 许可证](LICENSE)；第三方源码与词库遵循各自的许可证，不因本项目使用 MIT 而改变，见 [XIM 第三方源码说明](xim/vendor/README.md)。
+
+运行时词库和下载缓存不随 Git 仓库分发，可通过公开的词库工具转换、下载和生成；详见“快速开始”和 [词库工具说明](crates/lyyime-dicttool/README.md)。普通输入使用本地引擎，不需要 AI 服务；可选 AI 功能连接用户自行配置的外部接口，外部服务与模型不属于本项目源码，可能另行收费。
+
 ## English
 
 **lyyIme** is a mixed **Wubi-86 + Pinyin** input method for Linux, developed and used daily on **openEuler 24.03 + XFCE + X11** (other distros/desktops unverified; no native Wayland support promised). Sogou-like experience: Wubi, full pinyin, abbreviated pinyin and English share one letter buffer — no scheme switching, candidates merged and ranked intelligently; an optional `pinyin_only` mode hides Wubi candidates entirely. Ships in **three interchangeable shapes** sharing one Rust core and dictionary: a standard **IBus engine**, a **standalone XIM server** (`lyyime-xim`, needs X11 plus GTK3/XIM-compatible apps — a fallback when your IM framework breaks), and a **floating-window IME** (`lyyime-float`, needs the target app to accept synthetic keys/clipboard) — if one shape is unavailable, switch to another.

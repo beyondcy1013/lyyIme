@@ -370,6 +370,19 @@
                     <property name="top-attach">9</property>
                   </packing>
                 </child>
+                <child>
+                  <object class="GtkCheckButton" id="chk_pinyin_only">
+                    <property name="visible">True</property>
+                    <property name="label">纯拼音模式(候选只出拼音,不出五笔/英文,四码规则不生效)</property>
+                    <property name="tooltip-text">开启后只用拼音输入;Shift 单击切换中英不受影响,候选条右键菜单可快速切换</property>
+                    <property name="halign">start</property>
+                  </object>
+                  <packing>
+                    <property name="left-attach">0</property>
+                    <property name="top-attach">10</property>
+                    <property name="width">2</property>
+                  </packing>
+                </child>
               </object>
             </child>
             <child type="tab">
@@ -412,7 +425,7 @@
                 <child>
                   <object class="GtkLabel" id="lbl_shot_hotkey">
                     <property name="visible">True</property>
-                    <property name="label">截屏快捷键:</property>
+                    <property name="label">截屏快捷键（全局）:</property>
                     <property name="halign">start</property>
                   </object>
                   <packing>
@@ -423,7 +436,7 @@
                 <child>
                   <object class="GtkEntry" id="ent_shot_hotkey">
                     <property name="visible">True</property>
-                    <property name="tooltip-text">按下拉起框选截屏:拖拽选区(存图片目录并复制剪贴板),Esc 取消、Enter 确认、双击整屏。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+alt+a、ctrl+shift+x。与造词快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
+                    <property name="tooltip-text">所有输入法及英文键盘下均可使用；保存后立即替换旧快捷键；与系统快捷键冲突时提示，不覆盖。按下拉起框选截屏:拖拽选区(存图片目录并复制剪贴板),Esc 取消、Enter 确认、双击整屏。写法:修饰(ctrl/alt/super/shift,至少一个)+键名,如 ctrl+alt+a、ctrl+shift+x。与造词快捷键冲突时自动 +Alt/+Shift 逐级避让,保存后输入框显示实际生效值</property>
                     <property name="halign">start</property>
                     <property name="width-chars">18</property>
                   </object>

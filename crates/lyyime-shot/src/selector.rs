@@ -272,6 +272,10 @@ pub fn run_region() -> anyhow::Result<Option<(gtk::gdk_pixbuf::Pixbuf, (i32, i32
 
     gtk::main();
     let outcome = result.borrow_mut().take().unwrap_or(Outcome::Cancelled);
+    // 显式释放 grab 并销毁覆盖窗:编辑器的模态对话框/文件选择器
+    // 需要干净的输入焦点环境,只靠 hide 会残留 grab
+    da.grab_remove();
+    unsafe { win.destroy() };
     // 让覆盖窗真正从屏幕消失,保证时序干净(剪贴板/通知在窗口消失后出现)
     while gtk::events_pending() {
         gtk::main_iteration();
@@ -320,10 +324,10 @@ fn apply_outcome(
     Some((snap, (x, y, w, h)))
 }
 
-/// 把 X 输入焦点显式交给覆盖窗(SetInputFocus):无窗口管理器(Xvfb 测试、
+/// 把 X 输入焦点显式交给窗口(SetInputFocus):无窗口管理器(Xvfb 测试、
 /// 特殊会话)时 GTK 拿不到键盘焦点会收不到 Esc/Enter,有 WM 时该调用也无害。
-/// 连接失败静默 —— 由 WM 正常分焦兜底。
-fn focus_overlay(win: &gtk::Window) {
+/// 连接失败静默 —— 由 WM 正常分焦兜底。编辑器窗口同样复用。
+pub(crate) fn focus_overlay(win: &gtk::Window) {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{ConnectionExt, InputFocus};
     let Some(gdkwin) = win.window() else { return };

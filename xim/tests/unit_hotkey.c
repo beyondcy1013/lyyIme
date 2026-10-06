@@ -1,12 +1,17 @@
 /*
- * 造词热键解析单元测试(headless;合同 §12)
+ * 造词热键解析单元测试(合同 §12;需 DISPLAY,经 xvfb-run 运行)
  * 覆盖:默认 ctrl+equal、修饰组合、单字符/字母/数字/F 键/0x keysym、
  *       大小写与空白容错、非法输入拒绝(无修饰/未知键/重复修饰/超长)、
- *       match 精确匹配语义。
+ *       match 精确匹配语义、全局截屏快捷键 GTK accelerator 归一化(§13)。
  * 运行:make test(build/tests/unit_hotkey,全绿退出 0)
+ * 附加模式:--global-rollback-test 走真实 xfconf 事务登记+回滚
+ *       (需会话总线 + xfconf 服务,由 tests/e2e/global_shot_hotkey_e2e.sh
+ *       在隔离环境中调用,非 headless 用例)。
  */
+#include "global_hotkey.h"
 #include "keysym_map.h"
 
+#include <gtk/gtk.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -22,8 +27,43 @@ static int g_failed = 0;
         }                                                                  \
     } while (0)
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* accelerator 归一化走 gtk_accelerator_name/parse,需要初始化
+     * GTK/X(无显示环境请经 xvfb-run 运行,见 Makefile test 目标) */
+    if (!gtk_init_check(&argc, &argv)) {
+        fprintf(stderr,
+                "unit_hotkey: GTK/X 初始化失败(无 DISPLAY;"
+                "请经 xvfb-run -a 运行)\n");
+        return 1;
+    }
+
+    /* --global-rollback-test:登记一个真实事务再回滚,验证 apply→
+     * rollback→commit 全链路把 xfconf 恢复原状(供 E2E 在隔离
+     * 会话总线 + xfsettingsd 环境中调用;非 headless 用例) */
+    if (argc > 1 && !strcmp(argv[1], "--global-rollback-test")) {
+        GError *err = NULL;
+        LyyGlobalHotkeyChange *ch =
+            lyy_global_shot_apply("ctrl+alt+s", &err);
+        if (!ch) {
+            fprintf(stderr, "rollback-test: apply 失败:%s\n",
+                    err ? err->message : "未知错误");
+            g_clear_error(&err);
+            return 1;
+        }
+        GError *rerr = NULL;
+        gboolean rolled = lyy_global_shot_rollback(ch, &rerr);
+        lyy_global_shot_commit(ch);
+        if (!rolled) {
+            fprintf(stderr, "rollback-test: rollback 失败:%s\n",
+                    rerr ? rerr->message : "未知错误");
+            g_clear_error(&rerr);
+            return 1;
+        }
+        printf("global-rollback-test: OK\n");
+        return 0;
+    }
+
     printf("== 造词热键解析单测 ==\n");
     uint32_t mods = 0, sym = 0;
 
@@ -130,6 +170,65 @@ int main(void)
           "三级全占用返回 0(交由调用方人话提示)");
     CHECK(lyy_hotkey_escalate("乱写", "", next, sizeof(next)) == 0,
           "spec 非法返回 0");
+
+    /* 9. 全局截屏快捷键:shot_hotkey 写法 → GTK accelerator 名
+     *    (xfconf 属性名;<Control>/<Primary> 等别名由此归一) */
+    {
+        gchar *acc = NULL;
+        GError *err = NULL;
+        acc = lyy_global_shot_accelerator("ctrl+alt+a", &err);
+        CHECK(acc && strcmp(acc, "<Primary><Alt>a") == 0,
+              "accel 默认 ctrl+alt+a → <Primary><Alt>a");
+        g_free(acc);
+        g_clear_error(&err);
+
+        acc = lyy_global_shot_accelerator("control+win+f2", &err);
+        CHECK(acc && strcmp(acc, "<Primary><Super>F2") == 0,
+              "accel 别名归一(control≡ctrl、win≡super)");
+        g_free(acc);
+        g_clear_error(&err);
+
+        acc = lyy_global_shot_accelerator("ctrl+equal", &err);
+        CHECK(acc && strcmp(acc, "<Primary>equal") == 0,
+              "accel ctrl+equal → <Primary>equal");
+        g_free(acc);
+        g_clear_error(&err);
+
+        acc = lyy_global_shot_accelerator("ctrl+return", &err);
+        CHECK(acc && strcmp(acc, "<Primary>Return") == 0,
+              "accel ctrl+return → <Primary>Return");
+        g_free(acc);
+        g_clear_error(&err);
+
+        /* pageup 的 accelerator 名按 GTK 键名表产出(Page_Up/Prior),
+         * 不锁死拼写:断言能 parse 回同一 (keyval,修饰位) 即可 */
+        acc = lyy_global_shot_accelerator("ctrl+pageup", &err);
+        if (acc) {
+            guint rkey = 0;
+            GdkModifierType rmods = 0;
+            gtk_accelerator_parse(acc, &rkey, &rmods);
+            CHECK(rkey == 0xff55 && rmods == GDK_CONTROL_MASK,
+                  "accel ctrl+pageup 往返一致(0xff55 + Ctrl)");
+        } else {
+            CHECK(0, "accel ctrl+pageup 应解析成功");
+        }
+        g_free(acc);
+        g_clear_error(&err);
+
+        /* 非法写法:无修饰 / 裸键名 / 空串 一律 NULL + error */
+        acc = lyy_global_shot_accelerator("a", &err);
+        CHECK(acc == NULL && err != NULL, "accel 无修饰拒绝");
+        g_free(acc);
+        g_clear_error(&err);
+        acc = lyy_global_shot_accelerator("equal", &err);
+        CHECK(acc == NULL && err != NULL, "accel 裸键名拒绝");
+        g_free(acc);
+        g_clear_error(&err);
+        acc = lyy_global_shot_accelerator("", &err);
+        CHECK(acc == NULL && err != NULL, "accel 空串拒绝");
+        g_free(acc);
+        g_clear_error(&err);
+    }
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);

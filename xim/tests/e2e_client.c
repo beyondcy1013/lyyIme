@@ -73,6 +73,21 @@ static gboolean on_timeout(gpointer user_data)
     return G_SOURCE_REMOVE;
 }
 
+static void trace_event(GdkEvent *event, gpointer data)
+{
+    (void)data;
+    if (event->type == GDK_KEY_PRESS || event->type == GDK_KEY_RELEASE)
+        fprintf(stderr,
+                "CLIENT_KEY type=%d keyval=%u window=%p focus=%d\n",
+                event->type, event->key.keyval, (void *)event->key.window,
+                gtk_widget_has_focus(g_entry));
+    else if (event->type == GDK_FOCUS_CHANGE)
+        fprintf(stderr, "CLIENT_FOCUS in=%d window=%p\n",
+                event->focus_change.in,
+                (void *)event->focus_change.window);
+    gtk_main_do_event(event);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc > 1)
@@ -84,6 +99,7 @@ int main(int argc, char *argv[])
     signal(SIGTERM, SIG_DFL); /* e2e 兜底 kill 直接结束 */
 
     gtk_init(&argc, &argv);
+    gdk_event_handler_set(trace_event, NULL, NULL);
 
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(win), "lyyime-e2e-client");

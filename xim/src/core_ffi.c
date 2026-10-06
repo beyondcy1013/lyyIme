@@ -162,6 +162,10 @@ int lyy_core_ffi_load(CoreFfi *ffi)
     ffi->punct_ok = ffi->lyyime_set_chinese_punctuation &&
                     ffi->lyyime_toggle_chinese_punctuation;
 
+    ffi->lyyime_set_pinyin_only = dlsym(handle, "lyyime_set_pinyin_only");
+    ffi->pinyin_ok = ffi->lyyime_set_pinyin_only != NULL;
+    ffi->lyyime_set_learning = dlsym(handle, "lyyime_set_learning");
+    ffi->learn_ok = ffi->lyyime_set_learning != NULL;
     ffi->mt_ok = ffi->lyyime_menu_trigger_new &&
                  ffi->lyyime_menu_trigger_free &&
                  ffi->lyyime_menu_trigger_configure &&

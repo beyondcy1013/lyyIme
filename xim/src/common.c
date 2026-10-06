@@ -40,6 +40,18 @@ int lyy_engine_ensure(App *app)
                            "commit_first_at_four 不生效(请更新 liblyyime_core.so)");
     }
     app->core.lyyime_set_phrase_hint(app->engine, app->config.phrase_hint);
+    if (app->core.pinyin_ok) {
+        app->core.lyyime_set_pinyin_only(app->engine, app->config.pinyin_only);
+    } else if (app->config.pinyin_only) {
+        lyy_log(&app->log, "INFO core 库无输入方案符号,pinyin_only 不生效"
+                           "(请更新 liblyyime_core.so)");
+    }
+    if (app->core.learn_ok) {
+        app->core.lyyime_set_learning(app->engine, app->config.learning);
+    } else if (!app->config.learning) {
+        lyy_log(&app->log, "INFO core 库无学习开关符号,learning 不生效"
+                           "(请更新 liblyyime_core.so)");
+    }
     /* 上屏后联想(可选符号):旧 core 库缺符号时无法配置联想,
      * 保留原输入行为,不整体降级。 */
     if (app->core.pred_ok) {
@@ -54,6 +66,7 @@ int lyy_engine_ensure(App *app)
     if (app->core.punct_ok) {
         app->core.lyyime_set_chinese_punctuation(app->engine,
                                                  app->config.chinese_punct);
+        app->punct_runtime = app->config.chinese_punct;
     } else {
         lyy_log(&app->log, "INFO core 库无中英文标点切换符号,"
                            "chinese_punct 不生效且 Ctrl+. 不拦截"

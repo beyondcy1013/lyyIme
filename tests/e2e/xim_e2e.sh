@@ -13,11 +13,24 @@
 #      "候选1"(桩库规则)→ Entry = "你号abc候选1";
 #   E. CapsLock 大写态:字母直通英文不进组词 —— 无 Shift 大写(ab→AB),
 #      Shift+字母 小写(Shift+n→n);关闭后组词恢复(zh+space→候选1)。
+#   H. CapsLock 联动解锁(2026-10-06):英文态锁存时 Shift 单击确认回中文
+#      → 系统锁解除(libX11 XkbGetState 断言,左右 Shift 双变体);
+#      中→英 与 Shift+字母 组合回退均不动锁;解锁后立即组词上屏。
+#   G. 候选右键菜单(悬停冻结+右键行+菜单项点选,桩确定性)。
+#
+# 运行:默认 A–F + H + G 全量;--caps-only 只跑 A–F + H 聚焦
+# CapsLock 套件(跳过 G);--keep 保留工作目录证据。
 set -euo pipefail
 
 XIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../xim" && pwd)"
-KEEP=0
-[[ "${1:-}" == "--keep" ]] && KEEP=1
+KEEP=0; CAPS_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --keep) KEEP=1 ;;
+        --caps-only) CAPS_ONLY=1 ;;
+        *) echo "用法: $0 [--keep] [--caps-only]" >&2; exit 2 ;;
+    esac
+done
 
 # 隔离环境:独立 HOME(配置/日志/pidfile 不污染真实用户)
 WORK="$(mktemp -d /tmp/lyyime-e2e.XXXXXX)"
@@ -60,6 +73,49 @@ CLIENT_LOG="$WORK/client.log"
 BUFFER="$WORK/buffer.txt"
 STUB_LIB="$XIM_DIR/build/tests/liblyyime_core_stub.so"
 
+# CapsLock 锁存位只读探针(场景 H):libX11 ctypes XkbGetState,
+# 打印 locked_mods & LockMask(2=锁存/0=未锁)
+CAPS_PY="$WORK/caps_state.py"
+cat > "$CAPS_PY" <<'PY'
+import ctypes, sys
+lib = ctypes.CDLL("libX11.so.6")
+class XkbStateRec(ctypes.Structure):
+    _fields_ = [
+        ("group", ctypes.c_ubyte), ("locked_group", ctypes.c_ubyte),
+        ("base_group", ctypes.c_ushort), ("latched_group", ctypes.c_ushort),
+        ("mods", ctypes.c_ubyte), ("base_mods", ctypes.c_ubyte),
+        ("latched_mods", ctypes.c_ubyte), ("locked_mods", ctypes.c_ubyte),
+        ("compat_state", ctypes.c_ubyte), ("grab_mods", ctypes.c_ubyte),
+        ("compat_grab_mods", ctypes.c_ubyte), ("lookup_mods", ctypes.c_ubyte),
+        ("compat_lookup_mods", ctypes.c_ubyte), ("ptr_buttons", ctypes.c_ushort),
+    ]
+lib.XOpenDisplay.restype = ctypes.c_void_p
+lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+lib.XkbGetState.restype = ctypes.c_int
+lib.XkbGetState.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                          ctypes.POINTER(XkbStateRec)]
+lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+dpy = lib.XOpenDisplay(None)
+if not dpy:
+    sys.exit(2)
+st = XkbStateRec()
+rc = lib.XkbGetState(dpy, 0x100, ctypes.byref(st))  # XkbUseCoreKbd
+lib.XCloseDisplay(dpy)
+if rc != 0:
+    sys.exit(2)
+print(st.locked_mods & 2)
+PY
+
+caps_mask() { python3 "$CAPS_PY" 2>/dev/null || echo "ERR"; }
+wait_caps_mask() {
+    local want="$1" i
+    for ((i = 0; i < 60; i++)); do
+        [[ "$(caps_mask)" == "$want" ]] && return 0
+        sleep 0.1
+    done
+    fail "CapsLock 锁存位未达 $want(当前 $(caps_mask))"
+}
+
 cleanup() {
     [[ -n "${CLIENT_PID:-}" ]] && kill "$CLIENT_PID" 2>/dev/null || true
     [[ -n "${XIM_PID:-}" ]] && kill "$XIM_PID" 2>/dev/null || true
@@ -97,11 +153,11 @@ wait_log() {
     fail "等待日志 [$pat] 超时"
 }
 
-echo "== [1/9] 构建 =="
+echo "== [1/13] 构建 =="
 make -C "$XIM_DIR" all test >/dev/null
 [[ -f "$STUB_LIB" ]] || fail "桩库未生成:$STUB_LIB"
 
-echo "== [2/9] 清理并启动 Xvfb $DISPLAY =="
+echo "== [2/13] 清理并启动 Xvfb $DISPLAY =="
 XDNUM="${DISPLAY%%.*}"; XDNUM="${XDNUM#:}"
 XSOCK="/tmp/.X11-unix/X${XDNUM}"
 XLOCK="/tmp/.X${XDNUM}-lock"
@@ -114,20 +170,20 @@ Xvfb "$DISPLAY" -screen 0 1024x768x24 -nolisten tcp &
 XVFB_PID=$!
 for _ in $(seq 1 50); do [[ -S "$XSOCK" ]] && break; sleep 0.1; done
 
-echo "== [3/9] 启动 lyyime-xim(桩库) =="
+echo "== [3/13] 启动 lyyime-xim(桩库) =="
 LYYIME_CORE_LIB="$STUB_LIB" "$XIM_DIR/build/bin/lyyime-xim" >"$WORK/xim.stdout" 2>&1 &
 XIM_PID=$!
 wait_log "XIM server ready"
 echo "[e2e] XIM server 就绪(pid=$XIM_PID)"
 
-echo "== [4/9] 启动 GTK Entry 客户端 =="
+echo "== [4/13] 启动 GTK Entry 客户端 =="
 "$XIM_DIR/build/tests/e2e_client" "$BUFFER" 120 >"$CLIENT_LOG" 2>"$WORK/client.stderr" &
 CLIENT_PID=$!
 wait_log "XIM client 已连接"
 sleep 0.8
 wait_log "获得焦点" # SET_IC_FOCUS → trigger on(中文态)
 
-echo "== [5/9] A:中文态 nihao + 数字 2 选词 =="
+echo "== [5/13] A:中文态 nihao + 数字 2 选词 =="
 WID="$(xdotool search --name '^lyyime-e2e-client$' | head -1 || true)"
 [[ -n "$WID" ]] || fail "找不到客户端窗口"
 xdotool windowfocus "$WID"
@@ -142,7 +198,7 @@ xdotool key 2
 wait_buffer "你号" 8
 echo "PASS A:数字选词上屏 = 你号"
 
-echo "== [6/9] B:Shift 单击 → 英文直通 =="
+echo "== [6/13] B:Shift 单击 → 英文直通 =="
 FWD_BEFORE="$(grep 'forward keysym' "$XIM_LOG" | grep -vc 'LKey=9' || true)"
 xdotool key Shift_L
 wait_log "Shift 单击(release 确认)" 2 || wait_log "Shift 单击(时间窗确认)"
@@ -155,7 +211,7 @@ if grep -q "你号abcd" "$BUFFER"; then fail "缓冲异常"; fi
 # 行为正确性由上方缓冲断言(你号abc)保证,这里仅输出信息。
 echo "PASS B:英文直通(shift 切换后 forward 记录 $FWD_BEFORE→$FWD_AFTER,含直通再转发)"
 
-echo "== [7/9] C:Shift 再单击 → 中文态空格顶屏 =="
+echo "== [7/13] C:Shift 再单击 → 中文态空格顶屏 =="
 xdotool key Shift_L
 wait_log "trigger on"
 sleep 0.5
@@ -165,7 +221,7 @@ xdotool key space
 wait_buffer "你号abc候选1" 8
 echo "PASS C:回中文态,空格顶屏首选 = 候选1"
 
-echo "== [8/9] D:造词(Ctrl+= 进入,方向键增减选字,回车存词不上屏) =="
+echo "== [8/13] D:造词(Ctrl+= 进入,方向键增减选字,回车存词不上屏) =="
 xdotool type --delay 90 "nihao"
 sleep 0.4
 xdotool key 3 # 选第 3 个候选「拟好」,保证造词历史非空
@@ -186,7 +242,7 @@ xdotool key space
 wait_buffer "你号abc候选1拟好候选1" 8
 echo "PASS D:造词热键/方向键选字/存词提示/继续输入 全链路"
 
-echo "== [9/11] E:CapsLock 大写态字母直通(无 Shift 大写;Shift+字母 小写) =="
+echo "== [9/13] E:CapsLock 大写态字母直通(无 Shift 大写;Shift+字母 小写) =="
 xdotool key Caps_Lock; sleep 0.5
 xdotool type --delay 90 "ab"; sleep 0.5
 wait_buffer "你号abc候选1拟好候选1AB" 8
@@ -199,7 +255,7 @@ xdotool key space
 wait_buffer "你号abc候选1拟好候选1ABn候选1" 8
 echo "PASS E:CapsLock 大写态直通 AB/Shift→n,关闭后组词恢复"
 
-echo "== [10/12] F:截屏热键(Ctrl+Alt+A)拉起 lyyime-shot(合同 §13) =="
+echo "== [10/13] F:截屏热键(Ctrl+Alt+A)拉起 lyyime-shot(合同 §13) =="
 rm -f "$SHOT_MARKER"
 xdotool key ctrl+alt+a
 for _ in $(seq 1 50); do [[ -f "$SHOT_MARKER" ]] && break; sleep 0.1; done
@@ -210,7 +266,79 @@ wait_log "已拉起截屏助手" 5
 wait_buffer "你号abc候选1拟好候选1ABn候选1" 2
 echo "PASS F:截屏热键命中 → 拉起桩助手并吞键(缓冲不变)"
 
-echo "== [11/12] G:候选右键菜单(§15):悬停冻结+菜单三项(桩确定性) =="
+echo "== [11/13] H:CapsLock 联动解锁(英文→中文 Shift 单击确认) =="
+# F 结束时的缓冲基线(固定 fixture 串)
+BASE2="你号abc候选1拟好候选1ABn候选1"
+
+# H1:中文态开 CapsLock → Shift_L 单击转英文:锁存必须保持(该方向不动锁)
+xdotool key Escape; sleep 0.3 # 清掉任何残留组合,保证起点干净
+xdotool key Caps_Lock; sleep 0.4
+[[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 后锁存位非 2($(caps_mask))"
+xdotool key Shift_L
+sleep 0.8 # 负向断言前留足释放确认+潜在错误解锁落地时间
+[[ "$(caps_mask)" == "2" ]] || fail "中→英 单击误清 CapsLock"
+echo "PASS H1:中→英 Shift 单击不清 CapsLock(锁存保持)"
+
+# H2:英文态锁存 → Shift_R 单击回中文:release 确认 → 系统锁解除,
+#    解锁后立即可打 fixture 中文
+xdotool key Shift_R
+wait_log "trigger on"
+wait_caps_mask 0
+wait_log "已解除系统 CapsLock"
+xdotool type --delay 90 "zh"
+sleep 0.3
+xdotool key space
+wait_buffer "${BASE2}候选1" 8
+echo "PASS H2:Shift_R 英→中确认解除 CapsLock,解锁后立即组词上屏"
+
+# H3:Shift_L 变体同合同:锁存态中→英(保持)→ 英→中(解除)
+xdotool key Caps_Lock; sleep 0.4
+[[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 重开后锁存位非 2"
+xdotool key Shift_L
+sleep 0.8
+[[ "$(caps_mask)" == "2" ]] || fail "Shift_L 中→英 误清 CapsLock"
+xdotool key Shift_L
+wait_log "已解除系统 CapsLock" 5
+wait_caps_mask 0
+echo "PASS H3:Shift_L 英→中同样确认解除 CapsLock"
+
+# H4:组合防护负向:英文态锁存 → Shift 按住再敲字母 → 回退英文且不动锁;
+#    字母按 Caps+Shift 语义直发小写 'a' 进缓冲;收尾关锁还原现场
+xdotool key Caps_Lock; sleep 0.4
+[[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 第三次开后锁存位非 2"
+xdotool key Shift_L
+sleep 0.8
+[[ "$(caps_mask)" == "2" ]] || fail "H4 前置中→英 误清 CapsLock"
+xdotool keydown Shift_L
+sleep 0.2
+xdotool key a
+sleep 0.3
+wait_log "Shift 组合键防护:回退英文" 5
+xdotool keyup Shift_L
+sleep 0.3
+[[ "$(caps_mask)" == "2" ]] || fail "Shift+字母 组合回退误清 CapsLock"
+wait_buffer "${BASE2}候选1a" 8
+xdotool key Caps_Lock; sleep 0.4
+wait_caps_mask 0
+echo "PASS H4:Shift+字母 回退英文不动锁,字母按 Caps+Shift 上屏为小写 a"
+
+if (( CAPS_ONLY )); then
+    echo "== 汇总(--caps-only:聚焦 CapsLock 套件) =="
+    wait_buffer "你号abc候选1" 2
+    echo "最终缓冲: $(cat "$BUFFER")"
+    echo "---- xim.log 关键行 ----"
+    grep -E "XIM server ready|client 已连接|trigger|Shift 单击|CapsLock|commit|LKey" \
+        "$XIM_LOG" | head -40 || true
+    echo "E2E PASS(caps-only):A–F 前置链路 + H CapsLock 联动解锁全绿(未跑 G 候选右键菜单)"
+    exit 0
+fi
+
+# 全量模式:H4 结束于英文态 → Shift 单击回中文供 G 使用;H 已上屏
+# 「候选1」与回退转发的 'a',G 的缓冲基线相应追加
+xdotool key Shift_L; sleep 0.6
+BASE="${BASE2}候选1a"
+
+echo "== [12/13] G:候选右键菜单(§15):悬停冻结+菜单三项(桩确定性) =="
 # 交互模型(实测):候选窗跟随指针 → 把指针移进窗内 → 悬停冻结 →
 # 右键行 → GTK 菜单在指针处弹出 → 指针点菜单项(方向键会被转发给引擎,
 # 不走菜单导航,故必须点选)。
@@ -266,8 +394,6 @@ right_click_row_menu_item() {
     xdotool click 1; sleep 0.7
 }
 
-BASE="你号abc候选1拟好候选1ABn候选1"
-
 # G1:右键第 0 行(你好)→ 第 3 项反查英文 → 候选页换 hello/hi → 数字 1 = hello
 xdotool type --delay 90 "nihao"
 sleep 0.5
@@ -317,9 +443,9 @@ if ! { [[ -f "$QUERY_MARKER" ]] \
 fi
 echo "PASS G4:右键→自定义查询(查词典)→ xdg-open 收到 {q} 代入网址"
 
-echo "== [12/12] 汇总 =="
+echo "== [13/13] 汇总 =="
 wait_buffer "你号abc候选1" 2
 echo "最终缓冲: $(cat "$BUFFER")"
 echo "---- xim.log 关键行 ----"
 grep -E "XIM server ready|client 已连接|trigger|Shift 单击|CapsLock|commit|LKey" "$XIM_LOG" | head -40 || true
-echo "E2E PASS: Mode B 全链路(XIM 连接/组合拦截/数字选词/Shift 切换/顶屏/造词/CapsLock 直通/截屏热键/候选右键菜单)全绿"
+echo "E2E PASS: Mode B 全链路(XIM 连接/组合拦截/数字选词/Shift 切换/顶屏/造词/CapsLock 直通/截屏热键/CapsLock 联动解锁/候选右键菜单)全绿"

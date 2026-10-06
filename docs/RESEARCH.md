@@ -248,3 +248,36 @@ XIM(The X Input Method Protocol)是框架无关中文输入的 30 年正统路�
   部署请求 `201051-…b039` 通过:核心/IBus 工件 SHA 校验、
   config.toml 未变、XIM/IBus/面板稳定;回滚走既有部署脚本生成的
   core/ibus/xim `.bak` 备份。
+
+## 全局截屏快捷键:XFCE xfconf 桌面级登记(2026-10-02,§13 修订)
+
+- **问题**:此前 Ctrl+Alt+A 只在 lyyime-xim 的 XIM 事件流内拦截,焦点在
+  未接入本输入法的窗口(英文键盘、其它 IM、桌面)时截屏不可用。
+- **设计**:把 `shot_hotkey` 登记为 XFCE 的桌面级命令绑定——
+  `xfce4-keyboard-shortcuts` 频道 `/commands/custom/<accelerator>`,
+  由 xfsettingsd 在根窗口做被动 grab。绑定存在 xfconf,与输入法进程
+  无关:换 IM/停用 lyyime/输入法引擎崩溃后快捷键仍可用,且不需要常驻
+  守护进程(桌面设置本身就持久)。
+- **服务面**(实机 `gdbus introspect` 验证):总线名 `org.xfce.Xfconf`,
+  对象 `/org/xfce/Xfconf`,接口 `org.xfce.Xfconf`,方法
+  `GetAllProperties(s,s)->a{sv}`(property_base="" 返回全频道)、
+  `GetProperty(s,s)->v`、`SetProperty(s,s,v)`、`ResetProperty(s,s,b)`、
+  `PropertyExists(s,s)->b`;实现走 GDBus 直连(无 libxfconf 依赖、
+  无子进程解析),调用超时 3000ms。
+- **属性形态**:`/commands/custom/` 与 `/commands/default/` 是命令绑定
+  两组分支,`/xfwm4/{custom,default}/` 是窗口管理器键两组;直接子叶
+  才是键,`override`(bool,选 custom 或 default 生效)、`startup-notify`
+  与 `<Super>r/XF86Audio*` 这类嵌套路径不算绑定。`type="empty"` 的
+  xfconf 属性经 GetAllProperties/GetProperty 均不可见(等同不存在)。
+  加速键名为 GTK accelerator 写法(`<Primary><Alt>a`;Primary≡Control),
+  比较一律归一化 (keyval, 修饰位),别名/大小写/修饰序差异同判冲突。
+- **事务纪律**:快照 → 冲突检查(commands+xfwm4 有效分支,值非空且
+  命令非 `/usr/local/bin/lyyime-shot` 的等效组合即拒绝并点名)→
+  Set 目标 → 逐个 Reset 其余自有绑定(删除前重读现值仍属本方),
+  任何一步 DBus 失败逆序回滚;设置保存失败由调用方显式回滚。
+  `commands/custom/override` 未启用时报错请用户先开,不代为打开
+  (那会连带激活全部自定义绑定)。
+- **验证**:`tests/e2e/global_shot_hotkey_e2e.sh` —— xvfb-run 隔离显示
+  + dbus-run-session 独立总线 + 临时 HOME/XDG_* + 真 xfsettingsd,
+  xdotool 按键实弹拉起/取消覆盖窗;另含别名占用、xfwm4 占用、总线
+  缺失、`--remove-shot-hotkey` 只摘自有绑定等用例。

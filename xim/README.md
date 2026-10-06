@@ -21,6 +21,7 @@ xim/
 │   ├── settings.c      GtkBuilder 设置对话框(保存即生效:重建引擎+刷 CSS)
 │   ├── tools.c         工具动作(主窗口与托盘共用;含直输模式窗口 lyyime-float 拉起)
 │   ├── config.c        ~/.config/lyyime/config.toml 平面键值 TOML 子集(保留未知行与注释)
+│   ├── global_hotkey.c 全局截屏快捷键:XFCE xfconf 事务化登记/移除(§13,GDBus 直连)
 │   └── common.c/.h log.c
 ├── res/                zh/en 托盘 SVG、settings.ui、candidate.css
 ├── spike/              探路石:最小 XIM server + GTK Entry 连通(run.sh 可复跑)
@@ -85,6 +86,26 @@ xim/
       本特性整体静默关闭,其余功能不受影响。
     - AI 采集态的 commit 进提示词不喂匹配器;`lyy_xim_commit_utf8`
       (AI 回复上屏)不经效果流,同样不喂。
+11. **全局截屏快捷键(2026-10-02,合同 §13 修订)**:截屏热键不再依赖
+    XIM 内按键转发——`global_hotkey.c` 经 GDBus 直连 `org.xfce.Xfconf`
+    (channel `xfce4-keyboard-shortcuts`),把 `shot_hotkey` 登记为
+    `/commands/custom/<GTK accelerator>`(命令固定
+    `/usr/local/bin/lyyime-shot`)。xfsettingsd 全局抓取,所有输入法/
+    无输入法环境可用,IM 停止后依然有效。事务化:全量快照 → 归一化
+    `(keyval,mods)` 冲突检查(commands 与 xfwm4 有效分支;<Control>≡
+    <Primary> 等别名判等)→ 先登记目标、再撤其余自有绑定;中途失败
+    逆序回滚。三条入口:正常启动(gtk_init 后自动登记,失败仅告警)、
+    设置窗保存(apply → 落盘 → commit,任一步失败回滚且不假报成功)、
+    CLI `--sync-shot-hotkey` / `--remove-shot-hotkey`(安装/卸载脚本调用,
+    不碰 pidfile 不拉起引擎)。仅支持 XFCE(显式非 XFCE 的
+    XDG_CURRENT_DESKTOP 直接报错);override 未启用时报人话错误,
+    绝不代开自定义组。
+12. **CapsLock 联动解锁(2026-10-06)**:英文态锁存时 Shift 单击确认回中文
+    即解除系统大写锁。`combo_guard` 作待确认标记:触发按下不解锁(窗内
+    Shift+字母回退会先误清锁);release 到达或防护窗到期兜底即确认并解锁,
+    到期路径同时清掉本事件 `state` 的陈旧 LockMask。中→英/组合回退/焦点
+    切换不动锁。解锁走专用短命 Xlib 连接 `XkbLockModifiers`(mask-only,
+    失败仅记日志);ibus 端同合同,由 logic 回调宿主执行。
 
 ## 验证
 
@@ -92,16 +113,27 @@ xim/
 make -C xim spike spike-run   # spike:Xvfb :98,server commit「你好尖兵」进 Entry
 make -C xim test              # 单测:effects_json + config + 桩库
 bash tests/e2e/xim_e2e.sh     # 全链路:数字选词/Shift 切换/英文直通/空格顶屏/
-                              # 造词/CapsLock/截屏热键/右键菜单
+                              # 造词/CapsLock 直通+联动解锁/截屏热键/右键菜单
+bash tests/e2e/xim_e2e.sh --caps-only --keep
+                              # 聚焦 CapsLock 套件:A–F 前置 + 场景 H,跳过 G
 make -C xim e2e               # 同上(make 入口)
 bash tests/e2e/menu_trigger_e2e.sh  # 菜单触发聚焦:可见提示/Fn 确认/设置页改键+
                                     # 黑名单即时生效/续接与边界取消(隔离 Xvfb)
 make -C xim skin-test          # 皮肤单测(xvfb-run):注册表/CSS 解析/真窗色值/
                               # 双预览不透染/跟随系统明暗/显式皮肤稳定
+bash tests/e2e/global_shot_hotkey_e2e.sh  # 全局截屏快捷键(§13):隔离
+                              # dbus+Xvfb+真 xfsettingsd;登记/幂等/改键清旧/
+                              # 别名与 xfwm4 冲突拒绝/总线缺失/remove 只摘自有
 bash tests/e2e/skin_e2e.sh     # 皮肤 E2E:皮肤页打开/点选保存/取消不落盘/
                               # 重启持久化/候选窗换肤截图(隔离 xvfb-run,
                               # 截图留证 /tmp/lyyime-skins-review/)
 ```
+
+> 已知失败(未定位):xim_e2e.sh 场景 G(候选右键菜单)按旧硬编码行几何
+> 点选,当前桩链路下 G3 未弹出菜单(2026-10-06 运行现场
+> /tmp/lyyime-e2e.tgmP79,失败点「右键第 1 行未弹出菜单」)。
+> 聚焦验证用 `--caps-only` 跳过 G;候选菜单行为的现代覆盖见
+> `tests/e2e/candidate_menu_e2e.sh`(真 core 链路)。
 
 ## 皮肤(候选窗主题)
 

@@ -12,9 +12,8 @@
 #include "skin.h"
 
 /* ---- 构建控件状态 ←→ 配置 ---- */
-static void ui_from_config(SettingsUi *ui)
+static void ui_from_config(SettingsUi *ui, const LyyConfig *c)
 {
-    const LyyConfig *c = &lyy_app()->config;
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_page), c->page_size);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui->spin_font), c->font_size);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_mixed),
@@ -39,6 +38,17 @@ static void ui_from_config(SettingsUi *ui)
         c->next_word_prediction);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_exact_freq_rank),
                                  c->exact_char_freq_rank);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->chk_pinyin_only),
+                                 c->pinyin_only);
+    if (lyy_app()->core.loaded && !lyy_app()->core.pinyin_ok) {
+        gtk_widget_set_sensitive(ui->chk_pinyin_only, FALSE);
+        gtk_widget_set_tooltip_text(
+            ui->chk_pinyin_only,
+            "当前词库核心不支持纯拼音,请更新 liblyyime_core.so");
+    } else {
+        gtk_widget_set_sensitive(ui->chk_pinyin_only, TRUE);
+        gtk_widget_set_tooltip_text(ui->chk_pinyin_only, NULL);
+    }
     /* 英文上屏去向(§6):0=临时 temp,1=切英文模式 en(两行同一映射) */
     gtk_combo_box_set_active(
         GTK_COMBO_BOX(ui->combo_enter_en),
@@ -140,6 +150,8 @@ static int config_from_ui(SettingsUi *ui, LyyConfig *c)
         GTK_TOGGLE_BUTTON(ui->chk_next_word_prediction));
     c->exact_char_freq_rank = gtk_toggle_button_get_active(
         GTK_TOGGLE_BUTTON(ui->chk_exact_freq_rank));
+    c->pinyin_only = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(ui->chk_pinyin_only));
     snprintf(c->enter_english, sizeof(c->enter_english), "%s",
              gtk_combo_box_get_active(GTK_COMBO_BOX(ui->combo_enter_en)) == 1
                  ? "en"
@@ -289,8 +301,8 @@ static gboolean hotkeys_validate_and_resolve(SettingsUi *ui, LyyConfig *c,
      * 造词/截屏——保存拒绝但输入框保持可编辑(不还原、不静默改写)。 */
     if (!strcmp(coin, "ctrl+period") || !strcmp(shot, "ctrl+period")) {
         hotkey_msg_dialog(ui, GTK_MESSAGE_ERROR,
-                          "Ctrl+. 已用于切换中英文标点,"
-                          "请选择其他快捷键。");
+                          g_strdup("Ctrl+. 已用于切换中英文标点,"
+                                   "请选择其他快捷键。"));
         return FALSE;
     }
     if (strcmp(coin, shot) != 0)
@@ -344,23 +356,60 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
     SettingsUi *ui = user_data;
     App *app = lyy_app();
 
-    LyyConfig c = app->config;
+    LyyConfig c;
+    if (lyy_config_load(app->config_path, &c) < 0) {
+        hotkey_msg_dialog(ui, GTK_MESSAGE_ERROR,
+                          g_strdup_printf("读取配置失败:%s\n保存已取消,"
+                                          "未改动任何设置。",
+                                          app->config_path));
+        return;
+    }
     if (config_from_ui(ui, &c) != 0) {
         /* 菜单触发黑名单合并不下:禁用开关可能失效,绝不静默保存 */
         hotkey_msg_dialog(ui, GTK_MESSAGE_ERROR,
-                          "菜单触发黑名单超出配置容量,保存已取消。\n"
-                          "请减少勾选项或精简 config.toml 中 "
-                          "menu_trigger_disabled 的自定义条目。");
+                          g_strdup("菜单触发黑名单超出配置容量,"
+                                   "保存已取消。\n请减少勾选项或精简 "
+                                   "config.toml 中 menu_trigger_disabled "
+                                   "的自定义条目。"));
         return;
     }
     /* 快捷键校验 + 冲突自动升级(合同 §13):非法/无法避让时已弹窗还原,
      * 不保存不关窗 */
     if (!hotkeys_validate_and_resolve(ui, &c, &app->config))
         return;
-    app->config = c;
-    if (lyy_config_save(app->config_path, &c) != 0) {
-        lyy_log(&app->log, "ERROR 配置保存失败:%s", app->config_path);
+    /* 全局截屏快捷键(§13):先把 XFCE 桌面级绑定事务化切到新组合,
+     * 成功后才落盘配置;任一步失败回滚绑定、弹窗说明并保留设置窗,
+     * 绝不向用户假报保存成功 */
+    GError *error = NULL;
+    LyyGlobalHotkeyChange *change =
+        lyy_global_shot_apply(c.shot_hotkey, &error);
+    if (!change) {
+        hotkey_msg_dialog(ui, GTK_MESSAGE_ERROR,
+                          g_strdup(error ? error->message
+                                       : "全局截屏快捷键登记失败"));
+        g_clear_error(&error);
+        return;
     }
+    if (lyy_config_save(app->config_path, &c) != 0) {
+        GError *rollback_error = NULL;
+        gboolean rolled =
+            lyy_global_shot_rollback(change, &rollback_error);
+        lyy_log(&app->log, "ERROR 配置保存失败:%s(全局快捷键回滚%s)",
+                app->config_path, rolled ? "成功" : "失败");
+        hotkey_msg_dialog(
+            ui, GTK_MESSAGE_ERROR,
+            g_strdup_printf("配置保存失败:%s\n全局快捷键绑定已回滚%s%s",
+                            app->config_path, rolled ? "。" : "失败:",
+                            rolled ? ""
+                                   : (rollback_error
+                                          ? rollback_error->message
+                                          : "未知原因")));
+        g_clear_error(&rollback_error);
+        lyy_global_shot_commit(change);
+        return;
+    }
+    lyy_global_shot_commit(change);
+    app->config = c;
     /* 开机自启:落/删 ~/.config/autostart/lyyime-xim.desktop */
     if (lyy_config_apply_autostart(c.autostart) != 0)
         lyy_log(&app->log, "WARN 开机自启项写入失败");
@@ -394,7 +443,13 @@ static void on_cancel(GtkWidget *widget, gpointer user_data)
 {
     (void)widget;
     SettingsUi *ui = user_data;
-    ui_from_config(ui); /* 还原显示 */
+    {
+        App *app = lyy_app();
+        LyyConfig disk;
+        if (lyy_config_load(app->config_path, &disk) < 0)
+            disk = app->config;
+        ui_from_config(ui, &disk); /* 还原显示 */
+    }
     gtk_widget_hide(ui->window);
 }
 
@@ -871,6 +926,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         gtk_builder_get_object(builder, "chk_next_word_prediction"));
     ui->chk_exact_freq_rank =
         GTK_WIDGET(gtk_builder_get_object(builder, "chk_exact_freq_rank"));
+    ui->chk_pinyin_only =
+        GTK_WIDGET(gtk_builder_get_object(builder, "chk_pinyin_only"));
     ui->combo_enter_en =
         GTK_WIDGET(gtk_builder_get_object(builder, "combo_enter_en"));
     ui->combo_shift_en =
@@ -919,7 +976,8 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
         !ui->chk_quick_actions || !ui->chk_ai_enabled ||
         !ui->ent_ai_base || !ui->ent_ai_key || !ui->ent_ai_model ||
         !ui->ent_ai_prompt || !ui->spin_ai_timeout || !ui->btn_ai_test ||
-        !ui->ent_coin_hotkey || !ui->chk_stats_enabled ||
+        !ui->ent_coin_hotkey || !ui->ent_shot_hotkey ||
+        !ui->chk_stats_enabled ||
         !ui->spin_stats_pause || !ui->spin_stats_idle ||
         !ui->ent_cq_label || !ui->ent_cq_url) {
         lyy_log(&lyy_app()->log, "ERROR 设置界面缺少控件(%s)", file);
@@ -987,7 +1045,7 @@ void lyy_settings_init(SettingsUi *ui, const char *ui_dir)
     }
 
     ui->built = 1;
-    ui_from_config(ui);
+    ui_from_config(ui, &lyy_app()->config);
     g_object_unref(builder); /* gtk_builder 保活控件引用,g_object_unref 安全 */
 }
 
@@ -1008,7 +1066,13 @@ void lyy_settings_show(SettingsUi *ui)
         gtk_widget_destroy(dlg);
         return;
     }
-    ui_from_config(ui);
+    {
+        App *app = lyy_app();
+        LyyConfig disk;
+        if (lyy_config_load(app->config_path, &disk) < 0)
+            disk = app->config;
+        ui_from_config(ui, &disk);
+    }
     gtk_window_present(GTK_WINDOW(ui->window));
     lyy_log(&lyy_app()->log, "settings show: 设置窗已呈现");
 }

@@ -103,6 +103,16 @@ static gboolean on_theme_timer(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
+static void on_win_destroy_conn(GtkWidget *w, gpointer user_data)
+{
+    (void)w;
+    CandidateWindow *cw = user_data;
+    if (cw->pointer_conn) {
+        xcb_disconnect(cw->pointer_conn);
+        cw->pointer_conn = NULL;
+    }
+}
+
 /* 光标跟随:80ms 轮询 xcb_query_pointer(root-window style 下无 spot 通知)。
  * 悬停/菜单冻结(§15):指针一旦进入候选窗或右键菜单打开,窗口定住——
  * 否则窗永远贴在指针右下 20px,行根本点不中、右键菜单无法交互。 */
@@ -113,10 +123,13 @@ static gboolean on_pos_timer(gpointer user_data)
         return G_SOURCE_REMOVE;
     if (cw->hover || cw->menu_open)
         return G_SOURCE_CONTINUE;
+    if (!cw->pointer_conn)
+        return G_SOURCE_CONTINUE;
 
-    xcb_query_pointer_cookie_t cookie = xcb_query_pointer(cw->conn, cw->root);
+    xcb_query_pointer_cookie_t cookie =
+        xcb_query_pointer(cw->pointer_conn, cw->root);
     xcb_query_pointer_reply_t *reply =
-        xcb_query_pointer_reply(cw->conn, cookie, NULL);
+        xcb_query_pointer_reply(cw->pointer_conn, cookie, NULL);
     if (reply) {
         /* 几何悬停兜底:指针已在当前窗口矩形内 → 直接冻结。
          * enter/leave 事件经 GTK 派发,与 80ms 定时存在竞态(指针瞬移进窗、
@@ -180,10 +193,22 @@ static gboolean on_win_leave(GtkWidget *w, GdkEventCrossing *ev,
 /* ---- 右键菜单(§15 候选管理:固定首位/删除词组/反查英文) ---- */
 
 /* 菜单关闭:解冻跟随 + 销毁菜单(popup 期间 grab 会压住行事件) */
+static gboolean menu_destroy_idle(gpointer data)
+{
+    GtkWidget *menu = data;
+    gtk_menu_popdown(GTK_MENU(menu));
+    gtk_widget_destroy(menu);
+    g_object_unref(menu);
+    return G_SOURCE_REMOVE;
+}
+
 static void on_menu_done(GtkMenuShell *menu, gpointer user_data)
 {
-    (void)menu;
     ((CandidateWindow *)user_data)->menu_open = FALSE;
+    if (g_object_get_data(G_OBJECT(menu), "lyy-done"))
+        return;
+    g_object_set_data(G_OBJECT(menu), "lyy-done", GINT_TO_POINTER(1));
+    g_idle_add(menu_destroy_idle, menu);
 }
 
 /* 自定义查询(§15 菜单第 4 项,宿主侧动作):网址模板 {q} 占位符替换为
@@ -228,14 +253,20 @@ static void on_menu_item_activate(GtkMenuItem *item, gpointer user_data)
         cw->op_fn(idx, op, cw->op_user_data);
 }
 
-static void popup_row_menu(CandidateWindow *cw, int idx, GdkEventButton *ev)
+GtkWidget *lyy_candwin_build_menu(CandidateWindow *cw, int idx)
 {
-    if (!cw->op_state_fn || !cw->op_fn)
-        return;
+    if (idx == -1) {
+        if (!cw->general_fn)
+            return NULL;
+        GtkWidget *menu = gtk_menu_new();
+        cw->general_fn(GTK_MENU_SHELL(menu), cw->general_user_data);
+        return menu;
+    }
+    if (idx < 0 || idx >= cw->row_count || !cw->op_state_fn || !cw->op_fn)
+        return NULL;
     int pinned = cw->op_state_fn(idx, cw->op_user_data);
     if (pinned < 0)
-        return; /* 功能键/空行不支持菜单 */
-
+        return NULL;
     GtkWidget *menu = gtk_menu_new();
     struct { const char *label; int op; } items[] = {
         { pinned ? "取消固定首位" : "固定首位", LYY_CAND_OP_PIN },
@@ -245,7 +276,8 @@ static void popup_row_menu(CandidateWindow *cw, int idx, GdkEventButton *ev)
     for (gsize i = 0; i < G_N_ELEMENTS(items); i++) {
         GtkWidget *item = gtk_menu_item_new_with_label(items[i].label);
         g_object_set_data(G_OBJECT(item), "lyy-idx", GINT_TO_POINTER(idx));
-        g_object_set_data(G_OBJECT(item), "lyy-op", GINT_TO_POINTER(items[i].op));
+        g_object_set_data(G_OBJECT(item), "lyy-op",
+                          GINT_TO_POINTER(items[i].op));
         g_signal_connect(item, "activate",
                          G_CALLBACK(on_menu_item_activate), cw);
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
@@ -262,11 +294,36 @@ static void popup_row_menu(CandidateWindow *cw, int idx, GdkEventButton *ev)
                          G_CALLBACK(on_menu_item_activate), cw);
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
     }
+    return menu;
+}
+static void popup_row_menu(CandidateWindow *cw, int idx, GdkEventButton *ev)
+{
+    GtkWidget *menu = lyy_candwin_build_menu(cw, idx);
+    if (!menu)
+        return;
     cw->menu_open = TRUE;
+    g_object_ref_sink(menu);
     g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_done), cw);
     g_signal_connect(menu, "selection-done", G_CALLBACK(on_menu_done), cw);
     gtk_widget_show_all(menu);
     gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)ev);
+}
+
+static gboolean on_gear_pressed(GtkWidget *w, GdkEventButton *ev,
+                                gpointer user_data)
+{
+    (void)w;
+    CandidateWindow *cw = user_data;
+    if (ev->button == 1) {
+        if (cw->settings_fn)
+            cw->settings_fn(cw->settings_user_data);
+        return TRUE;
+    }
+    if (ev->button == 3 && cw->general_fn) {
+        popup_row_menu(cw, -1, ev);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /* 行点击(§14 鼠标点选 + §15 右键菜单):左键 → 宿主回调(select_candidate),
@@ -279,6 +336,27 @@ static gboolean on_win_pressed(GtkWidget *win, GdkEventButton *ev,
                                gpointer user_data)
 {
     CandidateWindow *cw = user_data;
+    {
+        int gx = 0, gy = 0;
+        if (cw->gear && gtk_widget_get_visible(cw->gear) &&
+            gtk_widget_translate_coordinates(cw->gear, win, 0, 0, &gx, &gy)) {
+            GtkAllocation ga;
+            gtk_widget_get_allocation(cw->gear, &ga);
+            if (ev->x >= gx && ev->x < gx + ga.width && ev->y >= gy &&
+                ev->y < gy + ga.height) {
+                if (ev->button == 1) {
+                    if (cw->settings_fn)
+                        cw->settings_fn(cw->settings_user_data);
+                    return TRUE;
+                }
+                if (ev->button == 3 && cw->general_fn) {
+                    popup_row_menu(cw, -1, ev);
+                    return TRUE;
+                }
+                return TRUE;
+            }
+        }
+    }
     int idx = -1;
     for (int i = 0; i < cw->row_count; i++) {
         int rx = 0, ry = 0;
@@ -293,10 +371,15 @@ static gboolean on_win_pressed(GtkWidget *win, GdkEventButton *ev,
             break;
         }
     }
-    if (idx < 0)
+    if (idx < 0) {
+        if (ev->button == 3 && cw->general_fn) {
+            popup_row_menu(cw, -1, ev);
+            return TRUE;
+        }
         return FALSE;
+    }
     if (ev->button == 3) {
-        if (cw->op_state_fn && cw->op_fn)
+        if ((cw->op_state_fn && cw->op_fn) || cw->general_fn)
             popup_row_menu(cw, idx, ev);
         return TRUE; /* 右键永不穿透为点选 */
     }
@@ -311,6 +394,7 @@ static GtkWidget *make_row(CandidateWindow *cw, int i)
 {
     /* 单元格间距 6px:序号/候选词/注释不粘连,与皮肤预览一致 */
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(row, GTK_ALIGN_START);
     gtk_style_context_add_class(gtk_widget_get_style_context(row), "lyy-row");
     cw->num[i] = gtk_label_new(NULL);
     gtk_style_context_add_class(gtk_widget_get_style_context(cw->num[i]),
@@ -334,6 +418,12 @@ void lyy_candwin_init(CandidateWindow *cw, xcb_connection_t *conn,
     memset(cw, 0, sizeof(*cw));
     cw->conn = conn;
     cw->root = root;
+    cw->pointer_conn = xcb_connect(NULL, NULL);
+    if (xcb_connection_has_error(cw->pointer_conn)) {
+        xcb_disconnect(cw->pointer_conn);
+        cw->pointer_conn = NULL;
+        g_warning("候选窗独立指针连接失败:跟随定位停用");
+    }
     cw->font_size = font_size < 10 || font_size > 28 ? 14 : font_size;
     if (css_dir)
         snprintf(cw->css_dir, sizeof(cw->css_dir), "%s", css_dir);
@@ -373,6 +463,20 @@ void lyy_candwin_init(CandidateWindow *cw, xcb_connection_t *conn,
     gtk_widget_set_halign(cw->preedit, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(header), cw->preedit, FALSE, FALSE, 0);
 
+    cw->gear = gtk_button_new();
+    GtkWidget *gear_img = gtk_image_new_from_icon_name(
+        "emblem-system-symbolic", GTK_ICON_SIZE_MENU);
+    gtk_button_set_image(GTK_BUTTON(cw->gear), gear_img);
+    gtk_button_set_relief(GTK_BUTTON(cw->gear), GTK_RELIEF_NONE);
+    gtk_widget_set_can_focus(cw->gear, FALSE);
+    gtk_widget_set_tooltip_text(cw->gear, "打开设置");
+    AtkObject *gear_acc = gtk_widget_get_accessible(cw->gear);
+    if (gear_acc)
+        atk_object_set_name(gear_acc, "打开设置");
+    gtk_box_pack_end(GTK_BOX(header), cw->gear, FALSE, FALSE, 0);
+    g_signal_connect(cw->gear, "button-press-event",
+                     G_CALLBACK(on_gear_pressed), cw);
+
     cw->page = gtk_label_new(NULL);
     gtk_style_context_add_class(gtk_widget_get_style_context(cw->page),
                                 "lyy-page");
@@ -395,6 +499,8 @@ void lyy_candwin_init(CandidateWindow *cw, xcb_connection_t *conn,
                      G_CALLBACK(on_win_enter), cw);
     g_signal_connect(cw->win, "leave-notify-event",
                      G_CALLBACK(on_win_leave), cw);
+    g_signal_connect(cw->win, "destroy",
+                     G_CALLBACK(on_win_destroy_conn), cw);
 
     /* 皮肤默认「跟随系统」;宿主(main.c)随后按 config.skin 调 set_skin */
     snprintf(cw->skin, sizeof(cw->skin), "%s", "system");
@@ -410,6 +516,19 @@ void lyy_candwin_set_op_fns(CandidateWindow *cw, LyyCandwinOpStateFn state_fn,
     cw->op_user_data = user_data;
 }
 
+void lyy_candwin_set_general_fn(CandidateWindow *cw, LyyCandwinMenuFn fn,
+                                void *user_data)
+{
+    cw->general_fn = fn;
+    cw->general_user_data = user_data;
+}
+
+void lyy_candwin_set_settings_fn(CandidateWindow *cw,
+                                 LyyCandwinSettingsFn fn, void *user_data)
+{
+    cw->settings_fn = fn;
+    cw->settings_user_data = user_data;
+}
 void lyy_candwin_set_query(CandidateWindow *cw, const char *label,
                            const char *url)
 {

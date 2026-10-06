@@ -1092,6 +1092,7 @@ name = "lyyime-ibus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gtk",
  "libc",
  "lyyime-ai",
  "lyyime-core",

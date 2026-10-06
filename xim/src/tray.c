@@ -90,6 +90,278 @@ static void on_quit(GtkWidget *widget, gpointer user_data)
     app->quit_requested = 1;
 }
 
+static void on_general_settings(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    lyy_request_show_settings(user_data);
+}
+static void on_general_settings_input(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    lyy_request_show_settings_page(user_data, 1);
+}
+static void on_general_settings_skin(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    lyy_request_show_settings_page(user_data, 6);
+}
+static int cfg_save_flag(App *app, int which, int on, const char *name)
+{
+    LyyConfig c;
+    if (lyy_config_load(app->config_path, &c) < 0) {
+        lyy_show_notice(app, "读取配置失败,改动未保存");
+        lyy_log(&app->log, "WARN 菜单切换 %s 中止:读取 %s 失败", name,
+                app->config_path);
+        return 0;
+    }
+    int *field = NULL;
+    switch (which) {
+    case 0: field = &c.chinese_punct; break;
+    case 1: field = &c.learning; break;
+    case 2: field = &c.next_word_prediction; break;
+    case 3: field = &c.quick_actions_enabled; break;
+    case 4: field = &c.pinyin_only; break;
+    default: return 0;
+    }
+    *field = on;
+    if (lyy_config_save(app->config_path, &c) != 0) {
+        lyy_show_notice(app, "配置保存失败,改动未生效");
+        lyy_log(&app->log, "WARN 菜单切换 %s 失败:保存 %s 失败", name,
+                app->config_path);
+        return 0;
+    }
+    switch (which) {
+    case 0: app->config.chinese_punct = on; break;
+    case 1: app->config.learning = on; break;
+    case 2: app->config.next_word_prediction = on; break;
+    case 3: app->config.quick_actions_enabled = on; break;
+    case 4: app->config.pinyin_only = on; break;
+    }
+    lyy_log(&app->log, "菜单切换 %s → %d(已保存)", name, on);
+    return 1;
+}
+static int menu_flag_cur(App *app, int which)
+{
+    LyyConfig disk;
+    if (lyy_config_load(app->config_path, &disk) >= 0) {
+        switch (which) {
+        case 1: return disk.learning;
+        case 2: return disk.next_word_prediction;
+        case 3: return disk.quick_actions_enabled;
+        case 4: return disk.pinyin_only;
+        }
+    }
+    switch (which) {
+    case 1: return app->config.learning;
+    case 2: return app->config.next_word_prediction;
+    case 3: return app->config.quick_actions_enabled;
+    case 4: return app->config.pinyin_only;
+    }
+    return 0;
+}
+static int menu_punct_cur(App *app)
+{
+    if (app->engine && app->core.punct_ok)
+        return app->punct_runtime;
+    LyyConfig disk;
+    if (lyy_config_load(app->config_path, &disk) >= 0)
+        return disk.chinese_punct;
+    return app->config.chinese_punct;
+}
+static void on_menu_punct_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    App *app = user_data;
+    int on = gtk_check_menu_item_get_active(item);
+    if (on == menu_punct_cur(app))
+        return;
+    if (!app->core.punct_ok) {
+        lyy_show_notice(app, "当前词库核心不支持运行时标点切换");
+        gtk_check_menu_item_set_active(item, !on);
+        return;
+    }
+    if (!cfg_save_flag(app, 0, on, "中文标点")) {
+        gtk_check_menu_item_set_active(item, !on);
+        return;
+    }
+    if (app->engine)
+        app->core.lyyime_set_chinese_punctuation(app->engine, on);
+    app->punct_runtime = on;
+}
+static void on_menu_learn_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    App *app = user_data;
+    int on = gtk_check_menu_item_get_active(item);
+    if (on == menu_flag_cur(app, 1))
+        return;
+    if (!app->core.learn_ok) {
+        lyy_show_notice(app, "当前词库核心不支持运行时学习开关");
+        gtk_check_menu_item_set_active(item, !on);
+        return;
+    }
+    if (!cfg_save_flag(app, 1, on, "用户词学习")) {
+        gtk_check_menu_item_set_active(item, !on);
+        return;
+    }
+    if (app->engine)
+        app->core.lyyime_set_learning(app->engine, on);
+}
+static void on_menu_pred_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    App *app = user_data;
+    int on = gtk_check_menu_item_get_active(item);
+    if (on == menu_flag_cur(app, 2))
+        return;
+    if (!cfg_save_flag(app, 2, on, "上屏后联想")) {
+        gtk_check_menu_item_set_active(item, !on);
+        return;
+    }
+    if (app->core.pred_ok && app->engine)
+        app->core.lyyime_set_next_word_prediction(app->engine, on);
+}
+static void on_menu_qa_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    App *app = user_data;
+    int on = gtk_check_menu_item_get_active(item);
+    if (on == menu_flag_cur(app, 3))
+        return;
+    if (!cfg_save_flag(app, 3, on, "快速功能键")) {
+        gtk_check_menu_item_set_active(item, !on);
+        return;
+    }
+    if (app->core.qa_ok && app->engine)
+        app->core.lyyime_set_quick_actions_enabled(app->engine, on);
+}
+static void on_menu_scheme_toggled(GtkCheckMenuItem *item, gpointer user_data);
+static void scheme_radio_restore(App *app, GtkWidget *item)
+{
+    GtkWidget *peer = g_object_get_data(G_OBJECT(item), "lyy-peer");
+    if (!peer)
+        return;
+    g_signal_handlers_block_by_func(peer,
+                                    (gpointer)on_menu_scheme_toggled, app);
+    g_signal_handlers_block_by_func(item,
+                                    (gpointer)on_menu_scheme_toggled, app);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(peer), TRUE);
+    g_signal_handlers_unblock_by_func(peer,
+                                      (gpointer)on_menu_scheme_toggled, app);
+    g_signal_handlers_unblock_by_func(item,
+                                      (gpointer)on_menu_scheme_toggled, app);
+}
+static void on_menu_scheme_toggled(GtkCheckMenuItem *item, gpointer user_data)
+{
+    App *app = user_data;
+    if (!gtk_check_menu_item_get_active(item))
+        return;
+    int want = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "lyy-pure"));
+    if (want == menu_flag_cur(app, 4))
+        return;
+    if (!app->core.pinyin_ok) {
+        lyy_show_notice(app, "纯拼音需要更新词库核心(liblyyime_core.so)");
+        scheme_radio_restore(app, GTK_WIDGET(item));
+        return;
+    }
+    if (!cfg_save_flag(app, 4, want, "输入方案")) {
+        scheme_radio_restore(app, GTK_WIDGET(item));
+        return;
+    }
+    if (app->engine) {
+        app->core.lyyime_set_pinyin_only(app->engine, want);
+        lyy_compose_clear_ui(app);
+    }
+    lyy_show_notice(app, want ? "已切换:纯拼音" : "已切换:五笔/拼音混输");
+}
+void lyy_general_menu_append(App *app, GtkMenuShell *shell)
+{
+    LyyConfig snap = app->config;
+    {
+        LyyConfig disk;
+        if (lyy_config_load(app->config_path, &disk) >= 0)
+            snap = disk;
+    }
+    GtkWidget *item;
+    item = gtk_menu_item_new_with_label("设置…");
+    g_signal_connect(item, "activate", G_CALLBACK(on_general_settings), app);
+    gtk_menu_shell_append(shell, item);
+    item = gtk_menu_item_new_with_label("输入设置…");
+    g_signal_connect(item, "activate", G_CALLBACK(on_general_settings_input),
+                     app);
+    gtk_menu_shell_append(shell, item);
+    item = gtk_menu_item_new_with_label("皮肤设置…");
+    g_signal_connect(item, "activate", G_CALLBACK(on_general_settings_skin),
+                     app);
+    gtk_menu_shell_append(shell, item);
+    gtk_menu_shell_append(shell, gtk_separator_menu_item_new());
+    item = gtk_menu_item_new_with_label("切换 中/EN(Shift 单击)");
+    g_signal_connect(item, "activate", G_CALLBACK(on_toggle_mode), app);
+    gtk_menu_shell_append(shell, item);
+    GtkWidget *mixed =
+        gtk_radio_menu_item_new_with_label(NULL, "五笔/拼音混输");
+    GtkWidget *pure = gtk_radio_menu_item_new_with_label(
+        gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(mixed)),
+        "纯拼音");
+    gtk_check_menu_item_set_active(
+        GTK_CHECK_MENU_ITEM(snap.pinyin_only ? pure : mixed), TRUE);
+    g_object_set_data(G_OBJECT(mixed), "lyy-pure", GINT_TO_POINTER(0));
+    g_object_set_data(G_OBJECT(pure), "lyy-pure", GINT_TO_POINTER(1));
+    g_object_set_data(G_OBJECT(mixed), "lyy-peer", pure);
+    g_object_set_data(G_OBJECT(pure), "lyy-peer", mixed);
+    if (!app->core.pinyin_ok) {
+        gtk_widget_set_sensitive(pure, FALSE);
+        gtk_widget_set_tooltip_text(
+            pure, "需要更新词库核心(liblyyime_core.so)才支持纯拼音");
+    }
+    g_signal_connect(mixed, "toggled", G_CALLBACK(on_menu_scheme_toggled),
+                     app);
+    g_signal_connect(pure, "toggled", G_CALLBACK(on_menu_scheme_toggled),
+                     app);
+    gtk_menu_shell_append(shell, mixed);
+    gtk_menu_shell_append(shell, pure);
+    item = gtk_check_menu_item_new_with_label("中文标点");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item),
+                                   menu_punct_cur(app));
+    if (!app->core.punct_ok) {
+        gtk_widget_set_sensitive(item, FALSE);
+        gtk_widget_set_tooltip_text(
+            item, "当前词库核心不支持运行时标点切换");
+    }
+    g_signal_connect(item, "toggled", G_CALLBACK(on_menu_punct_toggled),
+                     app);
+    gtk_menu_shell_append(shell, item);
+    item = gtk_check_menu_item_new_with_label("用户词学习");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item),
+                                   snap.learning);
+    if (!app->core.learn_ok) {
+        gtk_widget_set_sensitive(item, FALSE);
+        gtk_widget_set_tooltip_text(
+            item, "当前词库核心不支持运行时学习开关");
+    }
+    g_signal_connect(item, "toggled", G_CALLBACK(on_menu_learn_toggled),
+                     app);
+    gtk_menu_shell_append(shell, item);
+    item = gtk_check_menu_item_new_with_label("上屏后联想");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item),
+                                   snap.next_word_prediction);
+    if (!app->core.pred_ok)
+        gtk_widget_set_sensitive(item, FALSE);
+    g_signal_connect(item, "toggled", G_CALLBACK(on_menu_pred_toggled),
+                     app);
+    gtk_menu_shell_append(shell, item);
+    item = gtk_check_menu_item_new_with_label("快速功能键");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item),
+                                   snap.quick_actions_enabled);
+    if (!app->core.qa_ok)
+        gtk_widget_set_sensitive(item, FALSE);
+    g_signal_connect(item, "toggled", G_CALLBACK(on_menu_qa_toggled),
+                     app);
+    gtk_menu_shell_append(shell, item);
+    gtk_menu_shell_append(shell, gtk_separator_menu_item_new());
+    item = gtk_menu_item_new_with_label("截屏");
+    g_signal_connect(item, "activate", G_CALLBACK(on_screenshot_tool), app);
+    gtk_menu_shell_append(shell, item);
+    item = gtk_menu_item_new_with_label("重载词库");
+    g_signal_connect(item, "activate", G_CALLBACK(on_reload_dict_tool), app);
+    gtk_menu_shell_append(shell, item);
+}
 /* 左键单击图标 = 切换中英(对齐搜狗/万能五笔习惯) */
 static void on_status_activate(GtkStatusIcon *icon, gpointer user_data)
 {

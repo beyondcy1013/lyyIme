@@ -45,6 +45,77 @@ static int rgba_eq(GdkRGBA a, GdkRGBA b)
            fabs(a.blue - b.blue) < 0.02;
 }
 
+static int menu_test_op_state(int idx, void *user_data)
+{
+    (void)user_data;
+    return idx == 0 ? 0 : -1;
+}
+static void menu_test_op(int idx, int op, void *user_data)
+{
+    (void)idx;
+    (void)op;
+    (void)user_data;
+}
+static void menu_test_general(GtkMenuShell *shell, void *user_data)
+{
+    (void)user_data;
+    gtk_menu_shell_append(shell,
+                          gtk_menu_item_new_with_label("测试通用项"));
+}
+
+static GtkWidget *g_last_shell;
+static void menu_test_general_track(GtkMenuShell *shell, void *user_data)
+{
+    (void)user_data;
+    g_last_shell = GTK_WIDGET(shell);
+    gtk_menu_shell_append(shell,
+                          gtk_menu_item_new_with_label("测试通用项"));
+}
+
+static void on_menu_gone(gpointer data, GObject *dead)
+{
+    (void)dead;
+    *(GtkWidget **)data = NULL;
+}
+static int menu_has_label(GtkWidget *menu, const char *label)
+{
+    GList *children = gtk_container_get_children(GTK_CONTAINER(menu));
+    int found = 0;
+    for (GList *l = children; l; l = l->next) {
+        GtkWidget *item = l->data;
+        const gchar *text = gtk_menu_item_get_label(GTK_MENU_ITEM(item));
+        if (text && strcmp(text, label) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    g_list_free(children);
+    return found;
+}
+static int menu_has_sep(GtkWidget *menu)
+{
+    GList *children = gtk_container_get_children(GTK_CONTAINER(menu));
+    int found = 0;
+    for (GList *l = children; l; l = l->next) {
+        if (GTK_IS_SEPARATOR_MENU_ITEM(l->data)) {
+            found = 1;
+            break;
+        }
+    }
+    g_list_free(children);
+    return found;
+}
+static int menu_item_count(GtkWidget *menu)
+{
+    GList *children = gtk_container_get_children(GTK_CONTAINER(menu));
+    int n = g_list_length(children);
+    g_list_free(children);
+    return n;
+}
+static void settings_count_cb(void *user_data)
+{
+    ++*(int *)user_data;
+}
 static GdkRGBA color_of(GtkWidget *w)
 {
     GdkRGBA c = { 0, 0, 0, 0 };
@@ -266,6 +337,8 @@ int main(void)
     CandidateWindow cw;
     lyy_candwin_init(&cw, conn, root, NULL, 14); /* css_dir NULL → 内置布局 */
     CHECK(strcmp(cw.skin, "system") == 0, "候选窗默认皮肤 system");
+    CHECK(cw.pointer_conn && cw.pointer_conn != conn,
+          "指针跟随使用独立 xcb 连接(非借用 XIM conn)");
     gtk_widget_show_all(cw.win);
     pump(300);
 
@@ -381,8 +454,252 @@ int main(void)
         g_object_set(gs, "gtk-application-prefer-dark-theme", FALSE, NULL);
     }
 
+    {
+        lyy_candwin_set_op_fns(&cw, menu_test_op_state, menu_test_op, NULL);
+        lyy_candwin_set_general_fn(&cw, menu_test_general, NULL);
+        GtkWidget *m = lyy_candwin_build_menu(&cw, 0);
+        CHECK(m && menu_has_label(m, "固定首位") &&
+                  menu_has_label(m, "删除词组") &&
+                  menu_has_label(m, "反查英文") &&
+                  !menu_has_label(m, "测试通用项") && !menu_has_sep(m) &&
+                  menu_item_count(m) == 3,
+              "词行菜单:仅固定/删除/反查 3 项,无通用项无分隔");
+        if (m)
+            gtk_widget_destroy(m);
+        CHECK(lyy_candwin_build_menu(&cw, 1) == NULL,
+              "功能行(pinned<0):无菜单不回退通用");
+        CHECK(lyy_candwin_build_menu(&cw, 99) == NULL,
+              "越界行:无菜单不回退通用");
+        m = lyy_candwin_build_menu(&cw, -1);
+        CHECK(m && menu_has_label(m, "测试通用项") &&
+                  !menu_has_label(m, "固定首位") &&
+                  !menu_has_label(m, "删除词组") &&
+                  !menu_has_label(m, "反查英文") &&
+                  menu_item_count(m) == 1,
+              "系统区菜单(idx<0):纯通用项,无词操作");
+        if (m)
+            gtk_widget_destroy(m);
+        lyy_candwin_set_op_fns(&cw, NULL, NULL, NULL);
+        lyy_candwin_set_general_fn(&cw, NULL, NULL);
+        CHECK(lyy_candwin_build_menu(&cw, 0) == NULL,
+              "无回调时不建菜单");
+        CHECK(lyy_candwin_build_menu(&cw, -1) == NULL,
+              "无回调时系统区也不建菜单");
+        lyy_candwin_set_op_fns(&cw, menu_test_op_state, menu_test_op, NULL);
+        lyy_candwin_set_general_fn(&cw, menu_test_general, NULL);
+    }
+    /* 表头齿轮 + 行内空白命中:词行自然宽度 ⇒ 词右侧空白算系统区 */
+    {
+        CHECK(cw.gear != NULL, "表头存在设置齿轮");
+        int g_settings = 0;
+        lyy_candwin_set_settings_fn(&cw, settings_count_cb, &g_settings);
+        lyy_candwin_set_general_fn(&cw, menu_test_general_track, NULL);
+        lyy_candwin_set_preedit(&cw, "nihao");
+        lyy_candwin_begin_rows(&cw);
+        lyy_candwin_add_row(&cw, 0, "好", "h");
+        lyy_candwin_add_row(&cw, 1, "你好世界你好世界", "nhsj");
+        lyy_candwin_set_page(&cw, 1, 2);
+        lyy_candwin_commit_layout(&cw);
+        gtk_widget_show_all(cw.win);
+        pump(300);
+        CHECK(gtk_widget_get_visible(cw.gear), "有候选时齿轮可见");
+        GtkAllocation ga, pa;
+        gtk_widget_get_allocation(cw.gear, &ga);
+        gtk_widget_get_allocation(cw.page, &pa);
+        const gchar *pt = gtk_label_get_text(GTK_LABEL(cw.page));
+        CHECK(pt != NULL && pt[0] != '\0', "页签文本非空(几何前置)");
+        int gx = 0, gy = 0, px = 0, py = 0;
+        gtk_widget_translate_coordinates(cw.gear, cw.win, 0, 0, &gx, &gy);
+        gtk_widget_translate_coordinates(cw.page, cw.win, 0, 0, &px, &py);
+        CHECK(gx >= px + pa.width, "齿轮位于页签右侧且不重叠(最右)");
+        /* 齿轮左键 → settings_fn 恰好一次,不上屏 */
+        GdkSeat *seat =
+            gdk_display_get_default_seat(gdk_display_get_default());
+        GdkEventButton *ev =
+            (GdkEventButton *)gdk_event_new(GDK_BUTTON_PRESS);
+        ev->window = g_object_ref(gtk_widget_get_window(cw.win));
+        ev->send_event = TRUE;
+        ev->time = GDK_CURRENT_TIME;
+        ev->device = gdk_seat_get_pointer(seat);
+        ev->button = 1;
+        ev->x = gx + ga.width / 2;
+        ev->y = gy + ga.height / 2;
+        gboolean handled = FALSE;
+        g_signal_emit_by_name(cw.win, "button-press-event", ev, &handled);
+        gdk_event_free((GdkEvent *)ev);
+        pump(150);
+        CHECK(handled && g_settings == 1 && g_last_shell == NULL &&
+                  !cw.menu_open,
+              "齿轮左键:设置回调恰好一次且无菜单");
+        /* 齿轮右键 → 系统区通用菜单(绝不出词操作) */
+        g_last_shell = NULL;
+        ev = (GdkEventButton *)gdk_event_new(GDK_BUTTON_PRESS);
+        ev->window = g_object_ref(gtk_widget_get_window(cw.win));
+        ev->send_event = TRUE;
+        ev->time = GDK_CURRENT_TIME;
+        ev->device = gdk_seat_get_pointer(seat);
+        ev->button = 3;
+        ev->x = gx + ga.width / 2;
+        ev->y = gy + ga.height / 2;
+        handled = FALSE;
+        g_signal_emit_by_name(cw.win, "button-press-event", ev, &handled);
+        gdk_event_free((GdkEvent *)ev);
+        pump(150);
+        CHECK(handled && g_settings == 1 && cw.menu_open &&
+                  g_last_shell != NULL &&
+                  menu_has_label(g_last_shell, "测试通用项") &&
+                  !menu_has_label(g_last_shell, "固定首位"),
+              "齿轮右键:系统区菜单(无词操作,不触发设置)");
+        if (g_last_shell) {
+            g_signal_emit_by_name(g_last_shell, "deactivate");
+            pump(150);
+        }
+        /* 词行右侧空白(行内,同一行高)→ 系统区通用菜单 */
+        int r0x = 0, r0y = 0;
+        GtkAllocation r0a;
+        gtk_widget_translate_coordinates(cw.rows[0], cw.win, 0, 0, &r0x,
+                                         &r0y);
+        gtk_widget_get_allocation(cw.rows[0], &r0a);
+        int r1x = 0, r1y = 0;
+        GtkAllocation r1a;
+        gtk_widget_translate_coordinates(cw.rows[1], cw.win, 0, 0, &r1x,
+                                         &r1y);
+        gtk_widget_get_allocation(cw.rows[1], &r1a);
+        CHECK(r1a.width > r0a.width,
+              "短行自然宽度小于长行(供行内空白命中)");
+        g_last_shell = NULL;
+        ev = (GdkEventButton *)gdk_event_new(GDK_BUTTON_PRESS);
+        ev->window = g_object_ref(gtk_widget_get_window(cw.win));
+        ev->send_event = TRUE;
+        ev->time = GDK_CURRENT_TIME;
+        ev->device = gdk_seat_get_pointer(seat);
+        ev->button = 3;
+        ev->x = r0x + r0a.width + 4; /* 行 0 右缘之外,行 0 行高之内 */
+        ev->y = r0y + r0a.height / 2;
+        handled = FALSE;
+        g_signal_emit_by_name(cw.win, "button-press-event", ev, &handled);
+        gdk_event_free((GdkEvent *)ev);
+        pump(150);
+        CHECK(handled && cw.menu_open && g_last_shell != NULL &&
+                  menu_has_label(g_last_shell, "测试通用项") &&
+                  !menu_has_label(g_last_shell, "固定首位"),
+              "词行右侧空白右键:系统区菜单(无词操作)");
+        if (g_last_shell) {
+            g_signal_emit_by_name(g_last_shell, "deactivate");
+            pump(150);
+        }
+        /* 词行内右键 → 词菜单(仅词操作) */
+        g_last_shell = NULL;
+        GtkWidget *wm =
+            lyy_candwin_build_menu(&cw, 0);
+        CHECK(wm && menu_has_label(wm, "固定首位") &&
+                  !menu_has_label(wm, "测试通用项"),
+              "行内词菜单复核:词操作无通用项");
+        if (wm)
+            gtk_widget_destroy(wm);
+        lyy_candwin_set_page(&cw, 1, 1);
+        /* 零候选但有预编辑:齿轮仍在且可点 */
+        lyy_candwin_begin_rows(&cw);
+        lyy_candwin_set_preedit(&cw, "xyz");
+        lyy_candwin_commit_layout(&cw);
+        gtk_widget_show_all(cw.win);
+        pump(200);
+        CHECK(gtk_widget_get_visible(cw.gear) &&
+                  gtk_widget_get_visible(cw.win),
+              "零候选预编辑态:窗与齿轮仍可见");
+        gtk_widget_translate_coordinates(cw.gear, cw.win, 0, 0, &gx, &gy);
+        gtk_widget_get_allocation(cw.gear, &ga);
+        ev = (GdkEventButton *)gdk_event_new(GDK_BUTTON_PRESS);
+        ev->window = g_object_ref(gtk_widget_get_window(cw.win));
+        ev->send_event = TRUE;
+        ev->time = GDK_CURRENT_TIME;
+        ev->device = gdk_seat_get_pointer(seat);
+        ev->button = 1;
+        ev->x = gx + ga.width / 2;
+        ev->y = gy + ga.height / 2;
+        handled = FALSE;
+        g_signal_emit_by_name(cw.win, "button-press-event", ev, &handled);
+        gdk_event_free((GdkEvent *)ev);
+        pump(150);
+        CHECK(handled && g_settings == 2,
+              "零候选态齿轮左键:再次精确调用一次");
+        ev = (GdkEventButton *)gdk_event_new(GDK_BUTTON_PRESS);
+        ev->window = g_object_ref(gtk_widget_get_window(cw.gear));
+        ev->send_event = TRUE;
+        ev->time = GDK_CURRENT_TIME;
+        ev->device = gdk_seat_get_pointer(seat);
+        ev->button = 1;
+        ev->x = ga.width / 2;
+        ev->y = ga.height / 2;
+        handled = FALSE;
+        g_signal_emit_by_name(cw.gear, "button-press-event", ev,
+                              &handled);
+        gdk_event_free((GdkEvent *)ev);
+        pump(150);
+        CHECK(handled && g_settings == 3 && g_last_shell == NULL &&
+                  !cw.menu_open,
+              "齿轮子widget左键:直连回调恰好一次");
+        lyy_candwin_set_preedit(&cw, "");
+        lyy_candwin_set_settings_fn(&cw, NULL, NULL);
+        lyy_candwin_set_general_fn(&cw, NULL, NULL);
+    }
+    {
+        lyy_candwin_begin_rows(&cw);
+        lyy_candwin_add_row(&cw, 0, "你好", "nihao");
+        lyy_candwin_commit_layout(&cw);
+        gtk_widget_show_all(cw.win);
+        pump(200);
+        lyy_candwin_set_general_fn(&cw, menu_test_general_track, NULL);
+        for (int round = 1; round <= 5; round++) {
+            g_last_shell = NULL;
+            GdkSeat *seat =
+                gdk_display_get_default_seat(gdk_display_get_default());
+            GdkEventButton *ev =
+                (GdkEventButton *)gdk_event_new(GDK_BUTTON_PRESS);
+            ev->window = g_object_ref(gtk_widget_get_window(cw.win));
+            ev->send_event = TRUE;
+            ev->time = GDK_CURRENT_TIME;
+            ev->device = gdk_seat_get_pointer(seat);
+            ev->button = 3;
+            ev->x = 12;
+            ev->y = 6;
+            gboolean handled = FALSE;
+            g_signal_emit_by_name(cw.win, "button-press-event", ev,
+                                  &handled);
+            gdk_event_free((GdkEvent *)ev);
+            pump(200);
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "第 %d 轮:右键表头弹出通用菜单", round);
+            CHECK(handled && cw.menu_open && g_last_shell != NULL, msg);
+            if (!g_last_shell)
+                break;
+            GtkWidget *menu = g_last_shell;
+            g_object_weak_ref(G_OBJECT(menu), on_menu_gone, &menu);
+            g_signal_emit_by_name(menu, "deactivate");
+            pump(200);
+            snprintf(msg, sizeof(msg),
+                     "第 %d 轮:deactivate 后 menu_open 复位", round);
+            CHECK(!cw.menu_open, msg);
+            snprintf(msg, sizeof(msg),
+                     "第 %d 轮:菜单对象已销毁", round);
+            CHECK(menu == NULL, msg);
+            GdkDisplay *dpy = gdk_display_get_default();
+            gboolean kbd_grabbed = gdk_display_device_is_grabbed(
+                dpy, gdk_seat_get_keyboard(seat));
+            gboolean ptr_grabbed = gdk_display_device_is_grabbed(
+                dpy, gdk_seat_get_pointer(seat));
+            snprintf(msg, sizeof(msg),
+                     "第 %d 轮:键/指针 grab 已归还", round);
+            CHECK(!kbd_grabbed && !ptr_grabbed &&
+                      gtk_grab_get_current() == NULL,
+                  msg);
+        }
+    }
+
     lyy_candwin_hide(&cw);
     gtk_widget_destroy(cw.win);
+    CHECK(cw.pointer_conn == NULL, "候选窗销毁后 pointer_conn 断开置空");
     xcb_disconnect(conn);
 
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",

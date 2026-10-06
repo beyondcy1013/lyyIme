@@ -323,9 +323,50 @@ fn wire(app: &Rc<App>) {
         let app3 = app.clone();
         app.next_btn.connect_clicked(move |_| flip(&app3, 1));
     }
+    // 候选条最右设置齿轮(非候选,不占序号):左键开设置,右键通用菜单;
+    // 常显 ⇒ 零候选时条尾空白区+齿轮仍可用
+    let gear_btn = gtk::Button::new();
+    gear_btn.set_image(Some(&gtk::Image::from_icon_name(
+        Some("emblem-system-symbolic"),
+        gtk::IconSize::Menu,
+    )));
+    gear_btn.set_relief(gtk::ReliefStyle::None);
+    gear_btn.set_can_focus(false);
+    gear_btn.set_tooltip_text(Some("打开设置"));
+    if let Some(acc) = gear_btn.accessible() {
+        acc.set_name("打开设置");
+    }
+    {
+        let app2 = app.clone();
+        gear_btn.connect_clicked(move |_| {
+            spawn_tool(&app2, "lyyime-xim", &["--settings"]);
+        });
+        let app3 = app.clone();
+        gear_btn.connect_button_press_event(move |_, ev| {
+            if ev.button() == 3 {
+                popup_general_menu(&app3, ev);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    cand_box.pack_end(&gear_btn, false, false, 0);
     cand_box.pack_end(&app.next_btn, false, false, 0);
     cand_box.pack_end(&app.prev_btn, false, false, 0);
-    v.pack_start(&cand_box, false, false, 0);
+    let cand_events = gtk::EventBox::new();
+    cand_events.add(&cand_box);
+    cand_events.add_events(gdk::EventMask::BUTTON_PRESS_MASK);
+    {
+        let app2 = app.clone();
+        cand_events.connect_button_press_event(move |_, ev| {
+            if ev.button() == 3 {
+                popup_general_menu(&app2, ev);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    v.pack_start(&cand_events, false, false, 0);
 
     // ---- 状态行 ----
     app.status.set_ellipsize(pango::EllipsizeMode::Start);
@@ -518,7 +559,9 @@ fn reload_dict(app: &Rc<App>) {
 /// 引擎把模式/启用态发布到 /tmp/lyyime-engine-state.json(变更即写+10s 心跳),
 /// 悬浮窗每秒读它联动显示; 30s 无新鲜心跳视为未运行。
 fn engine_prefix() -> String {
-    let body = std::fs::read_to_string("/tmp/lyyime-engine-state.json").unwrap_or_default();
+    let path = std::env::var("LYYIME_ENGINE_STATE_FILE")
+        .unwrap_or_else(|_| "/tmp/lyyime-engine-state.json".into());
+    let body = std::fs::read_to_string(path).unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
     let fresh = v
         .get("ts")
@@ -635,10 +678,14 @@ fn poll_stats(app: &Rc<App>) {
 /// 顶层 stats_* 键,悬浮窗经文件监视即时生效);本文件只负责停顿显示。
 
 // ---------- 目标窗口追踪 ----------
+fn input_target_allowed(wid: u32, self_xid: u64, title: &str) -> bool {
+    wid != 0 && wid as u64 != self_xid && title != "lyyIme 输入法设置"
+}
+
 fn poll_target(app: &Rc<App>) {
     if let Some(wid) = app.xtrack.active_window() {
-        if wid != 0 && wid as u64 != app.self_xid.get() {
-            let title = app.xtrack.window_title(wid);
+        let title = app.xtrack.window_title(wid);
+        if input_target_allowed(wid, app.self_xid.get(), &title) {
             let changed = {
                 let mut lt = app.last_target.borrow_mut();
                 if wid != lt.0 || title != lt.1 {
@@ -741,11 +788,57 @@ fn popup_cand_menu(app: &Rc<App>, j: usize, ev: &gdk::EventButton) {
         mi_q.connect_activate(move |_| cand_custom_query(&app, &cq, &text));
         menu.append(&mi_q);
     }
+    // 词/系统菜单严格分离:词菜单只含词操作,绝不掺通用项;
+    // 通用菜单仅经空白区/齿轮右键 popup_general_menu。
     menu.show_all();
-    menu.popup_at_pointer(None);
-    let _ = ev;
+    menu.popup_at_pointer(Some(ev));
 }
 
+fn append_general_menu(app: &Rc<App>, menu: &gtk::Menu) {
+    for (label, args) in [
+        ("设置…", &["--settings"][..]),
+        ("输入设置…", &["--settings-page", "1"][..]),
+        ("皮肤设置…", &["--settings-page", "6"][..]),
+    ] {
+        let mi = gtk::MenuItem::with_label(label);
+        {
+            let app = app.clone();
+            mi.connect_activate(move |_| spawn_tool(&app, "lyyime-xim", args));
+        }
+        menu.append(&mi);
+    }
+    let mi = gtk::MenuItem::with_label("截屏");
+    {
+        let app = app.clone();
+        mi.connect_activate(move |_| spawn_tool(&app, "lyyime-shot", &[]));
+    }
+    menu.append(&mi);
+    let mi = gtk::MenuItem::with_label("重载词库");
+    {
+        let app = app.clone();
+        mi.connect_activate(move |_| reload_dict(&app));
+    }
+    menu.append(&mi);
+}
+fn popup_general_menu(app: &Rc<App>, ev: &gdk::EventButton) {
+    let menu = gtk::Menu::new();
+    append_general_menu(app, &menu);
+    menu.show_all();
+    menu.popup_at_pointer(Some(ev));
+}
+fn spawn_tool(app: &Rc<App>, prog: &str, args: &[&str]) {
+    match std::process::Command::new(prog)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => app.status.set_text(&format!("已启动 {prog}")),
+        Err(e) => app
+            .status
+            .set_text(&format!("无法启动 {prog}: {e}")),
+    }
+}
 /// 自定义查询:网址模板 {q} 代入词 → xdg-open 拉起浏览器(宿主侧动作)。
 fn cand_custom_query(app: &Rc<App>, cq: &lyyime_core::wordops::CustomQuery,
                      text: &str) {
@@ -1785,6 +1878,15 @@ mod tests {
         // 未映射标点不推进状态
         assert_eq!(mapped_punct_for_test(&app_quotes, '/'), None);
         assert_eq!(mapped_punct_for_test(&app_quotes, '\''), Some('\u{2018}'));
+    }
+
+    #[test]
+    fn 输入目标_拒绝自身与设置窗() {
+        assert!(!input_target_allowed(0, 100, "xterm"));
+        assert!(!input_target_allowed(100, 100, "xterm"));
+        assert!(!input_target_allowed(55, 100, "lyyIme 输入法设置"));
+        assert!(input_target_allowed(55, 100, "xterm"));
+        assert!(input_target_allowed(55, 100, "Editor"));
     }
 
     /// mapped_punct 依赖 Rc<App>(GTK 构造), 测试里只抽引号状态这一小块。

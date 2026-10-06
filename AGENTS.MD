@@ -95,3 +95,13 @@ tests/e2e/                Xvfb + xdotool 端到端测试。
 - 只写自己所有权目录;公共合同(docs/ARCHITECTURE.md、本文件)只读,需变更先在最终汇报中提出理由。
 - 每完成一个模块:跑通测试 → 在 docs/RESEARCH.md 或模块 README 补关键决策 → 汇报"做了什么/怎么验证的/遗留问题"。
 - 汇报用中文;提交信息格式 `feat(lyyIme): ...` / `fix(lyyIme): ...` / `test(lyyIme): ...`。
+
+## 部署与输入探针注意事项(2026-10-04)
+
+- XIM 与 IBus 引擎可能同时运行;不能仅凭 `lyyime-xim` 进程存在判断应用使用的输入链路。IBus 进程名为 `ibus-engine-lyyime`,需结合当前会话 `ibus engine` 核对。
+- XIM 可由桌面会话自启动,不保证存在 `lyyime-xim-sample.service`。窄部署脚本通过当前用户下唯一的进程、`/proc/PID/exe` 与启动时间识别并保护现有 XIM;多进程或身份不符必须拒绝操作。
+- 真实桌面探针禁止使用 `xdotool --clearmodifiers`:本机激活的 `ISO_Level5_Shift` 恢复事件(0xfe11)会清空输入组合及待执行菜单。保留键盘状态,先检查 Shift/Ctrl/Alt/Super/CapsLock,仅向显式聚焦的专用探针窗口输入。
+- `scripts/verify-desktop-input.sh` 支持第四参数 `paging` 与 `repeat-settings`;窄部署用 `LYYIME_IBUS_VERIFY_MODE=all` 同时执行翻页及三轮设置窗验证。按键修复的 Rust 回归可经 webClx 运行 `cargo test --locked -p lyyime-ibus paging_symbols`,GUI 行为仍需 Xvfb 或经用户确认的专用真机探针验证。
+- 候选窗指针跟随必须使用自有独立 XCB 连接:在共享 XIM 连接上同步调用 xcb_query_pointer_reply 会抽干挂起事件,使仅监听 fd 可读的事件源停转(实测导致菜单后按键不转发)。
+- 菜单激活后的输入恢复必须经真实 Xvfb 客户端按键测试验证,不可只凭 GTK 生命周期单测宣称通过。
+- tests/e2e/candidate_menu_e2e.sh 覆盖通用菜单、纯拼音/混输切换与持久化/回滚验证。

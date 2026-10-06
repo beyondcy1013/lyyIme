@@ -107,6 +107,7 @@ pub struct Config {
     pub mode: Mode,
     /// 候选窗每页条数,1–10(数字键 1–9/0 选词,0 = 第 10 个;页不足 10 条时 0 吞键)。
     pub page_size: usize,
+    pub pinyin_only: bool,
     /// 中英混合:缓冲无任何中文命中时,给出英文词候选。
     pub mixed_en: bool,
     /// 混合直通:缓冲本身是高频英文词(前 [`Config::en_freq_top_n`] 名)时,
@@ -185,6 +186,7 @@ impl Default for Config {
         Self {
             mode: Mode::Chinese,
             page_size: 10,
+            pinyin_only: false,
             mixed_en: true,
             mixed_auto_commit: true,
             cn_punct: true,
@@ -220,6 +222,7 @@ impl Default for Config {
 struct ConfigToml {
     mode: String,
     page_size: usize,
+    pinyin_only: bool,
     mixed_en: bool,
     mixed_auto_commit: bool,
     /// 旧别名(早期 core 写盘键名);规范键 `chinese_punct` 缺失时才生效。
@@ -277,6 +280,7 @@ impl From<&Config> for ConfigToml {
                 Mode::English => "en".to_string(),
             },
             page_size: c.page_size,
+            pinyin_only: c.pinyin_only,
             mixed_en: c.mixed_en,
             mixed_auto_commit: c.mixed_auto_commit,
             cn_punct: Some(c.cn_punct),
@@ -355,6 +359,12 @@ impl Config {
         );
         let _ = writeln!(s, "\n# 候选窗每页条数(1–10,数字键 1–9/0 选词,0 = 第 10 个)");
         let _ = writeln!(s, "page_size = {}", d.page_size);
+        let _ = writeln!(
+            s,
+            "\n# 输入方案:true = 纯拼音(候选只出拼音,不出五笔/英文,四码规则不生效);"
+        );
+        let _ = writeln!(s, "# false = 五笔/拼音混输(默认)");
+        let _ = writeln!(s, "pinyin_only = {}", d.pinyin_only);
         let _ = writeln!(s, "\n# 中英混合:输入无中文命中时给出英文词候选");
         let _ = writeln!(s, "mixed_en = {}", d.mixed_en);
         let _ = writeln!(
@@ -605,6 +615,7 @@ impl ConfigToml {
         Ok(Config {
             mode,
             page_size: self.page_size,
+            pinyin_only: self.pinyin_only,
             mixed_en: self.mixed_en,
             mixed_auto_commit: self.mixed_auto_commit,
             // 规范键 chinese_punct(XIM 设置窗写盘键名)优先,旧别名
@@ -952,6 +963,24 @@ command = "@help"
         // example_toml 含该键且完整回读为默认
         let text = Config::example_toml();
         assert!(text.contains("next_word_prediction = false"));
+        let raw: ConfigToml = toml::from_str(&text).unwrap();
+        assert_eq!(raw.into_config(Path::new("x")).unwrap(), Config::default());
+    }
+    #[test]
+    fn 纯拼音方案_默认关与回读() {
+        assert!(!Config::default().pinyin_only);
+        let cfg: Config = toml::from_str::<ConfigToml>("mode = \"cn\"")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(!cfg.pinyin_only);
+        let cfg: Config = toml::from_str::<ConfigToml>("pinyin_only = true")
+            .unwrap()
+            .into_config(Path::new("x"))
+            .unwrap();
+        assert!(cfg.pinyin_only);
+        let text = Config::example_toml();
+        assert!(text.contains("pinyin_only = false"));
         let raw: ConfigToml = toml::from_str(&text).unwrap();
         assert_eq!(raw.into_config(Path::new("x")).unwrap(), Config::default());
     }

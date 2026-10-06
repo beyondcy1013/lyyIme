@@ -32,6 +32,7 @@ typedef struct SettingsUi {
     GtkWidget *chk_phrase_hint; /* 词组效率提示(上屏后提示更省键词组) */
     GtkWidget *chk_next_word_prediction; /* 上屏后联想(提示接下来可输入的词句) */
     GtkWidget *chk_exact_freq_rank; /* 精确单字按词频排位(低频字让位高频词组) */
+    GtkWidget *chk_pinyin_only;
     /* 英文上屏去向(§6,输入页;0=临时 temp,1=切英文模式 en) */
     GtkWidget *combo_enter_en;  /* 回车上屏英文原串后(默认临时) */
     GtkWidget *combo_shift_en;  /* Shift 上屏英文原串后(默认切英文) */

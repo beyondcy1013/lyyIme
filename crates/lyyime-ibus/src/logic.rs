@@ -10,13 +10,13 @@
 use crate::keysym::{
     hotkey_match, is_shift, map_keyval, parse_hotkey, BLOCKING_MODS, KSYM_BACKSPACE,
     KSYM_CONTROL_L, KSYM_CONTROL_R, KSYM_DELETE, KSYM_DOWN, KSYM_END, KSYM_ESCAPE,
-    KSYM_F1, KSYM_F12, KSYM_HOME, KSYM_KP_ENTER, KSYM_LEFT, KSYM_PAGE_DOWN,
-    KSYM_PAGE_UP, KSYM_PERIOD, KSYM_RETURN, KSYM_RIGHT, KSYM_SPACE, KSYM_TAB,
-    KSYM_UP, MASK_CTRL, MASK_LOCK, MASK_RELEASE, MASK_SHIFT,
+    KSYM_F1, KSYM_F12, KSYM_HOME, KSYM_KP_0, KSYM_KP_1, KSYM_KP_9, KSYM_KP_ENTER,
+    KSYM_LEFT, KSYM_PAGE_DOWN, KSYM_PAGE_UP, KSYM_PERIOD, KSYM_RETURN, KSYM_RIGHT,
+    KSYM_SPACE, KSYM_TAB, KSYM_UP, MASK_CTRL, MASK_LOCK, MASK_RELEASE, MASK_SHIFT,
     PURPOSE_PASSWORD, PURPOSE_PIN,
 };
 use lyyime_ai::AiConfig;
-use lyyime_core::{CandOp, Effect, Engine, LKey};
+use lyyime_core::{CandOp, Effect, Engine, LKey, Mode};
 use std::path::PathBuf;
 
 /// 胶水层回调(IBus 实现者或单测 Mock)。
@@ -47,12 +47,38 @@ pub trait Host {
     /// 用户按下配置的无修饰 Fn;index = core 可信目录 MENU_CATALOG 下标,
     /// 宿主按目录动作分派(OpenSettings/Help/EnglishMode/…),绝不落 shell。
     fn on_menu_action(&mut self, index: usize);
+    fn on_menu_general(&mut self, id: &str);
     /// 撤下辅助区的菜单触发提示:仅在确认辅助区当前仍是我们贴的提示时
     /// 调用(词组提示/notice/候选 aux 会覆盖它,各自在 dispatch 内解除
     /// 归属标记);宿主隐藏辅助区,不影响预编辑/候选。
     fn on_menu_hint_clear(&mut self);
+    /// Shift 单击确认英文→中文且 release state 仍带 LockMask 时,
+    /// 请求宿主解除系统 CapsLock(恰好一次)。默认空实现。
+    fn on_caps_lock_off(&mut self) {}
 }
 
+pub const GA_SETTINGS: &str = "settings";
+pub const GA_SETTINGS_INPUT: &str = "settings_input";
+pub const GA_SETTINGS_SKIN: &str = "settings_skin";
+pub const GA_TOGGLE_MODE: &str = "toggle_mode";
+pub const GA_TOGGLE_PINYIN: &str = "toggle_pinyin_only";
+pub const GA_TOGGLE_PUNCT: &str = "toggle_cn_punct";
+pub const GA_TOGGLE_LEARN: &str = "toggle_learning";
+pub const GA_TOGGLE_PRED: &str = "toggle_prediction";
+pub const GA_TOGGLE_QA: &str = "toggle_quick_actions";
+pub const GA_SHOT: &str = "shot";
+pub const GA_RELOAD: &str = "reload_dict";
+#[derive(Clone)]
+enum MenuRow {
+    Word(CandOp),
+    Query,
+    General(&'static str),
+}
+struct CandMenu {
+    cand_idx: Option<usize>,
+    items: Vec<(String, MenuRow)>,
+    page: usize,
+}
 /// /AI 触发会话状态:idle=未触发;slash/slash_a=已吞触发前缀;
 /// capture=提示词采集中(中文组词照常,组词结果进提示词而不是应用)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,7 +113,7 @@ pub struct EngineLogic {
     /// §15 候选右键菜单(ibus 版):面板无弹菜单 API,约定为"候选区临时换成
     /// 操作行(固定首位/删除词组/反查英文),数字 1-3 或点选执行;Esc/任意键
     /// 退出并还原真实候选"。Some = 原候选页内下标。
-    cand_menu: Option<usize>,
+    cand_menu: Option<CandMenu>,
     /// §15 自定义查询(菜单第 4 行;config.toml custom_query_*,
     /// 焦点进入时热读 —— 设置保存后即时生效)。None = 操作行不显示。
     custom_query: Option<lyyime_core::wordops::CustomQuery>,
@@ -105,6 +131,9 @@ pub struct EngineLogic {
     /// Ctrl+. 标点切换:press 已吞 → 配对 release 一并吞掉并清锁存;
     /// 兼作按住连发的去抖(按住不放只翻转一次)。会话级,不写盘。
     punct_key_down: bool,
+    pub ui_gen: u64,
+    pub ui_focused: bool,
+    pub ui_enabled: bool,
 }
 
 impl EngineLogic {
@@ -145,7 +174,26 @@ impl EngineLogic {
             mt_eat_release: None,
             ai_pred_saved: None,
             punct_key_down: false,
+            ui_gen: 0,
+            ui_focused: false,
+            ui_enabled: false,
         }
+    }
+
+    pub fn ui_gen(&self) -> u64 {
+        self.ui_gen
+    }
+
+    pub fn ui_gate_open(&self) -> bool {
+        self.ui_enabled
+            && self.ui_focused
+            && self.input_purpose != PURPOSE_PASSWORD
+            && self.input_purpose != PURPOSE_PIN
+    }
+
+    pub fn ui_invalidate(&mut self) -> u64 {
+        self.ui_gen = self.ui_gen.wrapping_add(1);
+        self.ui_gen
     }
 
     /// 菜单触发配置热读(focus_in 时调用,设置保存即生效;configure 内部即复位)
@@ -219,6 +267,61 @@ impl EngineLogic {
         }
     }
 
+    pub fn runtime_cn_punct(&self) -> Option<bool> {
+        self.engine.as_ref().map(|e| e.config().cn_punct)
+    }
+
+    pub fn set_chinese_punctuation(&mut self, on: bool) {
+        self.core_cfg.cn_punct = on;
+        if let Some(e) = self.engine.as_mut() {
+            e.set_chinese_punctuation(on);
+        }
+    }
+
+    pub fn set_pinyin_only(&mut self, host: &mut dyn Host, on: bool) -> bool {
+        if self.core_cfg.pinyin_only == on {
+            return false;
+        }
+        self.core_cfg.pinyin_only = on;
+        let changed = self
+            .engine
+            .as_mut()
+            .map(|e| e.set_pinyin_only(on))
+            .unwrap_or(false);
+        if changed {
+            self.cand_menu = None;
+            self.preedit = None;
+            self.menu_trigger.reset();
+            self.mt_clear_hint(host);
+            host.on_preedit(None);
+            host.on_candidates(&[], 0, 0, "");
+        }
+        changed
+    }
+    pub fn set_learning(&mut self, on: bool) {
+        if self.core_cfg.learning != on {
+            self.core_cfg.learning = on;
+            if let Some(e) = self.engine.as_mut() {
+                e.set_learning(on);
+            }
+        }
+    }
+    pub fn set_mixed_en(&mut self, on: bool) {
+        if self.core_cfg.mixed_en != on {
+            self.core_cfg.mixed_en = on;
+            if let Some(e) = self.engine.as_mut() {
+                e.set_mixed_en(on);
+            }
+        }
+    }
+    pub fn set_quick_actions_enabled(&mut self, on: bool) {
+        if self.core_cfg.quick_actions_enabled != on {
+            self.core_cfg.quick_actions_enabled = on;
+            if let Some(e) = self.engine.as_mut() {
+                e.set_quick_actions_enabled(on);
+            }
+        }
+    }
     /// 按键入口;返回 true=已消费 / false=放行给应用。
     /// 放行走 return false 常规路径,不走 forward_key_event(Qt5 不支持)。
     pub fn process_key_event(&mut self, host: &mut dyn Host, keyval: u32, state: u32) -> bool {
@@ -230,7 +333,7 @@ impl EngineLogic {
             return false;
         }
         if state & MASK_RELEASE != 0 {
-            return self.on_release(host, keyval);
+            return self.on_release(host, keyval, state);
         }
         self.on_press(host, keyval, state)
     }
@@ -239,15 +342,24 @@ impl EngineLogic {
         // §15 右键操作行激活期间:数字 1-3(自定义查询已配则到 4)执行、
         // Esc 取消还原、其余键(含 Shift/组合键)先还原真实候选再按常态
         // 路径处理 ——core 侧缓冲/候选从未改动,菜单纯属显示层状态。
-        if self.cand_menu.is_some() {
+        if self.cand_menu.is_some() && state & BLOCKING_MODS == 0 {
             match keyval {
                 KSYM_ESCAPE => {
                     self.cand_menu_restore(host);
                     return true;
                 }
-                k @ 0x31..=0x34 => return self.cand_menu_exec(host, (k - 0x31) as usize),
+                KSYM_PAGE_UP | 0x2d => return self.cand_menu_flip(host, false),
+                KSYM_PAGE_DOWN | 0x3d => return self.cand_menu_flip(host, true),
+                k @ 0x31..=0x39 => return self.cand_menu_exec(host, (k - 0x31) as usize),
+                0x30 => return self.cand_menu_exec(host, 9),
+                k @ KSYM_KP_1..=KSYM_KP_9 => {
+                    return self.cand_menu_exec(host, (k - KSYM_KP_1) as usize)
+                }
+                KSYM_KP_0 => return self.cand_menu_exec(host, 9),
                 _ => self.cand_menu_restore(host),
             }
+        } else if self.cand_menu.is_some() {
+            self.cand_menu_restore(host);
         }
         if is_shift(keyval) {
             // Shift 按下=菜单触发硬边界(与 Mode B 同合同):模式是否切换
@@ -413,7 +525,7 @@ impl EngineLogic {
         )
     }
 
-    fn on_release(&mut self, host: &mut dyn Host, keyval: u32) -> bool {
+    fn on_release(&mut self, host: &mut dyn Host, keyval: u32, state: u32) -> bool {
         // 菜单触发确认 Fn 的按下已被吞 → 配对吞掉同键 release;
         // 未匹配的 F 键 release 照常放行给应用
         if self.mt_eat_release == Some(keyval) {
@@ -430,6 +542,10 @@ impl EngineLogic {
             if pending == Some(keyval) {
                 // 按下后无其它键 → 判定单击:切换中英(合同 §6)
                 self.switch_mode(host);
+                // 英→中确认且事件 state 仍带 LockMask:通知宿主解锁
+                if self.mode == 0 && state & MASK_LOCK != 0 {
+                    host.on_caps_lock_off();
+                }
                 return true;
             }
             return false; // 与单击无关的 Shift release:放行
@@ -842,6 +958,11 @@ impl EngineLogic {
         host.on_mode_changed(self.mode);
     }
 
+    pub fn reset_ui_session(&mut self, host: &mut dyn Host) -> u64 {
+        self.reset_session(host);
+        self.ui_invalidate()
+    }
+
     /// 鼠标/面板点选当前页第 `idx`(0 起)个候选(合同 §14);
     /// 返回 true=已消费。功能键候选经 dispatch 产生 on_action。
     /// 右键菜单激活时,idx 映射到操作行(§15)。
@@ -863,6 +984,9 @@ impl EngineLogic {
     pub fn flip_page(&mut self, host: &mut dyn Host, down: bool) -> bool {
         if self.degraded() {
             return false;
+        }
+        if self.cand_menu.is_some() {
+            return self.cand_menu_flip(host, down);
         }
         let key = if down { LKey::PageDown } else { LKey::PageUp };
         let effects = self.core_mut().process_key(key);
@@ -889,50 +1013,204 @@ impl EngineLogic {
             return false;
         }
         let Some(pinned) = self.engine.as_ref().and_then(|e| e.cand_pinned(idx)) else {
-            return true;
+            return false;
         };
-        self.cand_menu = Some(idx);
+        let mut items: Vec<(String, MenuRow)> = Vec::new();
         let pin_label = if pinned { "取消固定首位" } else { "固定首位" };
-        let mut rows: Vec<(String, String)> = vec![
-            (pin_label.to_string(), "右键".to_string()),
-            ("删除词组".to_string(), "右键".to_string()),
-            ("反查英文".to_string(), "右键".to_string()),
-        ];
-        // 自定义查询(config.toml custom_query_*;url 未配则只有三行)
+        items.push((pin_label.to_string(), MenuRow::Word(CandOp::PinToggle)));
+        items.push(("删除词组".to_string(), MenuRow::Word(CandOp::Delete)));
+        items.push(("反查英文".to_string(), MenuRow::Word(CandOp::EnLookup)));
         if let Some(cq) = &self.custom_query {
-            rows.push((cq.menu_label().to_string(), "右键".to_string()));
+            items.push((cq.menu_label().to_string(), MenuRow::Query));
         }
-        host.on_candidates(&rows, 0, 1, "右键操作:数字/点选执行,Esc 取消");
+        self.cand_menu = Some(CandMenu {
+            cand_idx: Some(idx),
+            items,
+            page: 0,
+        });
+        self.cand_menu_emit(host);
+        true
+    }
+
+    pub fn cand_menu_active(&self) -> bool {
+        self.cand_menu.is_some()
+    }
+
+    pub fn cand_menu_items(&self) -> Vec<String> {
+        self.cand_menu
+            .as_ref()
+            .map(|m| m.items.iter().map(|(l, _)| l.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn cand_menu_select_absolute(&mut self, host: &mut dyn Host, index: usize) -> bool {
+        if self.cand_menu.is_none() {
+            return false;
+        }
+        let ps = self.menu_page_size();
+        if let Some(menu) = self.cand_menu.as_mut() {
+            menu.page = index / ps;
+        }
+        self.cand_menu_exec(host, index % ps)
+    }
+
+    pub fn cand_menu_cancel(&mut self, host: &mut dyn Host) {
+        if self.cand_menu.is_some() {
+            self.cand_menu_restore(host);
+        }
+    }
+    pub fn cand_menu_open_general(&mut self, host: &mut dyn Host) -> bool {
+        if self.degraded() {
+            return false;
+        }
+        self.cand_menu = Some(CandMenu {
+            cand_idx: None,
+            items: self.menu_general_rows(),
+            page: 0,
+        });
+        self.cand_menu_emit(host);
+        true
+    }
+    fn menu_general_rows(&self) -> Vec<(String, MenuRow)> {
+        let cfg = self.engine.as_ref().map(|e| e.config());
+        let (cn, pure, punct, learn, pred, qa) = cfg
+            .map(|c| {
+                (
+                    self.mode == Mode::Chinese as u8,
+                    c.pinyin_only,
+                    c.cn_punct,
+                    c.learning,
+                    c.next_word_prediction,
+                    c.quick_actions_enabled,
+                )
+            })
+            .unwrap_or((true, false, true, true, false, true));
+        let on_off = |b: bool| if b { "开" } else { "关" };
+        vec![
+            ("设置…".to_string(), MenuRow::General(GA_SETTINGS)),
+            ("输入设置…".to_string(), MenuRow::General(GA_SETTINGS_INPUT)),
+            ("皮肤设置…".to_string(), MenuRow::General(GA_SETTINGS_SKIN)),
+            (
+                if cn { "切换到英文" } else { "切换到中文" }.to_string(),
+                MenuRow::General(GA_TOGGLE_MODE),
+            ),
+            (
+                format!(
+                    "输入方案:{}(点击切换)",
+                    if pure { "纯拼音" } else { "五笔/拼音混输" }
+                ),
+                MenuRow::General(GA_TOGGLE_PINYIN),
+            ),
+            (
+                format!("中文标点:{}", on_off(punct)),
+                MenuRow::General(GA_TOGGLE_PUNCT),
+            ),
+            (
+                format!("用户词学习:{}", on_off(learn)),
+                MenuRow::General(GA_TOGGLE_LEARN),
+            ),
+            (
+                format!("上屏后联想:{}", on_off(pred)),
+                MenuRow::General(GA_TOGGLE_PRED),
+            ),
+            (
+                format!("快速功能键:{}", on_off(qa)),
+                MenuRow::General(GA_TOGGLE_QA),
+            ),
+            ("截屏".to_string(), MenuRow::General(GA_SHOT)),
+            ("重载词库".to_string(), MenuRow::General(GA_RELOAD)),
+        ]
+    }
+    fn menu_page_size(&self) -> usize {
+        self.core_cfg.page_size.clamp(1, 10)
+    }
+    fn cand_menu_emit(&self, host: &mut dyn Host) {
+        let Some(menu) = self.cand_menu.as_ref() else {
+            return;
+        };
+        let ps = self.menu_page_size();
+        let pages = menu.items.len().max(1).div_ceil(ps);
+        let page = menu.page.min(pages - 1);
+        let start = page * ps;
+        let rows: Vec<(String, String)> = menu.items[start..(start + ps).min(menu.items.len())]
+            .iter()
+            .map(|(label, _)| (label.clone(), "菜单".to_string()))
+            .collect();
+        host.on_candidates(
+            &rows,
+            page,
+            pages,
+            "菜单:数字/点选执行,-/=翻页,Esc 取消",
+        );
+    }
+    fn cand_menu_flip(&mut self, host: &mut dyn Host, down: bool) -> bool {
+        let ps = self.menu_page_size();
+        let Some(menu) = self.cand_menu.as_mut() else {
+            return false;
+        };
+        // 自定义查询(config.toml custom_query_*;url 未配则只有三行)
+        let pages = menu.items.len().max(1).div_ceil(ps);
+        if down {
+            if menu.page + 1 >= pages {
+                return true;
+            }
+            menu.page += 1;
+        } else {
+            if menu.page == 0 {
+                return true;
+            }
+            menu.page -= 1;
+        }
+        self.cand_menu_emit(host);
         true
     }
 
     /// 菜单激活时执行操作行(sel=0/1/2 core 操作,sel=3 自定义查询);
     /// 越界选择仅还原显示。
     fn cand_menu_exec(&mut self, host: &mut dyn Host, sel: usize) -> bool {
-        let Some(orig) = self.cand_menu.take() else {
+        let Some(menu) = self.cand_menu.take() else {
             return false;
         };
-        const OPS: [CandOp; 3] = [CandOp::PinToggle, CandOp::Delete, CandOp::EnLookup];
-        if let Some(&op) = OPS.get(sel) {
-            let effects = self.core_mut().cand_op(orig, op);
-            return self.dispatch(host, effects, false);
-        }
         // 第 4 行=自定义查询:宿主侧打开浏览器,core 状态不动;先还原真实
         // 候选再发 notice(顺序对调会被候选刷新盖掉),与 Esc 同一还原流。
-        self.cand_menu_restore(host);
-        if sel == 3 {
-            if let (Some(cq), Some(word)) = (
-                self.custom_query.clone(),
-                self.engine
-                    .as_ref()
-                    .and_then(|e| e.flush_page().get(orig).map(|c| c.text.clone())),
-            ) {
-                let url = lyyime_core::wordops::custom_query_url(&cq.url, &word);
-                host.on_open_url(&url);
-                host.on_notice(&format!("{}: {}", cq.menu_label(), word));
+        let ps = self.menu_page_size();
+        if sel >= ps {
+            self.cand_menu_restore(host);
+            return true;
+        }
+        let gidx = menu.page * ps + sel;
+        let Some((_, row)) = menu.items.get(gidx) else {
+            self.cand_menu_restore(host);
+            return true;
+        };
+        match row.clone() {
+            MenuRow::Word(op) => {
+                let orig = menu.cand_idx.unwrap_or(gidx);
+                let effects = self.core_mut().cand_op(orig, op);
+                self.dispatch(host, effects, false)
+            }
+            MenuRow::Query => {
+                self.cand_menu_restore(host);
+                if let (Some(cq), Some(orig)) = (self.custom_query.clone(), menu.cand_idx)
+                {
+                    if let Some(word) = self
+                        .engine
+                        .as_ref()
+                        .and_then(|e| e.flush_page().get(orig).map(|c| c.text.clone()))
+                    {
+                        let url = lyyime_core::wordops::custom_query_url(&cq.url, &word);
+                        host.on_open_url(&url);
+                        host.on_notice(&format!("{}: {}", cq.menu_label(), word));
+                    }
+                }
+                true
+            }
+            MenuRow::General(id) => {
+                self.cand_menu_restore(host);
+                host.on_menu_general(id);
+                true
             }
         }
-        true
     }
 
     /// 退出操作行并还原真实候选显示(core 侧缓冲/候选从未改动)。
@@ -1022,8 +1300,14 @@ mod tests {
         fn on_menu_action(&mut self, index: usize) {
             self.log(format!("menu:{index}"));
         }
+        fn on_menu_general(&mut self, id: &str) {
+            self.log(format!("general:{id}"));
+        }
         fn on_menu_hint_clear(&mut self) {
             self.log("menuhintclr".to_string());
+        }
+        fn on_caps_lock_off(&mut self) {
+            self.log("caps-off".to_string());
         }
     }
 
@@ -1031,12 +1315,18 @@ mod tests {
     fn fixtures_dir() -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "lyyime-ibus-logic-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = loop {
+            let d = std::env::temp_dir().join(format!(
+                "lyyime-ibus-logic-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            match std::fs::create_dir(&d) {
+                Ok(()) => break d,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("{e}"),
+            }
+        };
         std::fs::write(
             d.join("wubi.tsv"),
             "wqvb\t你好\t1000\nwq\t你\t900\nntna\t发展\t800\n",
@@ -1054,17 +1344,28 @@ mod tests {
         d
     }
 
+    fn test_engine_logic(
+        dir: PathBuf,
+        ai_cfg: Option<AiConfig>,
+        mut core_cfg: lyyime_core::Config,
+    ) -> EngineLogic {
+        if core_cfg.user_dict.is_none() {
+            core_cfg.user_dict = Some(fixtures_dir_user());
+        }
+        let mut logic = EngineLogic::new(dir, ai_cfg, core_cfg);
+        logic.stats_dir = None; // 单测不写真实 HOME 的统计目录
+        logic
+    }
+
     fn logic_with_ai(cfg: Option<AiConfig>) -> (PathBuf, EngineLogic) {
         let dir = fixtures_dir();
-        let mut logic = EngineLogic::new(dir.clone(), cfg, lyyime_core::Config::default());
-        logic.stats_dir = None; // 单测不写真实 HOME 的统计目录
+        let logic = test_engine_logic(dir.clone(), cfg, lyyime_core::Config::default());
         (dir, logic)
     }
 
     fn logic_with_core_cfg(core_cfg: lyyime_core::Config) -> (PathBuf, EngineLogic) {
         let dir = fixtures_dir();
-        let mut logic = EngineLogic::new(dir.clone(), None, core_cfg);
-        logic.stats_dir = None;
+        let logic = test_engine_logic(dir.clone(), None, core_cfg);
         (dir, logic)
     }
 
@@ -1083,13 +1384,19 @@ mod tests {
     fn fixtures_dir_user() -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "lyyime-ibus-logic-user-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d.join("user_words.tsv")
+        let d = loop {
+            let d = std::env::temp_dir().join(format!(
+                "lyyime-ibus-logic-user-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            match std::fs::create_dir(&d) {
+                Ok(()) => break d,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("{e}"),
+            }
+        };
+        d.join("user.tsv")
     }
 
     /// 分页夹具:同一编码候选(表频递减)。core 每码只留频次前 9(§5.2),
@@ -1104,14 +1411,16 @@ mod tests {
             .map(|(i, w)| format!("a\t{}\t{}\n", w, 120 - i as u32 * 5))
             .collect();
         std::fs::write(dir.join("wubi.tsv"), rows).unwrap();
-        let mut logic =
-            EngineLogic::new(dir.clone(), None, lyyime_core::Config {
+        let logic = test_engine_logic(
+            dir.clone(),
+            None,
+            lyyime_core::Config {
                 // 显式 5/页:默认 page_size=10 时单码 9 候选(§5.2 截断)只有 1 页
                 page_size: 5,
                 commit_unique_four: false,
                 ..Default::default()
-            });
-        logic.stats_dir = None;
+            },
+        );
         (dir, logic)
     }
 
@@ -1124,6 +1433,41 @@ mod tests {
             .find(|e| e.starts_with("cands:[") && *e != "cands:[]")
             .expect("应有非空候选事件")
             .clone()
+    }
+
+    #[test]
+    fn paging_symbols_turn_pages_without_committing() {
+        for (up, down) in [('-' as u32, '=' as u32), (KSYM_PAGE_UP, KSYM_PAGE_DOWN)] {
+            let (_d, mut l) = logic_paging();
+            let mut h = Mock::default();
+            assert!(l.process_key_event(&mut h, 'a' as u32, 0));
+            let page1 = last_nonempty_cands(&h);
+            assert_eq!(l.page_pos(), (0, 2));
+            for (key, page) in [(up, 0), (down, 1), (down, 1), (up, 0)] {
+                assert!(l.process_key_event(&mut h, key, 0));
+                assert!(!l.process_key_event(&mut h, key, MASK_RELEASE));
+                assert_eq!(l.page_pos(), (page, 2));
+                assert_eq!(l.core_mut().buffer(), "a");
+                assert!(!h.events.borrow().iter().any(|e| e.starts_with("commit:")));
+            }
+            assert_eq!(last_nonempty_cands(&h), page1);
+            assert!(l.process_key_event(&mut h, down, 0));
+            let page2 = last_nonempty_cands(&h);
+            assert_ne!(page2, page1);
+            let first = page2[7..].trim_end_matches(']').split(',').next().unwrap();
+            assert!(l.process_key_event(&mut h, '1' as u32, 0));
+            assert!(h.events.borrow().iter().any(|e| e == &format!("commit:{first}")));
+        }
+    }
+
+    #[test]
+    fn paging_symbols_without_candidates_pass_through() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        for key in ['-', '='] {
+            assert!(!l.process_key_event(&mut h, key as u32, 0));
+            assert!(!h.events.borrow().iter().any(|e| e.starts_with("commit:")));
+        }
     }
 
     #[test]
@@ -1359,6 +1703,76 @@ mod tests {
     }
 
     #[test]
+    fn shift_click_english_to_chinese_requests_caps_unlock() {
+        // 英文→中文 Shift 单击确认且 release state 带 LockMask:
+        // on_caps_lock_off 恰好一次;左/右 Shift 两个变体同合同。
+        for shift in [SHIFT_L, 0xffe2u32] {
+            let (_d, mut l) = logic_with_ai(None);
+            let mut h = Mock::default();
+            l.switch_mode(&mut h); // → 英文
+            h.events.borrow_mut().clear();
+            assert!(l.process_key_event(&mut h, shift, MASK_LOCK));
+            assert!(l.process_key_event(&mut h, shift, MASK_LOCK | MASK_RELEASE));
+            assert_eq!(l.mode, 0, "shift=0x{shift:x} 应回中文态");
+            let n = h
+                .events
+                .borrow()
+                .iter()
+                .filter(|e| *e == "caps-off")
+                .count();
+            assert_eq!(n, 1, "shift=0x{shift:x} events={:?}", h.events.borrow());
+        }
+    }
+
+    #[test]
+    fn shift_click_without_lock_never_requests_caps_unlock() {
+        // 无 LockMask:单击照常切换,但不请求解锁。
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h); // → 英文
+        h.events.borrow_mut().clear();
+        l.process_key_event(&mut h, SHIFT_L, 0);
+        l.process_key_event(&mut h, SHIFT_L, MASK_RELEASE);
+        assert_eq!(l.mode, 0);
+        assert!(!h.events.borrow().iter().any(|e| e == "caps-off"));
+    }
+
+    #[test]
+    fn shift_click_chinese_to_english_never_requests_caps_unlock() {
+        // 中→英方向即使 CapsLock 仍锁存也不触发解锁。
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, SHIFT_L, MASK_LOCK);
+        l.process_key_event(&mut h, SHIFT_L, MASK_LOCK | MASK_RELEASE);
+        assert_eq!(l.mode, 1, "应切到英文态");
+        assert!(!h.events.borrow().iter().any(|e| e == "caps-off"));
+    }
+
+    #[test]
+    fn shift_combos_never_request_caps_unlock() {
+        // Shift+字母:挂起被字母取消,release 不切换不解锁。
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h); // → 英文
+        h.events.borrow_mut().clear();
+        l.process_key_event(&mut h, SHIFT_L, MASK_LOCK);
+        l.process_key_event(&mut h, 'a' as u32, MASK_LOCK | MASK_SHIFT);
+        l.process_key_event(&mut h, SHIFT_L, MASK_LOCK | MASK_RELEASE);
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("mode:")));
+        assert!(!h.events.borrow().iter().any(|e| e == "caps-off"));
+
+        // Ctrl+Shift:BLOCKING_MODS → press 即放行、无挂起不解锁。
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h); // → 英文
+        h.events.borrow_mut().clear();
+        assert!(!l.process_key_event(&mut h, SHIFT_L, MASK_CTRL | MASK_LOCK));
+        l.process_key_event(&mut h, SHIFT_L, MASK_CTRL | MASK_LOCK | MASK_RELEASE);
+        assert_eq!(l.mode, 1, "Ctrl+Shift 不应切换模式");
+        assert!(!h.events.borrow().iter().any(|e| e == "caps-off"));
+    }
+
+    #[test]
     fn ai_session_capture_and_submit() {
         let cfg = AiConfig {
             enabled: true,
@@ -1420,7 +1834,7 @@ mod tests {
 
     #[test]
     fn degraded_mode_passes_everything() {
-        let mut l = EngineLogic::new(
+        let mut l = test_engine_logic(
             PathBuf::from("/nonexistent-lyyime-deg"),
             None,
             lyyime_core::Config::default(),
@@ -1589,6 +2003,8 @@ mod tests {
         assert!(menu.contains("固定首位"), "{menu}");
         assert!(menu.contains("删除词组"), "{menu}");
         assert!(menu.contains("反查英文"), "{menu}");
+        assert!(!menu.contains("设置…"), "{menu}");
+        assert!(!menu.contains("重载词库"), "{menu}");
 
         // Esc 取消 → 还原真实候选
         assert!(l.process_key_event(&mut h, KSYM_ESCAPE, 0));
@@ -1610,24 +2026,302 @@ mod tests {
 
     /// 右键功能键/越界行不弹菜单(cand_pinned 返回 None → 吞键)。
     #[test]
-    fn 右键功能键候选不弹菜单() {
+    fn 右键功能键候选拒绝词菜单_通用菜单独立() {
         let (_d, mut l) = logic_with_action();
         let mut h = Mock::default();
         for k in "peizhi".chars() {
             l.process_key_event(&mut h, k as u32, 0);
         }
-        // 功能键行是第 0 行(peizhi 触发时功能候选紧随首选之前/之后依 core 插入位置,
-        // 先找含"打开配置"的行下标 —— 简化:直接对全部行右键,功能行应吞键不弹菜单)
-        for i in 0..3 {
-            let before = h.events.borrow().len();
-            let _ = l.cand_menu_open(&mut h, i);
-            // 若该行是普通词,菜单会 emit cands;功能行则静默
-            if h.events.borrow().len() > before {
-                // 普通词菜单 → Esc 还原后继续验证
-                l.process_key_event(&mut h, KSYM_ESCAPE, 0);
-            }
+        let last_cands = |h: &Mock| {
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("cands:"))
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        let fn_row = (0..6).find(|&i| {
+            l.engine
+                .as_ref()
+                .map(|e| e.cand_pinned(i).is_none())
+                .unwrap_or(false)
+        });
+        let rejected = fn_row.unwrap_or(999);
+        let before = h.events.borrow().len();
+        assert!(
+            !l.cand_menu_open(&mut h, rejected),
+            "功能/越界行不得开词菜单(row={rejected})"
+        );
+        assert!(!l.cand_menu_active());
+        assert_eq!(
+            h.events.borrow().len(),
+            before,
+            "拒绝后不得产生新效果/系统动作"
+        );
+        assert!(l.cand_menu_open_general(&mut h));
+        let menu = last_cands(&h);
+        assert!(!menu.contains("固定首位"), "{menu}");
+        assert!(!menu.contains("删除词组"), "{menu}");
+        assert!(menu.contains("设置…"), "{menu}");
+        assert!(l.process_key_event(&mut h, '=' as u32, 0));
+        let menu = last_cands(&h);
+        assert!(menu.contains("重载词库"), "{menu}");
+        assert!(l.process_key_event(&mut h, KSYM_ESCAPE, 0));
+        let menu = last_cands(&h);
+        assert!(menu.contains("打开配置"), "{menu}");
+    }
+    #[test]
+    fn 通用菜单_全量翻页与数字选择() {
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "a");
+        let last_cands = |h: &Mock| {
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("cands:"))
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(l.cand_menu_open_general(&mut h));
+        let p0 = last_cands(&h);
+        assert!(p0.contains("设置…"), "{p0}");
+        assert!(p0.contains("输入方案"), "{p0}");
+        assert!(!p0.contains("固定首位"), "{p0}");
+        assert!(!p0.contains("重载词库"), "{p0}");
+        assert!(l.process_key_event(&mut h, '=' as u32, 0));
+        let p1 = last_cands(&h);
+        assert!(p1.contains("中文标点"), "{p1}");
+        assert!(p1.contains("截屏"), "{p1}");
+        assert!(!p1.contains("设置…"), "{p1}");
+        assert!(l.process_key_event(&mut h, '=' as u32, 0));
+        let p2 = last_cands(&h);
+        assert!(p2.contains("重载词库"), "{p2}");
+        assert!(l.process_key_event(&mut h, '-' as u32, 0));
+        assert_eq!(last_cands(&h), p1);
+        l.cand_menu_open_general(&mut h);
+        assert!(l.process_key_event(&mut h, '0' as u32, 0));
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("general:")));
+        assert!(last_cands(&h).contains("工"));
+        l.cand_menu_open_general(&mut h);
+        assert!(l.process_key_event(&mut h, '1' as u32, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "general:settings"));
+        assert!(last_cands(&h).contains("工"));
+        assert!(l.cand_menu_open_general(&mut h));
+        assert!(l.select_candidate(&mut h, 0));
+        assert_eq!(
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.as_str() == "general:settings")
+                .count(),
+            2
+        );
+    }
+    #[test]
+    fn 通用菜单_绝对下标与取消() {
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "a");
+        let last_cands = |h: &Mock| {
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("cands:"))
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(!l.cand_menu_select_absolute(&mut h, 0));
+        l.cand_menu_cancel(&mut h);
+        assert!(l.cand_menu_items().is_empty());
+        assert!(l.cand_menu_open_general(&mut h));
+        let items = l.cand_menu_items();
+        assert_eq!(items.len(), 11);
+        assert_eq!(items[0], "设置…");
+        assert_eq!(items[10], "重载词库");
+        assert!(l.cand_menu_select_absolute(&mut h, 0));
+        assert!(h.events.borrow().iter().any(|e| e == "general:settings"));
+        assert!(!l.cand_menu_active());
+        assert!(last_cands(&h).contains("工"));
+        let before = h
+            .events
+            .borrow()
+            .iter()
+            .filter(|e| e.starts_with("general:"))
+            .count();
+        assert!(l.cand_menu_open_general(&mut h));
+        assert!(l.cand_menu_select_absolute(&mut h, 99));
+        assert_eq!(
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("general:"))
+                .count(),
+            before
+        );
+        assert!(last_cands(&h).contains("工"));
+        assert!(l.cand_menu_open_general(&mut h));
+        l.cand_menu_cancel(&mut h);
+        assert!(!l.cand_menu_active());
+        assert!(last_cands(&h).contains("工"));
+        assert!(!h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e.starts_with("commit:")));
+        assert!(l.cand_menu_open(&mut h, 0));
+        assert!(l.cand_menu_select_absolute(&mut h, 1));
+        assert!(!l.cand_menu_active());
+        assert!(!last_cands(&h).contains("#菜单"), "{}", last_cands(&h));
+    }
+
+    #[test]
+    fn ui_事件门闩_焦点启用与输入目的() {
+        let (_d, mut l) = logic_paging();
+        assert!(!l.ui_gate_open());
+        l.ui_enabled = true;
+        l.ui_focused = true;
+        assert!(l.ui_gate_open());
+        let g = l.ui_gen();
+        assert_eq!(l.ui_invalidate(), g + 1);
+        assert_eq!(l.ui_gen(), g + 1);
+        l.input_purpose = PURPOSE_PASSWORD;
+        assert!(!l.ui_gate_open());
+        l.input_purpose = PURPOSE_PIN;
+        assert!(!l.ui_gate_open());
+        l.input_purpose = 0;
+        assert!(l.ui_gate_open());
+        l.ui_focused = false;
+        assert!(!l.ui_gate_open());
+        l.ui_focused = true;
+        l.ui_enabled = false;
+        assert!(!l.ui_gate_open());
+    }
+
+    #[test]
+    fn 普通reset_清会话但保留门闩与焦点() {
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        l.ui_enabled = true;
+        l.ui_focused = true;
+        type_keys(&mut l, &mut h, "a");
+        assert!(l.cand_menu_open(&mut h, 0));
+        assert!(l.cand_menu_active());
+        let g = l.ui_gen();
+        assert_eq!(l.reset_ui_session(&mut h), g + 1);
+        assert!(!l.cand_menu_active());
+        assert_eq!(l.core_mut().buffer(), "");
+        assert!(l.ui_focused && l.ui_enabled && l.ui_gate_open());
+        assert_eq!(l.input_purpose, 0);
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("commit:")));
+        type_keys(&mut l, &mut h, "a");
+        assert!(last_nonempty_cands(&h).contains("工"));
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("commit:")));
+    }
+
+    #[test]
+    fn 普通reset_不翻转失焦停用状态() {
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        assert!(!l.ui_gate_open());
+        l.reset_ui_session(&mut h);
+        assert!(!l.ui_focused && !l.ui_enabled && !l.ui_gate_open());
+        l.ui_enabled = true;
+        l.reset_ui_session(&mut h);
+        assert!(l.ui_enabled && !l.ui_focused && !l.ui_gate_open());
+        l.input_purpose = PURPOSE_PASSWORD;
+        l.reset_ui_session(&mut h);
+        assert_eq!(l.input_purpose, PURPOSE_PASSWORD);
+        assert!(l.ui_enabled && !l.ui_focused && !l.ui_gate_open());
+    }
+    #[test]
+    fn 右键菜单_越界选择与修饰键不执行() {
+        use crate::keysym::MASK_CTRL;
+        let (_d, mut l) = logic_paging();
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "a");
+        let last_cands = |h: &Mock| {
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| e.starts_with("cands:"))
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        let no_general = |h: &Mock| !h.events.borrow().iter().any(|e| e.starts_with("general:"));
+        assert!(l.cand_menu_open(&mut h, 0));
+        assert!(l.process_key_event(&mut h, '6' as u32, 0));
+        assert!(no_general(&h));
+        assert!(last_cands(&h).contains("工"), "{}", last_cands(&h));
+        assert!(l.cand_menu_open(&mut h, 0));
+        assert!(l.process_key_event(&mut h, '0' as u32, 0));
+        assert!(no_general(&h));
+        assert!(last_cands(&h).contains("工"), "{}", last_cands(&h));
+        assert!(l.cand_menu_open(&mut h, 0));
+        let consumed = l.process_key_event(&mut h, '4' as u32, MASK_CTRL);
+        assert!(no_general(&h));
+        assert!(!consumed, "Ctrl+4 应直通应用");
+        assert!(l.cand_menu.is_none());
+        assert_eq!(last_cands(&h), "cands:[]", "修饰键应走常态直通并复位组合");
+        type_keys(&mut l, &mut h, "a");
+        assert!(l.cand_menu_open(&mut h, 0));
+        let consumed = l.process_key_event(&mut h, KSYM_ESCAPE, MASK_CTRL);
+        assert!(no_general(&h));
+        assert!(!consumed, "Ctrl+Esc 应直通应用");
+        assert!(l.cand_menu.is_none());
+        assert!(!h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e.starts_with("commit:")));
+    }
+    #[test]
+    fn 纯拼音方案切换_清组合不动模式() {
+        let (_d, mut l) = logic_isolated();
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "niha");
+        let before = h.events.borrow().len();
+        assert!(l.set_pinyin_only(&mut h, true));
+        {
+            let ev = h.events.borrow();
+            let tail = &ev[before..];
+            assert!(tail.iter().any(|e| e == "preedit:∅"), "{tail:?}");
+            assert!(tail.iter().any(|e| e == "cands:[]"), "{tail:?}");
+            assert!(!tail.iter().any(|e| e.starts_with("commit:")), "{tail:?}");
         }
-        // 引擎不 panic 即可(功能行被 cand_pinned=None 拒绝)
+        assert!(!l.set_pinyin_only(&mut h, true));
+        assert_eq!(l.mode, 0);
+        type_keys(&mut l, &mut h, "wq");
+        let last = h
+            .events
+            .borrow()
+            .iter()
+            .filter(|e| e.starts_with("cands:"))
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!last.contains("你#wq"), "{last}");
+        assert!(l.set_pinyin_only(&mut h, false));
+        type_keys(&mut l, &mut h, "wq");
+        let last = h
+            .events
+            .borrow()
+            .iter()
+            .filter(|e| e.starts_with("cands:"))
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        assert!(last.contains("你"), "{last}");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e == "commit:你"));
     }
 
     /// §15 自定义查询(第 4 行):已配置时操作行多一项,数字 4 执行 →
@@ -1798,7 +2492,7 @@ mod tests {
     const KSYM_F8: u32 = 0xffc5;
 
     /// 菜单触发夹具:sz=设置、bz=帮助、yw=英文(词库首位,空格上屏)。
-    fn logic_menu(mut core_cfg: lyyime_core::Config) -> (PathBuf, EngineLogic) {
+    fn logic_menu(core_cfg: lyyime_core::Config) -> (PathBuf, EngineLogic) {
         let dir = fixtures_dir();
         std::fs::write(
             dir.join("wubi.tsv"),
@@ -1806,9 +2500,7 @@ mod tests {
         )
         .unwrap();
         // 用户词典隔离到独立临时路径:测试不得写真实 HOME 的 user_words/统计
-        core_cfg.user_dict = Some(fixtures_dir_user());
-        let mut logic = EngineLogic::new(dir.clone(), None, core_cfg);
-        logic.stats_dir = None;
+        let logic = test_engine_logic(dir.clone(), None, core_cfg);
         (dir, logic)
     }
 
@@ -1949,15 +2641,7 @@ mod tests {
             "wqvb\t你好\t1000\nsz\t设置\t900\n",
         )
         .unwrap();
-        let mut l = EngineLogic::new(
-            dir.clone(),
-            Some(cfg),
-            lyyime_core::Config {
-                user_dict: Some(fixtures_dir_user()),
-                ..Default::default()
-            },
-        );
-        l.stats_dir = None;
+        let mut l = test_engine_logic(dir.clone(), Some(cfg), lyyime_core::Config::default());
         let mut h = Mock::default();
         // /AI 进入采集态;采集态组词上屏进提示词,不喂菜单匹配器
         for k in ['/','a','i'] {
@@ -2096,15 +2780,7 @@ mod tests {
             .iter()
             .all(|e| !e.contains("菜单功能")));
         // 对照:release 路径(press=false)的 pass 不复位尾串
-        let mut l = EngineLogic::new(
-            fixtures_dir(),
-            None,
-            lyyime_core::Config {
-                user_dict: Some(fixtures_dir_user()),
-                ..Default::default()
-            },
-        );
-        l.stats_dir = None;
+        let mut l = test_engine_logic(fixtures_dir(), None, lyyime_core::Config::default());
         l.dispatch(
             &mut h,
             vec![Effect::Commit("设".into()), Effect::Pass],
@@ -2414,15 +3090,7 @@ mod tests {
         .unwrap();
         std::fs::write(d.join("pinyin_phrase.tsv"), "").unwrap();
         std::fs::write(d.join("wubi.tsv"), "").unwrap();
-        let mut l = EngineLogic::new(
-            d,
-            None,
-            lyyime_core::Config {
-                user_dict: Some(fixtures_dir_user()),
-                ..Default::default()
-            },
-        );
-        l.stats_dir = None;
+        let mut l = test_engine_logic(d, None, lyyime_core::Config::default());
         let mut h = Mock::default();
         for c in "jieping".chars() {
             assert!(l.process_key_event(&mut h, c as u32, 0));
@@ -2462,6 +3130,155 @@ mod tests {
                 .find(|e| e.starts_with("preedit:"))
                 .map(String::as_str),
             Some("preedit:∅")
+        );
+    }
+
+    #[test]
+    fn 测试隔离_各夹具user_dict均为独立user_tsv() {
+        let (_a, l1) = logic_with_ai(None);
+        let (_b, l2) = logic_with_core_cfg(lyyime_core::Config::default());
+        let (_c, l3) = logic_paging();
+        let (_d, l4) = logic_menu(lyyime_core::Config::default());
+        let mut l5 = test_engine_logic(
+            PathBuf::from("/nonexistent-lyyime-deg"),
+            None,
+            lyyime_core::Config::default(),
+        );
+        if !l5.degraded() {
+            l5.engine = None;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (i, l) in [&l1, &l2, &l3, &l4, &l5].iter().enumerate() {
+            let ud = l
+                .core_cfg
+                .user_dict
+                .as_ref()
+                .unwrap_or_else(|| panic!("夹具{i} 缺少隔离 user_dict"));
+            assert_eq!(
+                ud.file_name().and_then(|s| s.to_str()),
+                Some("user.tsv"),
+                "夹具{i} user_dict 应为 user.tsv: {ud:?}"
+            );
+            assert!(
+                ud.starts_with(std::env::temp_dir()),
+                "夹具{i} user_dict 必须位于临时目录: {ud:?}"
+            );
+            assert!(seen.insert(ud.clone()), "夹具{i} 与其他夹具共享 user_dict");
+            assert!(l.stats_dir.is_none(), "夹具{i} stats_dir 必须为 None");
+        }
+    }
+
+    #[test]
+    fn 测试隔离_显式user_dict原样保留() {
+        let explicit = fixtures_dir_user();
+        let l = test_engine_logic(
+            fixtures_dir(),
+            None,
+            lyyime_core::Config {
+                user_dict: Some(explicit.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            l.core_cfg.user_dict.as_deref(),
+            Some(explicit.as_path()),
+            "显式给定的 user_dict 不得被夹具覆盖"
+        );
+    }
+
+    #[test]
+    fn 测试隔离_词菜单删除只写自有blocked() {
+        let (_d, mut l) = logic_paging();
+        let udir = l
+            .core_cfg
+            .user_dict
+            .clone()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_ne!(
+            udir,
+            lyyime_core::Config::default_user_dict_path()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+            "夹具用户目录不得等于默认 HOME 目录"
+        );
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "a");
+        assert!(l.cand_menu_open(&mut h, 0), "首选工应能打开词菜单");
+        assert!(l.cand_menu_select_absolute(&mut h, 1), "abs=1 删除词组应执行");
+        assert_eq!(
+            std::fs::read_to_string(udir.join("blocked.tsv")).unwrap(),
+            "工\n",
+            "blocked.tsv 应只含删除词: {}",
+            udir.display()
+        );
+        let after = last_nonempty_cands(&h);
+        assert!(
+            !after.contains("工"),
+            "删除后本引擎候选不得再含工: {after}"
+        );
+        let (_d2, mut l2) = logic_paging();
+        let udir2 = l2
+            .core_cfg
+            .user_dict
+            .clone()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_ne!(udir, udir2, "两次夹具须用不同用户目录");
+        assert!(
+            !udir2.join("blocked.tsv").exists(),
+            "新夹具用户目录不得有 blocked.tsv: {}",
+            udir2.display()
+        );
+        let mut h2 = Mock::default();
+        type_keys(&mut l2, &mut h2, "a");
+        assert!(
+            last_nonempty_cands(&h2).contains("工"),
+            "独立引擎候选应仍含工: {}",
+            last_nonempty_cands(&h2)
+        );
+    }
+
+    #[test]
+    fn 测试隔离_学习落盘user_tsv且不碰user_words() {
+        let udict = fixtures_dir_user();
+        let uwords = udict.parent().unwrap().join("user_words.tsv");
+        std::fs::write(&uwords, "测试\tceui\t1\n").unwrap();
+        let seed = std::fs::read(&uwords).unwrap();
+        let mut l = test_engine_logic(
+            fixtures_dir(),
+            None,
+            lyyime_core::Config {
+                user_dict: Some(udict.clone()),
+                commit_first_at_four: false,
+                commit_unique_four: false,
+                ..Default::default()
+            },
+        );
+        let mut h = Mock::default();
+        type_keys(&mut l, &mut h, "wqvb");
+        l.process_key_event(&mut h, KSYM_SPACE, 0);
+        assert!(
+            h.events.borrow().iter().any(|e| e == "commit:你好"),
+            "wqvb+空格应上屏你好"
+        );
+        l.engine
+            .as_mut()
+            .unwrap()
+            .flush_user_dict()
+            .expect("学习者落盘应成功");
+        assert!(udict.is_file(), "user.tsv 应由学习者写出: {udict:?}");
+        let text = std::fs::read_to_string(&udict).unwrap();
+        assert!(text.contains("你好"), "user.tsv 应含学到的词: {text}");
+        assert_eq!(
+            std::fs::read(&uwords).unwrap(),
+            seed,
+            "造词库 user_words.tsv 不得被学习落盘改动"
         );
     }
 }

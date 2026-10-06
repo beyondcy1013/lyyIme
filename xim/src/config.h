@@ -42,6 +42,7 @@ typedef struct {
 
 typedef struct {
     int page_size;           /* 候选数(1..10;数字键 1-9/0,0=第 10 个),对齐 core Config */
+    int pinyin_only;
     int mixed_english;       /* 中英混合(无中文候选时给英文词) */
     int auto_commit_english; /* 高置信英文词标点/空格自动直通 */
     int chinese_punct;       /* 中文态使用中文标点 */

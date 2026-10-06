@@ -2343,3 +2343,231 @@ fn 补充词表_不扩展到小词库没有的音节() {
     let fx = eng.process_key(LKey::Space);
     assert_eq!(commits(&fx), vec!["jieping".to_string()], "{fx:?}");
 }
+#[test]
+fn 纯拼音_nihao出你好且无五笔英文候选() {
+    let mut eng = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    type_str(&mut eng, "nihao");
+    let page = eng.flush_page();
+    assert_eq!(page.first().map(|c| c.text.as_str()), Some("你好"));
+    assert!(
+        page.iter()
+            .all(|c| matches!(c.kind, CandKind::Pinyin | CandKind::User)),
+        "纯拼音不应混入五笔/英文候选:{page:?}"
+    );
+}
+#[test]
+fn 纯拼音_五笔码无候选_混输保留() {
+    let mut pure = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    type_str(&mut pure, "aa");
+    assert!(page_texts(&pure).is_empty(), "纯拼音下五笔码应无候选");
+    assert_eq!(pure.buffer(), "aa", "死码吞键是纯五笔保护,纯拼音应保留原始缓冲");
+    let mut mixed = engine();
+    type_str(&mut mixed, "aa");
+    assert_eq!(page_texts(&mixed).first().map(String::as_str), Some("式"));
+}
+#[test]
+fn 纯拼音_非法后缀不吞键_混输保留死码保护() {
+    let mut pure = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    type_str(&mut pure, "niha");
+    assert!(!page_texts(&pure).is_empty(), "niha 应有拼音候选");
+    pure.process_key(LKey::Char('q'));
+    assert_eq!(pure.buffer(), "nihaq", "纯拼音不得吞掉非法后缀键");
+    assert!(page_texts(&pure).is_empty(), "nihaq 应零候选但保留缓冲");
+    let mut mixed = engine();
+    type_str(&mut mixed, "niha");
+    mixed.process_key(LKey::Char('q'));
+    assert_eq!(mixed.buffer(), "niha", "混输死码保护应吞掉 q");
+}
+#[test]
+fn 纯拼音_混合英文开关开启仍不出英文候选() {
+    let mut pure = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    type_str(&mut pure, "hello");
+    assert!(
+        eng_page_kinds(&pure)
+            .iter()
+            .all(|k| !matches!(k, CandKind::English)),
+        "纯拼音不应出现英文候选"
+    );
+    assert!(
+        !page_texts(&pure).iter().any(|t| t == "hello"),
+        "hello 英文候选应被旁路"
+    );
+    let mut mixed = engine_with(Config {
+        commit_unique_four: false,
+        commit_first_at_four: false,
+        ..Config::default()
+    });
+    type_str(&mut mixed, "hello");
+    assert!(
+        eng_page_kinds(&mixed).iter().any(|k| matches!(k, CandKind::English)),
+        "混输 hello 应有英文候选"
+    );
+}
+#[test]
+fn 纯拼音_四码规则旁路_四字母拼音继续组词() {
+    let mut eng = engine_with(Config {
+        pinyin_only: true,
+        commit_first_at_four: false,
+        commit_unique_four: true,
+        ..Config::default()
+    });
+    let fx = type_str(&mut eng, "niha");
+    assert!(commits(&fx).is_empty(), "四码拼音不应被上屏:{fx:?}");
+    assert_eq!(eng.buffer(), "niha");
+    let fx = eng.process_key(LKey::Char('o'));
+    assert!(commits(&fx).is_empty(), "续敲不应先顶屏:{fx:?}");
+    assert_eq!(eng.buffer(), "nihao");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("你好"));
+}
+#[test]
+fn 纯拼音切换_丢弃组合不上屏_保持中英模式() {
+    let mut eng = engine();
+    type_str(&mut eng, "niha");
+    assert_eq!(eng.buffer(), "niha");
+    assert!(eng.set_pinyin_only(true));
+    assert!(eng.buffer().is_empty());
+    assert_eq!(eng.mode(), Mode::Chinese, "方案切换不得改变中英模式");
+    eng.toggle_mode();
+    assert_eq!(eng.mode(), Mode::English);
+    assert!(!eng.set_pinyin_only(true), "同值调用应空操作");
+    assert!(eng.set_pinyin_only(false));
+    assert_eq!(eng.mode(), Mode::English);
+    eng.toggle_mode();
+    type_str(&mut eng, "aa");
+    assert_eq!(page_texts(&eng).first().map(String::as_str), Some("式"));
+}
+#[test]
+fn 纯拼音_注释为拼音而非五笔反查() {
+    let td = TempDir::new();
+    std::fs::write(td.join("wubi.tsv"), "wqvb\t你好\t9000\n").unwrap();
+    std::fs::write(td.join("pinyin_char.tsv"), "ni\t你\t6000\nhao\t好\t5000\n").unwrap();
+    std::fs::write(td.join("pinyin_phrase.tsv"), "你好\tni hao\t9000\n").unwrap();
+    let mk = |pure| {
+        engine_with_fixtures(
+            &td.path,
+            Config {
+                pinyin_only: pure,
+                user_dict: Some(td.join("user.tsv")),
+                ..Config::default()
+            },
+        )
+    };
+    let mut mixed = mk(false);
+    type_str(&mut mixed, "nihao");
+    assert_eq!(mixed.flush_page()[0].comment, "wqvb");
+    let mut pure = mk(true);
+    type_str(&mut pure, "nihao");
+    assert_eq!(pure.flush_page()[0].comment, "ni hao");
+}
+#[test]
+fn 纯拼音_前缀选词保留后缀() {
+    let mut eng = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    type_str(&mut eng, "nihao");
+    let mut pos = None;
+    for _ in 0..eng.page_count().max(1) {
+        pos = eng
+            .flush_page()
+            .iter()
+            .position(|c| c.text == "你" && c.consumed == 2);
+        if pos.is_some() {
+            break;
+        }
+        eng.process_key(LKey::PageDown);
+    }
+    let pos = pos.expect("前缀候选「你」应在列");
+    let fx = eng.select_candidate(pos);
+    assert!(has_commit(&fx, "你"));
+    assert_eq!(eng.buffer(), "hao", "后缀 hao 应保留继续组词");
+}
+#[test]
+fn 纯拼音_显式英文行为保留_Enter直通与大写候选() {
+    let mut eng = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    type_str(&mut eng, "nihao");
+    let fx = eng.process_key(LKey::Enter);
+    assert_eq!(commits(&fx), vec!["nihao".to_string()]);
+    let mut eng2 = engine_with(Config {
+        pinyin_only: true,
+        ..Config::default()
+    });
+    let _ = eng2.process_key(LKey::Char('H'));
+    let _ = eng2.process_key(LKey::Char('I'));
+    let page = eng2.flush_page();
+    assert!(
+        page.iter().any(|c| c.text == "HI"),
+        "全大写敲入应保留英文形态候选:{page:?}"
+    );
+}
+#[test]
+fn 纯拼音_已学五笔词条不出候选() {
+    let td = TempDir::new();
+    let mut eng = engine_with_fixtures(
+        &fixtures(),
+        Config {
+            user_dict: Some(td.join("user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut eng, "aa");
+    let fx = eng.process_key(LKey::Space);
+    assert!(has_commit(&fx, "式"), "{fx:?}");
+    eng.flush_user_dict().unwrap();
+    assert!(std::fs::read_to_string(td.join("user.tsv"))
+        .unwrap()
+        .contains("式"));
+    let mut pure = engine_with_fixtures(
+        &fixtures(),
+        Config {
+            pinyin_only: true,
+            user_dict: Some(td.join("user.tsv")),
+            ..Config::default()
+        },
+    );
+    type_str(&mut pure, "aa");
+    assert!(
+        page_texts(&pure).is_empty(),
+        "纯拼音下已学五笔词条也不得出候选"
+    );
+    assert_eq!(pure.buffer(), "aa", "纯拼音应保留原始缓冲");
+}
+#[test]
+fn 纯拼音_快速功能键照常() {
+    let mut eng = engine_with(Config {
+        pinyin_only: true,
+        quick_actions: vec![QuickAction {
+            trigger: "shezhi".into(),
+            label: "设置".into(),
+            command: "@settings".into(),
+        }],
+        ..Config::default()
+    });
+    type_str(&mut eng, "shezhi");
+    let page = eng.flush_page();
+    let pos = page
+        .iter()
+        .position(|c| matches!(c.kind, CandKind::Action(_)))
+        .expect("纯拼音下功能键候选应在列");
+    assert_eq!(page[pos].text, "设置");
+    let fx = eng.select_candidate(pos);
+    assert!(matches!(fx.first(), Some(Effect::Action(_))), "{fx:?}");
+}
+fn eng_page_kinds(eng: &Engine) -> Vec<CandKind> {
+    eng.flush_page().iter().map(|c| c.kind).collect()
+}

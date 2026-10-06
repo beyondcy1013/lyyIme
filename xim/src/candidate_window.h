@@ -38,12 +38,16 @@ enum {
 typedef int (*LyyCandwinOpStateFn)(int idx, void *user_data);
 /* 右键菜单项激活回调:op∈上面枚举;宿主转发 core cand_op 并按效果流刷新 */
 typedef void (*LyyCandwinOpFn)(int idx, int op, void *user_data);
+typedef void (*LyyCandwinMenuFn)(GtkMenuShell *shell, void *user_data);
+/* 表头最右设置钮(齿轮):左键单击调用一次,不上屏不提交;NULL=不响应 */
+typedef void (*LyyCandwinSettingsFn)(void *user_data);
 
 typedef struct CandidateWindow {
     GtkWidget *win;
     GtkWidget *frame;      /* .lyy-frame 圆角+阴影容器 */
     GtkWidget *preedit;    /* 输入串(编码) */
     GtkWidget *page;       /* 翻页指示 1/3 */
+    GtkWidget *gear;       /* 表头最右设置钮(系统区;含零候选预编辑态可见) */
     GtkWidget *rows[LYY_MAX_ROWS];    /* 每行 GtkBox */
     GtkWidget *num[LYY_MAX_ROWS];     /* 序号 */
     GtkWidget *word[LYY_MAX_ROWS];    /* 候选词 */
@@ -53,6 +57,7 @@ typedef struct CandidateWindow {
     guint theme_timer;  /* 低频复查 GTK 明暗主题变化(仅 system 皮肤生效) */
     GtkCssProvider *css_provider; /* 复用同一 provider,避免定时刷新累积 */
     xcb_connection_t *conn;
+    xcb_connection_t *pointer_conn;
     xcb_window_t root;
     int font_size;
     char skin[32];       /* 皮肤 id(注册表归一;"system"=跟随系统明暗) */
@@ -63,6 +68,10 @@ typedef struct CandidateWindow {
     LyyCandwinOpStateFn op_state_fn; /* 右键菜单状态查询(§15);NULL=不建菜单 */
     LyyCandwinOpFn op_fn;            /* 右键菜单项激活回调 */
     void *op_user_data;              /* 右键回调入参(与 click 共用 App*) */
+    LyyCandwinMenuFn general_fn;
+    void *general_user_data;
+    LyyCandwinSettingsFn settings_fn; /* 表头齿轮左键回调;NULL=不响应 */
+    void *settings_user_data;
     gboolean hover;       /* 指针悬停在窗内 → 暂停跟随,行才可点/可右键 */
     gboolean menu_open;   /* 右键菜单打开期间强制冻结(菜单夺走指针) */
     /* §15 自定义查询(菜单第 4 项):url 模板含 {q} 占位符(词百分号编码
@@ -92,6 +101,11 @@ void lyy_candwin_set_page(CandidateWindow *cw, int page, int pages); /* 1 基 */
 void lyy_candwin_set_op_fns(CandidateWindow *cw, LyyCandwinOpStateFn state_fn,
                             LyyCandwinOpFn op_fn, void *user_data);
 
+void lyy_candwin_set_general_fn(CandidateWindow *cw, LyyCandwinMenuFn fn,
+                                void *user_data);
+void lyy_candwin_set_settings_fn(CandidateWindow *cw,
+                               LyyCandwinSettingsFn fn, void *user_data);
+GtkWidget *lyy_candwin_build_menu(CandidateWindow *cw, int idx);
 /* 注入自定义查询配置(§15 菜单第 4 项):label/url 来自 config.toml
  * custom_query_label/custom_query_url;url 为空 → 菜单不显示该项。
  * 启动与设置保存后各调一次,即时生效。 */

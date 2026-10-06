@@ -47,8 +47,11 @@ pub enum Action {
     /// 菜单触发确认(2026-09-30):值 = core 可信目录 MENU_CATALOG 下标,
     /// 调用方按目录动作分派(settings/help/english/…),绝不落 shell
     MenuRun(usize),
+    MenuGeneral(String),
     /// 菜单提示撤下:隐藏辅助区(仅在我们贴的菜单提示仍显示时产生)
     AuxClear,
+    /// 解除系统 CapsLock(logic 在 Shift 单击确认英文→中文时请求)
+    CapsLockOff,
 }
 
 impl logic::Host for CollectingHost {
@@ -96,8 +99,14 @@ impl logic::Host for CollectingHost {
     fn on_menu_action(&mut self, index: usize) {
         self.actions.push(Action::MenuRun(index));
     }
+    fn on_menu_general(&mut self, id: &str) {
+        self.actions.push(Action::MenuGeneral(id.to_string()));
+    }
     fn on_menu_hint_clear(&mut self) {
         self.actions.push(Action::AuxClear);
+    }
+    fn on_caps_lock_off(&mut self) {
+        self.actions.push(Action::CapsLockOff);
     }
 }
 
@@ -129,10 +138,9 @@ fn engine_state_publish() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     parts.push(format!(r#""ts":{ts}"#));
-    let _ = std::fs::write(
-        "/tmp/lyyime-engine-state.json",
-        format!("{{{}}}", parts.join(",")),
-    );
+    let path = std::env::var("LYYIME_ENGINE_STATE_FILE")
+        .unwrap_or_else(|_| "/tmp/lyyime-engine-state.json".to_string());
+    let _ = std::fs::write(path, format!("{{{}}}", parts.join(",")));
 }
 
 fn engine_state_set_mode(mode: u8) {
@@ -145,12 +153,51 @@ fn engine_state_set_enabled(enabled: bool) {
     engine_state_publish();
 }
 
+/// 防重复拉起设置启动器:槽内子进程仍存活则拒绝重复;已退出则
+/// try_wait 收割后再拉起。kill(pid,0) 对已退出未回收的 zombie 仍返回 0,
+/// 不能用来判活(zombie 误判存活会让第二次拉起永久被拒);调用方须
+/// 持锁覆盖"检查+拉起"全程。
+fn spawn_setup_child(
+    slot: &mut Option<std::process::Child>,
+    argv: &[String],
+) -> std::io::Result<bool> {
+    if let Some(child) = slot.as_mut() {
+        if child.try_wait()?.is_none() {
+            let reopen = std::path::Path::new(&argv[0])
+                .file_name()
+                .map(|n| n == "lyyime-xim")
+                .unwrap_or(false)
+                && argv.iter().any(|a| a == "--settings")
+                && std::fs::canonicalize(&argv[0])
+                    .ok()
+                    .zip(std::fs::read_link(format!("/proc/{}/exe", child.id())).ok())
+                    .map(|(a, b)| a == b)
+                    .unwrap_or(false);
+            if !reopen {
+                return Ok(false);
+            }
+            if unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGUSR1) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(true);
+        }
+        *slot = None;
+    }
+    let child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    *slot = Some(child);
+    Ok(true)
+}
+
 pub struct EngineState {
     pub conn: zbus::Connection,
     pub path: String,
     pub logic: Mutex<EngineLogic>,
     pub notice_gen: AtomicU64,
-    pub setup_pid: Mutex<u32>,
+    pub setup_child: Mutex<Option<std::process::Child>>,
     pub icon_dir: String,
     /// 引擎是否被 ibus 启用(enable/disable 回调维护;悬浮窗状态联动读它)
     pub enabled: std::sync::atomic::AtomicBool,
@@ -166,15 +213,17 @@ impl EngineService {
         logic: EngineLogic,
         icon_dir: String,
     ) -> EngineService {
-        EngineService(Arc::new(EngineState {
+        let st = Arc::new(EngineState {
             conn,
             path,
             logic: Mutex::new(logic),
             notice_gen: AtomicU64::new(0),
-            setup_pid: Mutex::new(0),
+            setup_child: Mutex::new(None),
             icon_dir,
             enabled: std::sync::atomic::AtomicBool::new(false),
-        }))
+        });
+        crate::candidate_ui::register(&st.path, &st);
+        EngineService(st)
     }
 
     fn mode_icon(&self, mode: u8) -> String {
@@ -283,14 +332,14 @@ impl EngineService {
             Action::Preedit(Some(t)) => {
                 let tv = wire::ibus_text(t, true);
                 let cursor = t.chars().count() as u32;
+                let mode = if crate::candidate_ui::ui().is_some() {
+                    wire::PREEDIT_FOCUS_MODE_CLEAR
+                } else {
+                    wire::PREEDIT_FOCUS_MODE_COMMIT
+                };
                 self.emit(
                     "UpdatePreeditText",
-                    &(
-                        tv.try_clone().expect("clone"),
-                        cursor,
-                        true,
-                        wire::PREEDIT_FOCUS_MODE_COMMIT,
-                    ),
+                    &(tv.try_clone().expect("clone"), cursor, true, mode),
                 )
                 .await?;
                 Ok(())
@@ -309,6 +358,44 @@ impl EngineService {
                 .await
             }
             Action::Candidates { cands, page, pages, aux } => {
+                if let Some(ui) = crate::candidate_ui::ui() {
+                    enum U {
+                        Hide(u64),
+                        Show(u64),
+                        Keep,
+                    }
+                    let v = {
+                        let mut lg = self.0.logic.lock().unwrap();
+                        if lg.cand_menu_active() {
+                            U::Keep
+                        } else if !lg.ui_gate_open()
+                            || (cands.is_empty() && aux.is_empty())
+                        {
+                            U::Hide(lg.ui_invalidate())
+                        } else {
+                            U::Show(lg.ui_invalidate())
+                        }
+                    };
+                    match v {
+                        U::Hide(g) => ui.hide(&self.0.path, g),
+                        U::Show(g) => {
+                            let mut aux_text = aux.clone();
+                            if *pages > 1 {
+                                let ind = format!("  [{}/{}]", page + 1, pages);
+                                aux_text = if aux_text.is_empty() {
+                                    ind.trim_start().to_string()
+                                } else {
+                                    format!("{aux_text}{ind}")
+                                };
+                            }
+                            ui.show(&self.0.path, g, cands, &aux_text, *page, *pages);
+                        }
+                        U::Keep => {}
+                    }
+                    self.emit("HideLookupTable", &()).await?;
+                    self.emit("HideAuxiliaryText", &()).await?;
+                    return Ok(());
+                }
                 if cands.is_empty() {
                     self.emit("HideLookupTable", &()).await?;
                     self.emit("HideAuxiliaryText", &()).await
@@ -355,15 +442,13 @@ impl EngineService {
                 self.emit("UpdateProperty", &(boxed,)).await
             }
             Action::Notice(t) => {
-                self.emit("UpdateAuxiliaryText", &(wire::ibus_text(t, false), true))
-                    .await?;
+                self.aux_show(t).await;
                 self.schedule_notice_clear();
                 Ok(())
             }
             Action::Hint(t) => {
                 logger::info(&format!("hint: {t}"));
-                self.emit("UpdateAuxiliaryText", &(wire::ibus_text(t, false), true))
-                    .await?;
+                self.aux_show(t).await;
                 // 作废未到的 notice 清除定时,提示保留到下一次输入(合同 §6)。
                 self.0.notice_gen.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -373,12 +458,67 @@ impl EngineService {
             Action::QuickRun(_) => Ok(()), // 由调用方单独处理(§14)
             Action::OpenUrl(_) => Ok(()),  // 由调用方单独处理(§15 自定义查询)
             Action::MenuRun(_) => Ok(()),  // 由调用方单独处理(2026-09-30 菜单触发)
+            Action::MenuGeneral(_) => Ok(()),
             Action::AuxClear => {
                 // 菜单提示撤下:只隐藏辅助区;同时作废未到的 notice 清除定时
                 self.0.notice_gen.fetch_add(1, Ordering::SeqCst);
-                self.emit("HideAuxiliaryText", &()).await
+                self.aux_hide().await;
+                Ok(())
+            }
+            Action::CapsLockOff => {
+                crate::keyboard::caps_lock_off();
+                Ok(())
             }
         }
+    }
+
+    async fn aux_show(&self, text: &str) {
+        if let Some(ui) = crate::candidate_ui::ui() {
+            let gen = {
+                let lg = self.0.logic.lock().unwrap();
+                if !lg.ui_gate_open() {
+                    return;
+                }
+                lg.ui_gen()
+            };
+            ui.notice(&self.0.path, gen, text);
+            return;
+        }
+        let _ = self
+            .emit("UpdateAuxiliaryText", &(wire::ibus_text(text, false), true))
+            .await;
+    }
+
+    fn aux_show_sync(&self, text: &str) {
+        if let Some(ui) = crate::candidate_ui::ui() {
+            let gen = {
+                let lg = self.0.logic.lock().unwrap();
+                if !lg.ui_gate_open() {
+                    return;
+                }
+                lg.ui_gen()
+            };
+            ui.notice(&self.0.path, gen, text);
+            return;
+        }
+        let _ = zbus::block_on(
+            self.emit("UpdateAuxiliaryText", &(wire::ibus_text(text, false), true)),
+        );
+    }
+
+    async fn aux_hide(&self) {
+        if let Some(ui) = crate::candidate_ui::ui() {
+            let gen = {
+                let lg = self.0.logic.lock().unwrap();
+                if !lg.ui_gate_open() {
+                    return;
+                }
+                lg.ui_gen()
+            };
+            ui.notice(&self.0.path, gen, "");
+            return;
+        }
+        let _ = self.emit("HideAuxiliaryText", &()).await;
     }
 
     /// 4 秒后清辅助区提示(新提示会带新代号,旧定时器失效)。
@@ -390,9 +530,7 @@ impl EngineService {
             if this.0.notice_gen.load(Ordering::SeqCst) != gen {
                 return;
             }
-            let _ = zbus::block_on(async {
-                this.emit("HideAuxiliaryText", &()).await
-            });
+            let _ = zbus::block_on(this.aux_hide());
         });
     }
 
@@ -429,16 +567,7 @@ impl EngineService {
         let cfg = lyyime_ai::load_config();
         let model = cfg.model.clone();
         let this = self.clone();
-        let _ = zbus::block_on(async {
-            self.emit(
-                "UpdateAuxiliaryText",
-                &(
-                    wire::ibus_text(&format!("AI 生成中…({model})"), false),
-                    true,
-                ),
-            )
-            .await
-        });
+        self.aux_show_sync(&format!("AI 生成中…({model})"));
         std::thread::spawn(move || {
             let result = lyyime_ai::chat(&prompt, &cfg, None);
             let _ = zbus::block_on(async move {
@@ -451,21 +580,11 @@ impl EngineService {
                             crate::logger::error(&format!("AI 回复上屏失败:{e}"));
                             return;
                         }
-                        this.emit(
-                            "UpdateAuxiliaryText",
-                            &(wire::ibus_text("AI 已上屏", false), true),
-                        )
-                        .await
-                        .ok();
+                        this.aux_show_sync("AI 已上屏");
                         this.schedule_notice_clear();
                     }
                     Err(e) => {
-                        this.emit(
-                            "UpdateAuxiliaryText",
-                            &(wire::ibus_text(&format!("AI 失败:{e}"), false), true),
-                        )
-                        .await
-                        .ok();
+                        this.aux_show_sync(&format!("AI 失败:{e}"));
                         this.schedule_notice_clear();
                         crate::logger::warn(&format!("AI 调用失败:{e}"));
                     }
@@ -493,12 +612,8 @@ impl EngineService {
             .or(sibling)
             .or(system);
         let Some(prog) = prog else {
-            let this = self.clone();
             let msg = "未找到 lyyime-shot:请先安装 lyyIme 截屏组件(scripts/install-all.sh)";
-            let _ = zbus::block_on(async {
-                this.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true))
-                    .await
-            });
+            self.aux_show_sync(msg);
             return;
         };
         match std::process::Command::new(&prog)
@@ -516,11 +631,7 @@ impl EngineService {
         let doctor = which(argv[0]);
         if doctor.is_none() {
             let msg = format!("未找到 {}:请先安装 lyyIme 工具组件", argv[0]);
-            let this = self.clone();
-            let _ = zbus::block_on(async {
-                this.emit("UpdateAuxiliaryText", &(wire::ibus_text(&msg, false), true))
-                    .await
-            });
+            self.aux_show_sync(&msg);
             return;
         }
         let cmd = if let Some(term) = which("xfce4-terminal") {
@@ -543,12 +654,7 @@ impl EngineService {
                         String::from_utf8_lossy(&o.stdout),
                         String::from_utf8_lossy(&o.stderr)
                     ));
-                    let this = self.clone();
-                    let msg = format!("{title} 完成,结果已写入日志");
-                    let _ = zbus::block_on(async {
-                        this.emit("UpdateAuxiliaryText", &(wire::ibus_text(&msg, false), true))
-                            .await
-                    });
+                    self.aux_show_sync(&format!("{title} 完成,结果已写入日志"));
                 }
                 Err(e) => crate::logger::error(&format!("运行 {argv:?} 失败:{e}")),
             }
@@ -586,23 +692,13 @@ impl EngineService {
                 };
                 crate::logger::info(&format!("快速功能键命中:截图(@shot),热键 {hk}"));
                 // 先提示(含热键);助手缺失时 spawn_shot 的安装指引会覆盖本提示
-                let this = self.clone();
-                let msg = format!("已拉起截屏(热键 {hk})");
-                let _ = zbus::block_on(async {
-                    this.emit("UpdateAuxiliaryText", &(wire::ibus_text(&msg, false), true))
-                        .await
-                });
+                self.aux_show_sync(&format!("已拉起截屏(热键 {hk})"));
                 self.schedule_notice_clear();
                 self.spawn_shot();
             }
             "@help" => {
                 crate::logger::info("快速功能键命中:帮助(@help)");
-                let msg = "帮助:Shift单击=中英切换  1-9选词  -/=翻页  Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  peizhi/shezhi=设置 jietu=截图 bangzhu=帮助";
-                let this = self.clone();
-                let _ = zbus::block_on(async {
-                    this.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true))
-                        .await
-                });
+                self.aux_show_sync("帮助:Shift单击=中英切换  1-9选词  -/=翻页  Ctrl+=造词  Ctrl+Alt+A截屏  /AI+提示词=AI  peizhi/shezhi=设置 jietu=截图 bangzhu=帮助");
                 self.schedule_notice_clear();
             }
             custom => {
@@ -715,19 +811,129 @@ impl EngineService {
         }
     }
 
+    async fn run_general_action(&self, id: &str) {
+        crate::logger::info(&format!("候选菜单:通用动作 {id}"));
+        match id {
+            logic::GA_SETTINGS => self.launch_setup(),
+            logic::GA_SETTINGS_INPUT => self.launch_setup_page(1),
+            logic::GA_SETTINGS_SKIN => self.launch_setup_page(6),
+            logic::GA_TOGGLE_MODE => {
+                let actions = {
+                    let mut lg = self.0.logic.lock().unwrap();
+                    let mut host = CollectingHost::default();
+                    lg.switch_mode(&mut host);
+                    host.actions
+                };
+                for a in &actions {
+                    let _ = self.emit_action(a).await;
+                }
+            }
+            logic::GA_TOGGLE_PINYIN => {
+                let cur = crate::read_config_bool("pinyin_only")
+                    .unwrap_or_else(|| crate::menu_bool_default("pinyin_only"));
+                let Some(want) = self.persist_flag("pinyin_only", "输入方案", cur).await else {
+                    return;
+                };
+                let actions = {
+                    let mut lg = self.0.logic.lock().unwrap();
+                    let mut host = CollectingHost::default();
+                    lg.set_pinyin_only(&mut host, want);
+                    host.actions
+                };
+                for a in &actions {
+                    let _ = self.emit_action(a).await;
+                }
+                self.emit_menu_hint(if want { "已切换:纯拼音" } else { "已切换:五笔/拼音混输" })
+                    .await;
+            }
+            logic::GA_TOGGLE_PUNCT => {
+                let cur = self
+                    .0
+                    .logic
+                    .lock()
+                    .unwrap()
+                    .runtime_cn_punct()
+                    .or_else(|| crate::read_config_bool("chinese_punct"))
+                    .or_else(|| crate::read_config_bool("cn_punct"))
+                    .unwrap_or_else(|| crate::menu_bool_default("chinese_punct"));
+                let Some(want) = self.persist_flag("chinese_punct", "中文标点", cur).await else {
+                    return;
+                };
+                self.0.logic.lock().unwrap().set_chinese_punctuation(want);
+            }
+            logic::GA_TOGGLE_LEARN => {
+                let cur = crate::read_config_bool("learning")
+                    .unwrap_or_else(|| crate::menu_bool_default("learning"));
+                let Some(want) = self.persist_flag("learning", "用户词学习", cur).await else {
+                    return;
+                };
+                self.0.logic.lock().unwrap().set_learning(want);
+            }
+            logic::GA_TOGGLE_PRED => {
+                let cur = crate::read_config_bool("next_word_prediction")
+                    .unwrap_or_else(|| crate::menu_bool_default("next_word_prediction"));
+                let Some(want) = self
+                    .persist_flag("next_word_prediction", "上屏后联想", cur)
+                    .await
+                else {
+                    return;
+                };
+                self.0.logic.lock().unwrap().set_next_word_prediction(want);
+            }
+            logic::GA_TOGGLE_QA => {
+                let cur = crate::read_config_bool("quick_actions_enabled")
+                    .unwrap_or_else(|| crate::menu_bool_default("quick_actions_enabled"));
+                let Some(want) = self
+                    .persist_flag("quick_actions_enabled", "快速功能键", cur)
+                    .await
+                else {
+                    return;
+                };
+                self.0.logic.lock().unwrap().set_quick_actions_enabled(want);
+            }
+            logic::GA_SHOT => self.spawn_shot(),
+            logic::GA_RELOAD => {
+                let actions = {
+                    let mut lg = self.0.logic.lock().unwrap();
+                    let mut host = CollectingHost::default();
+                    match lg.reload_dict(&mut host) {
+                        Ok(()) => host.actions.push(Action::Notice("词库已重载".into())),
+                        Err(e) => host
+                            .actions
+                            .push(Action::Notice(format!("词库重载失败:{e:#}"))),
+                    }
+                    host.actions
+                };
+                for a in &actions {
+                    let _ = self.emit_action(a).await;
+                }
+            }
+            _ => crate::logger::warn(&format!("候选菜单:未知通用动作 {id}(忽略)")),
+        }
+    }
+    async fn persist_flag(&self, key: &str, name: &str, cur: bool) -> Option<bool> {
+        let want = !cur;
+        match crate::update_config_bool(key, want) {
+            Ok(()) => {
+                crate::logger::info(&format!("候选菜单:{name} → {want}(已保存)"));
+                Some(want)
+            }
+            Err(e) => {
+                crate::logger::error(&format!("候选菜单:{name} 保存失败:{e}"));
+                self.emit_menu_hint(&format!("{name} 保存失败")).await;
+                None
+            }
+        }
+    }
     /// 辅助区提示(notice 通道,4s 自清)
     async fn emit_menu_hint(&self, text: &str) {
-        let _ = self
-            .emit("UpdateAuxiliaryText", &(wire::ibus_text(text, false), true))
-            .await;
+        self.aux_show(text).await;
         self.schedule_notice_clear();
     }
 
     /// 同步辅助区提示:spawn/探测失败等错误路径给用户可见反馈(人话)
     fn aux_notice(&self, msg: &str) {
-        let _ = zbus::block_on(
-            self.emit("UpdateAuxiliaryText", &(wire::ibus_text(msg, false), true)),
-        );
+        self.aux_show_sync(msg);
     }
 
     /// 拉起外部工具(PATH 探测;argv[0] 为程序名)。缺失时辅助区提示。
@@ -801,29 +1007,144 @@ impl EngineService {
             self.aux_notice("未找到设置程序:请先安装 lyyIme 应用或 lyyime-xim");
             return;
         };
-        // 防重复拉起:已记录的 setup pid 仍在运行则忽略
-        {
-            let mut pid = self.0.setup_pid.lock().unwrap();
-            if *pid != 0 {
-                unsafe {
-                    if libc::kill(*pid as i32, 0) == 0 {
-                        return;
-                    }
-                }
-                *pid = 0;
-            }
-        }
-        match std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => *self.0.setup_pid.lock().unwrap() = child.id(),
+        // 防重复拉起:持锁完成"收割/判活+拉起",锁外再打日志/提示
+        let spawned = {
+            let mut slot = self.0.setup_child.lock().unwrap();
+            spawn_setup_child(&mut slot, &argv)
+        };
+        match spawned {
+            Ok(true) => crate::logger::info("设置界面启动请求已发送"),
+            Ok(false) => crate::logger::info("设置启动器仍在运行,忽略重复请求"),
             Err(e) => {
                 crate::logger::error(&format!("拉起设置界面失败({}):{e}", argv[0]));
                 self.aux_notice(&format!("打开设置界面失败:{e}"));
             }
+        }
+    }
+
+    async fn dispatch_logic_actions(&self, actions: Vec<Action>) {
+        let mut quick: Option<usize> = None;
+        let mut open_url: Option<String> = None;
+        let mut menu_general: Option<String> = None;
+        let mut emit_actions = Vec::new();
+        for a in actions {
+            match a {
+                Action::QuickRun(i) => quick = Some(i),
+                Action::OpenUrl(u) => open_url = Some(u),
+                Action::MenuGeneral(id) => menu_general = Some(id),
+                other => emit_actions.push(other),
+            }
+        }
+        for a in &emit_actions {
+            let _ = self.emit_action(a).await;
+        }
+        if let Some(i) = quick {
+            self.run_quick_action(i);
+        }
+        if let Some(u) = open_url {
+            self.open_query_url(&u);
+        }
+        if let Some(id) = menu_general {
+            self.run_general_action(&id).await;
+        }
+    }
+
+    fn ui_menu_open(&self, idx: Option<usize>) {
+        let Some(ui) = crate::candidate_ui::ui() else {
+            return;
+        };
+        let (items, gen) = {
+            let mut lg = self.0.logic.lock().unwrap();
+            if !lg.ui_gate_open() {
+                return;
+            }
+            let mut host = CollectingHost::default();
+            let ok = match idx {
+                Some(i) => lg.cand_menu_open(&mut host, i),
+                None => lg.cand_menu_open_general(&mut host),
+            };
+            if !ok {
+                return;
+            }
+            (lg.cand_menu_items(), lg.ui_invalidate())
+        };
+        if items.is_empty() {
+            return;
+        }
+        crate::logger::info(&format!(
+            "候选窗菜单:{} idx={:?} 项数={} 项={}",
+            if idx.is_some() { "词" } else { "通用" },
+            idx,
+            items.len(),
+            items.join("|")
+        ));
+        ui.menu(&self.0.path, gen, items);
+    }
+
+    pub(crate) async fn ui_event(&self, ev: crate::candidate_ui::UiEvent) {
+        use crate::candidate_ui::UiEventKind as K;
+        enum Out {
+            Acts(Vec<Action>),
+            MenuOpen(Option<usize>),
+            Page(bool, usize, usize, Vec<Action>),
+            Settings,
+            Drop(&'static str),
+        }
+        let out = {
+            let mut lg = self.0.logic.lock().unwrap();
+            if ev.owner != self.0.path || ev.gen != lg.ui_gen() || !lg.ui_gate_open() {
+                Out::Drop("过期或失活")
+            } else {
+                let mut host = CollectingHost::default();
+                match ev.kind {
+                    K::Select { idx } => {
+                        crate::logger::info(&format!("候选窗:点选行 {idx}"));
+                        let _ = lg.select_candidate(&mut host, idx);
+                        Out::Acts(host.actions)
+                    }
+                    K::Page { down } => {
+                        lg.flip_page(&mut host, down);
+                        let (p, n) = lg.page_pos();
+                        Out::Page(down, p, n, host.actions)
+                    }
+                    K::WordMenu { idx } => Out::MenuOpen(Some(idx)),
+                    K::GeneralMenu => Out::MenuOpen(None),
+                    K::Settings => Out::Settings,
+                    K::ActivateMenu { abs } => {
+                        crate::logger::info(&format!("候选窗菜单点选:abs={abs}"));
+                        let _ = lg.cand_menu_select_absolute(&mut host, abs);
+                        Out::Acts(host.actions)
+                    }
+                    K::CancelMenu => {
+                        crate::logger::info("候选窗菜单取消:还原真实候选");
+                        lg.cand_menu_cancel(&mut host);
+                        Out::Acts(host.actions)
+                    }
+                }
+            }
+        };
+        match out {
+            Out::Acts(actions) => self.dispatch_logic_actions(actions).await,
+            Out::MenuOpen(idx) => self.ui_menu_open(idx),
+            Out::Page(down, page, pages, actions) => {
+                let dir = if down { "下一页" } else { "上一页" };
+                if pages > 0 {
+                    crate::logger::info(&format!(
+                        "候选窗面板翻页:{dir} → 第 {}/{} 页",
+                        page + 1,
+                        pages
+                    ));
+                }
+                self.dispatch_logic_actions(actions).await;
+            }
+            Out::Settings => {
+                crate::logger::info("候选窗:齿轮打开设置");
+                self.launch_setup();
+            }
+            Out::Drop(why) => crate::logger::debug(&format!(
+                "候选窗 UI 事件丢弃({why}):owner={} gen={}",
+                ev.owner, ev.gen
+            )),
         }
     }
 }
@@ -860,6 +1181,7 @@ impl EngineService {
         let mut quick: Option<usize> = None;
         let mut open_url: Option<String> = None;
         let mut menu: Option<usize> = None;
+        let mut menu_general: Option<String> = None;
         let consumed = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
@@ -871,6 +1193,7 @@ impl EngineService {
                     Action::QuickRun(i) => quick = Some(i),
                     Action::OpenUrl(u) => open_url = Some(u),
                     Action::MenuRun(i) => menu = Some(i),
+                    Action::MenuGeneral(id) => menu_general = Some(id),
                     other => actions.push(other),
                 }
             }
@@ -896,6 +1219,9 @@ impl EngineService {
         if let Some(i) = menu {
             self.run_menu_action(i).await;
         }
+        if let Some(id) = menu_general {
+            self.run_general_action(&id).await;
+        }
         consumed
     }
 
@@ -903,6 +1229,10 @@ impl EngineService {
         // §15 右键候选(button=3):候选区换成操作行(固定/删除/反查英文),
         // 数字 1-3 或再点选执行——ibus 面板无弹菜单 API,行内替换成操作行。
         if button == 3 {
+            if crate::candidate_ui::ui().is_some() {
+                self.ui_menu_open(Some(index as usize));
+                return;
+            }
             let actions = {
                 let mut logic = self.0.logic.lock().unwrap();
                 let mut host = CollectingHost::default();
@@ -915,30 +1245,13 @@ impl EngineService {
             return;
         }
         // 候选点击(合同 §14 鼠标点选):与数字选词同一条 core 路径
-        let mut actions = Vec::new();
-        let mut quick: Option<usize> = None;
-        let mut open_url: Option<String> = None;
-        {
+        let actions = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
             let _consumed = logic.select_candidate(&mut host, index as usize);
-            for a in host.actions {
-                match a {
-                    Action::QuickRun(i) => quick = Some(i),
-                    Action::OpenUrl(u) => open_url = Some(u),
-                    other => actions.push(other),
-                }
-            }
-        }
-        for a in &actions {
-            let _ = self.emit_action(a).await;
-        }
-        if let Some(i) = quick {
-            self.run_quick_action(i);
-        }
-        if let Some(u) = open_url {
-            self.open_query_url(&u);
-        }
+            host.actions
+        };
+        self.dispatch_logic_actions(actions).await;
     }
 
     /// 候选窗「<」「>」翻页按钮(合同 §6):与键盘 -/= 同一条 core 路径。
@@ -986,9 +1299,19 @@ impl EngineService {
             // 切换跨焦点保留),窄化下发不打断输入也不动缓冲。
             logic.set_punctuation_default(core_cfg.cn_punct);
             let mut host = CollectingHost::default();
+            logic.set_pinyin_only(&mut host, core_cfg.pinyin_only);
+            logic.set_mixed_en(core_cfg.mixed_en);
+            logic.set_learning(core_cfg.learning);
+            logic.set_quick_actions_enabled(core_cfg.quick_actions_enabled);
             logic.reset_session(&mut host);
+            logic.ui_focused = true;
+            logic.ui_invalidate();
             (host.actions, logic.mode)
         };
+        if let Some(ui) = crate::candidate_ui::ui() {
+            let (skin, font_size) = crate::ui_style();
+            ui.style(&skin, font_size);
+        }
         for a in &actions {
             let _ = self.emit_action(a).await;
         }
@@ -998,35 +1321,97 @@ impl EngineService {
     }
 
     async fn focus_out(&self) {
-        let actions = {
+        let (actions, gen, focused, enabled) = {
             let mut logic = self.0.logic.lock().unwrap();
             let mut host = CollectingHost::default();
             logic.reset_session(&mut host);
-            host.actions
+            logic.ui_focused = false;
+            let gen = logic.ui_invalidate();
+            (host.actions, gen, logic.ui_focused, logic.ui_enabled)
         };
+        logger::debug(&format!(
+            "focus_out owner={} gen={gen} focused={focused} enabled={enabled}",
+            self.0.path
+        ));
+        if let Some(ui) = crate::candidate_ui::ui() {
+            ui.hide(&self.0.path, gen);
+        }
         for a in &actions {
             let _ = self.emit_action(a).await;
         }
     }
 
     async fn reset(&self) {
-        self.focus_out().await;
+        let (actions, gen, focused, enabled) = {
+            let mut logic = self.0.logic.lock().unwrap();
+            let mut host = CollectingHost::default();
+            let gen = logic.reset_ui_session(&mut host);
+            (host.actions, gen, logic.ui_focused, logic.ui_enabled)
+        };
+        logger::debug(&format!(
+            "reset owner={} gen={gen} focused={focused} enabled={enabled}",
+            self.0.path
+        ));
+        if let Some(ui) = crate::candidate_ui::ui() {
+            ui.hide(&self.0.path, gen);
+        }
+        for a in &actions {
+            let _ = self.emit_action(a).await;
+        }
     }
 
     async fn enable(&self) {
         engine_state_set_enabled(true);
+        let (gen, focused, enabled) = {
+            let mut logic = self.0.logic.lock().unwrap();
+            logic.ui_enabled = true;
+            (logic.ui_gen(), logic.ui_focused, logic.ui_enabled)
+        };
+        logger::debug(&format!(
+            "enable owner={} gen={gen} focused={focused} enabled={enabled}",
+            self.0.path
+        ));
     }
 
     async fn disable(&self) {
         engine_state_set_enabled(false);
+        let (gen, focused, enabled) = {
+            let mut logic = self.0.logic.lock().unwrap();
+            logic.ui_enabled = false;
+            logic.ui_focused = false;
+            let gen = logic.ui_invalidate();
+            (gen, logic.ui_focused, logic.ui_enabled)
+        };
+        logger::debug(&format!(
+            "disable owner={} gen={gen} focused={focused} enabled={enabled}",
+            self.0.path
+        ));
+        if let Some(ui) = crate::candidate_ui::ui() {
+            ui.hide(&self.0.path, gen);
+        }
     }
 
-    async fn set_cursor_location(&self, _x: i32, _y: i32, _w: i32, _h: i32) {}
+    async fn set_cursor_location(&self, x: i32, y: i32, w: i32, h: i32) {
+        if let Some(ui) = crate::candidate_ui::ui() {
+            ui.cursor(&self.0.path, x, y, w, h);
+        }
+    }
 
     async fn set_capabilities(&self, _caps: u32) {}
 
     async fn set_content_type(&self, purpose: u32, hint: u32) {
-        self.0.logic.lock().unwrap().input_purpose = purpose;
+        let gen = {
+            let mut logic = self.0.logic.lock().unwrap();
+            logic.input_purpose = purpose;
+            if purpose == crate::keysym::PURPOSE_PASSWORD || purpose == crate::keysym::PURPOSE_PIN {
+                Some(logic.ui_invalidate())
+            } else {
+                None
+            }
+        };
+        if let (Some(ui), Some(g)) = (crate::candidate_ui::ui(), gen) {
+            ui.hide(&self.0.path, g);
+        }
         let _ = self.emit("ContentType", &(purpose, hint)).await;
     }
 
@@ -1083,9 +1468,7 @@ impl EngineService {
                     "lyyIme 五笔拼音 v{}(Mode A · ibus 引擎,Rust)——五笔/拼音/英文混合输入",
                     wire::VERSION
                 );
-                let _ = self
-                    .emit("UpdateAuxiliaryText", &(wire::ibus_text(&msg, false), true))
-                    .await;
+                self.aux_show(&msg).await;
                 self.schedule_notice_clear();
             }
             _ => {}
@@ -1096,7 +1479,18 @@ impl EngineService {
 
     async fn property_hide(&self, _name: String) {}
 
-    async fn destroy(&self) {}
+    async fn destroy(&self) {
+        let gen = {
+            let mut logic = self.0.logic.lock().unwrap();
+            logic.ui_enabled = false;
+            logic.ui_focused = false;
+            logic.ui_invalidate()
+        };
+        if let Some(ui) = crate::candidate_ui::ui() {
+            ui.hide(&self.0.path, gen);
+        }
+        crate::candidate_ui::unregister(&self.0.path);
+    }
 
     #[zbus(property)]
     fn focus_id(&self) -> bool {
@@ -1153,6 +1547,7 @@ pub async fn run(
     icon_dir: String,
     ibus_address: Option<String>,
 ) -> anyhow::Result<()> {
+    let _ = crate::candidate_ui::init();
     // 组件必须连 ibus 私有总线(daemon 的 CreateEngine 回调发往该总线);
     // 无地址文件(如 daemon 尚未启动)才回退 session bus。
     let conn = match ibus_address.as_deref() {
@@ -1254,4 +1649,156 @@ pub async fn run(
     // 常驻:对象服务器由 zbus 内部执行器驱动,主线程挂起即可。
     std::future::pending::<()>().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_setup_child;
+
+    /// 有界等待子进程进入 zombie。刻意不用 Child::wait:那会直接收割,
+    /// 掩盖"kill(pid,0) 对 zombie 误判存活"的原始缺陷。
+    fn wait_zombie(pid: u32) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => {
+                    // comm 可含空格/括号;最后一个 ") " 之后的首字符即 state
+                    if let Some((_, rest)) = stat.rsplit_once(") ") {
+                        if rest.chars().next() == Some('Z') {
+                            return true;
+                        }
+                    }
+                }
+                Err(_) => return false, // 读不到 /proc 不能宣称已退出,直接判超时失败
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
+    fn argv(prog: &str) -> Vec<String> {
+        vec![prog.to_string()]
+    }
+
+    #[test]
+    fn setup_launcher_reaps_exited_child() {
+        // /bin/true 立即退出:三轮拉起都必须成功;每轮新调用须收割上一轮
+        // 的 zombie 并拉起新进程(旧实现 kill(pid,0)==0 把 zombie 当存活,
+        // 第二次 F7 起永久拒绝)。
+        let mut slot: Option<std::process::Child> = None;
+        let mut prev_pid: Option<u32> = None;
+        for round in 1..=3 {
+            assert!(
+                spawn_setup_child(&mut slot, &argv("/bin/true")).unwrap(),
+                "第 {round} 轮:已退出启动器应被收割并允许再次拉起"
+            );
+            if let Some(old) = prev_pid {
+                assert!(
+                    std::fs::metadata(format!("/proc/{old}")).is_err(),
+                    "旧 zombie {old} 未被 try_wait 收割,/proc 条目应消失"
+                );
+            }
+            let pid = slot.as_ref().unwrap().id();
+            assert!(wait_zombie(pid), "第 {round} 轮子进程 {pid} 未在 2s 内退出");
+            prev_pid = Some(pid);
+        }
+        slot.as_mut().unwrap().wait().unwrap();
+    }
+
+    #[test]
+    fn setup_launcher_live_child_blocks_duplicate() {
+        // /bin/cat 常驻:存活启动器必须拒绝重复拉起且不换槽位进程;
+        // 关闭其 stdin 令其退出成 zombie 后,下一次调用应收割并允许拉起。
+        let child = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let live_pid = child.id();
+        let mut slot = Some(child);
+        assert!(
+            !spawn_setup_child(&mut slot, &argv("/bin/true")).unwrap(),
+            "存活启动器必须拒绝重复拉起"
+        );
+        assert_eq!(slot.as_ref().unwrap().id(), live_pid, "拒绝时不得更换槽位进程");
+        drop(slot.as_mut().unwrap().stdin.take()); // 关管道 → cat EOF 退出
+        assert!(wait_zombie(live_pid), "/bin/cat 未在 2s 内退出");
+        assert!(spawn_setup_child(&mut slot, &argv("/bin/true")).unwrap());
+        let pid = slot.as_ref().unwrap().id();
+        assert!(wait_zombie(pid));
+        slot.as_mut().unwrap().wait().unwrap();
+    }
+
+    #[test]
+    fn setup_launcher_reopens_owned_xim_child_without_replacing_pid() {
+        struct ChildGuard(Option<std::process::Child>);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if let Some(mut c) = self.0.take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "lyyime-setup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let alias = dir.join("lyyime-xim");
+        std::os::unix::fs::symlink("/bin/sh", &alias).unwrap();
+        let marker = dir.join("sig.txt");
+        let ready = dir.join("ready.txt");
+        let argv = vec![
+            alias.to_string_lossy().into_owned(),
+            "-c".to_string(),
+            r#"trap 'printf r >> "$1"' USR1; printf ready > "$2"; while :; do sleep 0.05; done"#.to_string(),
+            "--settings".to_string(),
+            marker.to_string_lossy().into_owned(),
+            ready.to_string_lossy().into_owned(),
+        ];
+        let mut slot = ChildGuard(None);
+        assert!(spawn_setup_child(&mut slot.0, &argv).unwrap());
+        let pid = slot.0.as_ref().unwrap().id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.is_file() {
+            assert!(std::time::Instant::now() < deadline, "子进程就绪文件未生成");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(spawn_setup_child(&mut slot.0, &argv).unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(&marker).unwrap_or_default() != "r" {
+            assert!(std::time::Instant::now() < deadline, "SIGUSR1 标记未落盘");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(slot.0.as_ref().unwrap().id(), pid, "重开不得更换槽位进程");
+        assert!(spawn_setup_child(&mut slot.0, &argv).unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(&marker).unwrap_or_default() != "rr" {
+            assert!(std::time::Instant::now() < deadline, "第二次 SIGUSR1 标记未落盘");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(slot.0.as_ref().unwrap().id(), pid);
+        drop(slot);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_launcher_spawn_failure_leaves_slot_empty() {
+        // 绝对路径不存在:spawn 失败须返回 Err 且槽位保持 None;
+        // 随后 /bin/true 应正常拉起(失败不得毒化槽位)。
+        let mut slot: Option<std::process::Child> = None;
+        let bad = vec!["/nonexistent/lyyime-setup-x".to_string()];
+        assert!(spawn_setup_child(&mut slot, &bad).is_err());
+        assert!(slot.is_none(), "spawn 失败不得占用槽位");
+        assert!(spawn_setup_child(&mut slot, &argv("/bin/true")).unwrap());
+        let pid = slot.as_ref().unwrap().id();
+        assert!(wait_zombie(pid));
+        slot.as_mut().unwrap().wait().unwrap();
+    }
 }

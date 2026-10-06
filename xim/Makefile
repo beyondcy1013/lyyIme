@@ -46,7 +46,8 @@ VENDOR_LIB  := $(VENDOR_DIR)/libxcb-imdkit.a
 SRC_DIR := $(ROOT_DIR)/src
 APP_SRCS := main.c common.c log.c config.c core_ffi.c effects_json.c \
             keysym_map.c xim_server.c ai_capture.c candidate_window.c \
-            skin.c tray.c mainwin.c settings.c tools.c shot.c
+            skin.c tray.c mainwin.c settings.c tools.c shot.c \
+            global_hotkey.c
 APP_OBJS := $(addprefix $(BUILD_DIR)/app/,$(APP_SRCS:.c=.o))
 APP_HDRS := $(wildcard $(SRC_DIR)/*.h)
 
@@ -136,9 +137,13 @@ $(BUILD_DIR)/tests/e2e_client: $(ROOT_DIR)/tests/e2e_client.c
 $(BUILD_DIR)/tests/unit_config: $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(SRC_DIR)/skin.c $(ROOT_DIR)/tests/unit_config.c | $(BUILD_DIR)/tests
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_GTK) $(PKG_COMMON) -o $@ $(SRC_DIR)/config.c $(SRC_DIR)/keysym_map.c $(SRC_DIR)/skin.c $(ROOT_DIR)/tests/unit_config.c $(PKG_GTK)
 
-# 造词热键解析(合同 §12;headless,仅链接 keysym_map.c)
-$(BUILD_DIR)/tests/unit_hotkey: $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c | $(BUILD_DIR)/tests
-	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_COMMON) -o $@ $(SRC_DIR)/keysym_map.c $(ROOT_DIR)/tests/unit_hotkey.c $(PKG_XIM)
+# 造词热键解析 + 全局截屏快捷键 accelerator 归一化(合同 §12/§13;
+# gtk_accelerator_name/parse 依赖已初始化的 GTK/X 显示,故运行时
+# 经 xvfb-run 提供隔离显示)
+$(BUILD_DIR)/tests/unit_hotkey: $(SRC_DIR)/keysym_map.c $(SRC_DIR)/global_hotkey.c $(ROOT_DIR)/tests/unit_hotkey.c | $(BUILD_DIR)/tests
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $(PKG_COMMON) $(PKG_GTK) -o $@ \
+		$(SRC_DIR)/keysym_map.c $(SRC_DIR)/global_hotkey.c \
+		$(ROOT_DIR)/tests/unit_hotkey.c $(PKG_XIM) $(PKG_GTK)
 
 # 皮肤单测(需要 X 显示:真 GTK 上下文核验解析色值;经 xvfb-run 自动配显示,
 # 绝不触碰已有桌面/显示。不在 headless `test` 目标里跑,由 skin-test 单独跑)
@@ -154,7 +159,7 @@ test: $(BUILD_DIR)/tests/unit_effects_json $(BUILD_DIR)/tests/unit_config $(BUIL
       $(BUILD_DIR)/tests/liblyyime_core_stub.so $(BUILD_DIR)/tests/e2e_client
 	$(BUILD_DIR)/tests/unit_effects_json
 	$(BUILD_DIR)/tests/unit_config
-	$(BUILD_DIR)/tests/unit_hotkey
+	xvfb-run -a $(BUILD_DIR)/tests/unit_hotkey
 	@echo "单测全绿:effects_json + config + hotkey + 桩库/e2e 客户端构建通过"
 
 # ---- E2E(Xvfb :98 全自动断言)----

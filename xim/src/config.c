@@ -14,7 +14,7 @@
 
 /* 受管理的键:顺序即写回顺序;section=NULL 为顶层键,"ai" 为 [ai] 段键。
  * 追加新键放表尾(索引 clamp_key/apply_value/write_value_buf 三处同步)。 */
-#define LYY_CFG_KEYS 33
+#define LYY_CFG_KEYS 34
 typedef enum { LYY_VT_INT, LYY_VT_BOOL, LYY_VT_STR } LyyValType;
 static const struct {
     const char *section;
@@ -77,6 +77,9 @@ static const struct {
       "候选窗皮肤 id(system=跟随系统,或商务/可爱等主题;仅自绘候选窗)" },
     { NULL, "next_word_prediction", LYY_VT_BOOL,
       "上屏后联想(中文词上屏后提示接下来可输入的词句;纯本地词表,默认关)" },
+    { NULL, "pinyin_only", LYY_VT_BOOL,
+      "输入方案:1=纯拼音(只出拼音候选,不出五笔/英文,四码规则不生效);"
+      "0=五笔/拼音混输(默认)。与中文/英文模式独立" },
 };
 
 /* 内置默认功能键表(合同 §14;与 core Config::default 一致) */
@@ -139,6 +142,7 @@ void lyy_config_defaults(LyyConfig *c)
     snprintf(c->skin, sizeof(c->skin), "%s", "system");
     /* 上屏后联想:默认关(设置→输入 显式开启) */
     c->next_word_prediction = 0;
+    c->pinyin_only = 0;
 }
 
 int lyy_config_ai_active(const LyyConfig *c)
@@ -443,6 +447,7 @@ static void apply_value(LyyConfig *c, int idx, const char *v)
         c->next_word_prediction =
             parse_bool(v, c->next_word_prediction);
         break;
+    case 33: c->pinyin_only = parse_bool(v, c->pinyin_only); break;
     default: break;
     }
     clamp_key(c, idx);
@@ -583,6 +588,11 @@ int lyy_config_load(const char *path, LyyConfig *out)
         if (!g_suffix[idx][0] && sbuf[0])
             snprintf(g_suffix[idx], sizeof(g_suffix[0]), "%s", sbuf);
         apply_value(out, idx, vbuf);
+    }
+    if (ferror(fp)) {
+        fclose(fp);
+        lyy_config_defaults(out);
+        return -1;
     }
     fclose(fp);
     /* 无 [[quick_actions]] 块(或全部非法):回退内置默认表 */
@@ -773,6 +783,7 @@ static int write_value_buf(Buf *b, int idx, const LyyConfig *c)
     case 30: sval = c->menu_trigger_disabled; break;
     case 31: sval = lyy_skin_find(c->skin)->id; break;
     case 32: val = c->next_word_prediction; break;
+    case 33: val = c->pinyin_only; break;
     default: return 0;
     }
     if (g_keys[idx].type == LYY_VT_STR) {

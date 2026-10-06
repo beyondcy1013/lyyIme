@@ -8,6 +8,8 @@
 #include <xcb/xcb_aux.h>
 #include <xcb/xcb_keysyms.h>
 #include <xcb/xproto.h>
+#include <X11/Xlib.h>
+#include <X11/XKBlib.h>
 
 /* keysymdef.h 功能宏(标准用法,必须先于 include 定义) */
 #define XK_MISCELLANY
@@ -413,6 +415,10 @@ static void hide_preedit(App *app)
     lyy_candwin_commit_layout(&app->candwin); /* 空内容 → 隐藏 */
 }
 
+void lyy_compose_clear_ui(App *app)
+{
+    hide_preedit(app);
+}
 static void apply_effects(App *app, xcb_im_input_context_t *ic,
                           xcb_key_press_event_t *ev, uint32_t sym,
                           const char *json, int *had_content_out,
@@ -655,6 +661,28 @@ void lyy_candwin_op(int idx, int op, void *user_data)
  * 中文态下 Shift+字母:原样直通大写字母(对齐主流输入法,不进组词缓冲)。 */
 #define LYY_SHIFT_CLICK_MS 280
 
+/* 英文→中文 Shift 单击确认时解除系统 CapsLock:专用短命 X 连接
+ * XkbLockModifiers 仅清 LockMask(不发合成按键);失败仅记日志返回 0。
+ * 连接由主线程同步创建/关闭,不共享。 */
+static int caps_lock_off(App *app)
+{
+    Display *dpy = XOpenDisplay(NULL);
+    if (!dpy) {
+        lyy_log(&app->log, "ERROR CapsLock 解除失败:无法打开 DISPLAY");
+        return 0;
+    }
+    Bool ok = XkbLockModifiers(dpy, XkbUseCoreKbd, LockMask, 0);
+    XSync(dpy, False);
+    XCloseDisplay(dpy);
+    if (!ok) {
+        lyy_log(&app->log,
+                "ERROR CapsLock 解除失败:XkbLockModifiers 返回 False");
+        return 0;
+    }
+    lyy_log(&app->log, "已解除系统 CapsLock(Shift 单击确认中文态)");
+    return 1;
+}
+
 static gboolean shift_click_timeout(gpointer user_data)
 {
     App *app = user_data;
@@ -717,6 +745,11 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
                 lyy_xim_set_trigger(app, 0);
                 lyy_log(&app->log,
                         "Shift 单击(release 确认)→ 英文直通(trigger off)");
+            } else if (st->combo_guard) {
+                /* release 到达即确认单击:关防护窗并解锁(press 不解锁,
+                 * 窗内 Shift+字母回退不能动锁) */
+                st->combo_guard = 0;
+                caps_lock_off(app);
             }
             xcb_im_forward_event(xs->im, ic, ev);
             return;
@@ -745,6 +778,10 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
     if (st->combo_guard) {
         if (now_ms() - st->guard_ms > LYY_COMBO_GUARD_MS) {
             st->combo_guard = 0;
+            /* 不转发 release 的客户端兜底:到期即确认单击并解锁;
+             * 成功后清掉本事件 state 的陈旧 LockMask,避免 Caps 直通误判 */
+            if (caps_lock_off(app))
+                ev->state = (uint16_t)(ev->state & ~XCB_MOD_MASK_LOCK);
         } else if (is_press && (ev->state & XCB_MOD_MASK_SHIFT)) {
             st->combo_guard = 0;
             lyy_xim_set_trigger(app, 0);
@@ -826,6 +863,7 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
                 st->punct_key_down = 1;
                 int on =
                     app->core.lyyime_toggle_chinese_punctuation(app->engine);
+                app->punct_runtime = on;
                 lyy_log(&app->log, "标点切换:%s(Ctrl+.)", on ? "中文" : "英文");
                 if (!lyy_ai_capturing(app) &&
                     app->ai.core_preedit[0] == '\0' &&

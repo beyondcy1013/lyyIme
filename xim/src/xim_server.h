@@ -61,6 +61,7 @@ void lyy_app_reload_hotkey(App *app);
 /* 辅助区临时提示(notice 效果:造词结果等),约 4 秒后自动清除 */
 void lyy_show_notice(App *app, const char *text);
 
+void lyy_compose_clear_ui(App *app);
 /* 快速功能键执行(合同 §14):按 core 配置第 index 条 command 执行
  * (@settings/@help 内置或 shell 命令);由 action 效果与行点击触发 */
 void lyy_run_quick_action(App *app, int index);

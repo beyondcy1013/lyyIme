@@ -14,6 +14,7 @@
  *   settings.c        设置对话框(GtkBuilder)
  *   tools.c           工具动作(主窗口与托盘菜单共用;含直输模式窗口拉起)
  *   config.c          ~/.config/lyyime/config.toml 平面键值 TOML 子集读写
+ *   global_hotkey.c   全局截屏快捷键:XFCE xfconf 事务化登记/移除(§13)
  */
 #ifndef LYY_COMMON_H_
 #define LYY_COMMON_H_
@@ -22,6 +23,7 @@
 #include "candidate_window.h"
 #include "config.h"
 #include "core_ffi.h"
+#include "global_hotkey.h"
 #include "log.h"
 #include "mainwin.h"
 #include "settings.h"
@@ -58,6 +60,7 @@ void lyy_request_show_settings(App *app);
  * page<0 与 lyy_request_show_settings 同义) */
 void lyy_request_show_settings_page(App *app, int page);
 
+void lyy_general_menu_append(App *app, GtkMenuShell *shell);
 /* 菜单触发器创建/重配(可选符号组;mt_ok=0 时为空操作)。
  * 引擎就绪后与设置保存后调用;configure 内部即复位尾串与待执行。 */
 void lyy_menu_trigger_apply(App *app);
@@ -72,6 +75,7 @@ void lyy_install_signal_handlers(void);
 struct _App {
     LyyLog log;                    /* ~/.local/share/lyyime/logs/xim.log */
     LyyConfig config;
+    int punct_runtime;
     char config_path[PATH_MAX];
     char data_dir[PATH_MAX];       /* ~/.local/share/lyyime(词典/用户词) */
     char log_dir[PATH_MAX];

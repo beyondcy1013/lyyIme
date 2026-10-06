@@ -62,6 +62,8 @@ typedef struct CoreFfi {
      * 旧 core 库缺任一符号时无法使用/配置运行时标点切换(沿用启动
      * 默认中文标点,Ctrl+. 不拦截直通应用),保留原输入行为,不整体降级 */
     int punct_ok;
+    int pinyin_ok;
+    int learn_ok;
     /* §3 原型,逐字对应 */
     void *(*lyyime_new)(const char *data_dir);                       /* NULL=失败 */
     void (*lyyime_free)(void *eng);
@@ -90,6 +92,8 @@ typedef struct CoreFfi {
      * toggle 翻转并返回新状态;均不改缓冲/候选/模式,不写盘 */
     int (*lyyime_set_chinese_punctuation)(void *eng, int enabled); /* 返回生效 0/1 */
     int (*lyyime_toggle_chinese_punctuation)(void *eng); /* 返回新状态 0/1 */
+    int (*lyyime_set_pinyin_only)(void *eng, int enabled);
+    int (*lyyime_set_learning)(void *eng, int enabled);
     /* §14 快速功能键(可选符号组) */
     int (*lyyime_set_quick_actions_enabled)(void *eng, int enabled); /* 返回生效值 */
     void (*lyyime_clear_quick_actions)(void *eng);

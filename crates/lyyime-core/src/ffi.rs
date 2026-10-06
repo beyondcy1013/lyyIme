@@ -518,6 +518,26 @@ pub unsafe extern "C" fn lyyime_cand_comment(
     put_cstr(buf, cap as i64, text) as c_int
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_pinyin_only(eng: *mut Engine, enabled: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            e.set_pinyin_only(enabled != 0);
+            c_int::from(e.config().pinyin_only)
+        }
+        None => 0,
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn lyyime_set_learning(eng: *mut Engine, enabled: c_int) -> c_int {
+    match eng.as_mut() {
+        Some(e) => {
+            e.set_learning(enabled != 0);
+            c_int::from(e.config().learning)
+        }
+        None => 0,
+    }
+}
 /// 设置“快速功能键”总开关(合同 §14)。
 ///
 /// 非 0 启用,0 关闭;NULL 引擎忽略。返回生效后的 0/1。

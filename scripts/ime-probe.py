@@ -29,6 +29,24 @@ def main() -> None:
     win = Gtk.Window(title="lyyime-probe")
     win.set_default_size(300, 60)
     entry = Gtk.Entry()
+    if os.environ.get("LYYIME_PROBE_TRACE") == "1":
+        def trace(label, *values):
+            print(GLib.get_monotonic_time(), label, *values, flush=True)
+
+        def key_event(_widget, event):
+            trace("key", event.type.value_nick, hex(event.keyval), int(event.state))
+            return False
+
+        def focus_event(widget, _event):
+            trace("focus", widget.has_focus())
+            return False
+
+        entry.connect("key-press-event", key_event)
+        entry.connect("key-release-event", key_event)
+        entry.connect("focus-in-event", focus_event)
+        entry.connect("focus-out-event", focus_event)
+        entry.connect("preedit-changed", lambda _widget, text: trace("preedit-length", len(text)))
+        entry.connect("changed", lambda widget: trace("text-length", len(widget.get_text())))
     win.add(entry)
     win.show_all()
 

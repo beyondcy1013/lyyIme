@@ -18,6 +18,14 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 pkill -x lyyime-xim 2>/dev/null || true
 
+# 摘除自有全局截屏快捷键绑定(合同 §13;仅图形会话内可执行,
+# 失败仅告警不中止卸载——残留绑定指向的随即将被删除)
+if [[ -n "${DISPLAY:-}" && -n "${DBUS_SESSION_BUS_ADDRESS:-}" && \
+      -x "$PREFIX/bin/lyyime-xim" ]]; then
+    "$PREFIX/bin/lyyime-xim" --remove-shot-hotkey || \
+        echo "== 警告:全局截屏快捷键移除失败,可手动清理:xfconf-query -c xfce4-keyboard-shortcuts --reset -p '/commands/custom/<Primary><Alt>a' ==" >&2
+fi
+
 echo "== 删除文件 =="
 rm -f "$PREFIX/bin/lyyime-xim"
 rm -f "$PREFIX/bin/lyyime-shot"

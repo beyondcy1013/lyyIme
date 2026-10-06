@@ -43,6 +43,19 @@ else
     echo "== 警告:未找到 $SHOT_SRC(先 scripts/build.sh),截屏功能不可用 ==" >&2
 fi
 
+# 全局截屏快捷键(合同 §13):经 lyyime-xim --sync-shot-hotkey 把
+# shot_hotkey 登记为 XFCE xfconf 桌面级绑定,对所有输入法生效;
+# 仅在图形会话(有会话总线)内尝试,失败只告警不中止安装——
+# 主程序每次启动会自动重试登记
+if [[ -x "$PREFIX/bin/lyyime-xim" && -x "$PREFIX/bin/lyyime-shot" && \
+      -n "${DISPLAY:-}" && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    if ! "$PREFIX/bin/lyyime-xim" --sync-shot-hotkey; then
+        echo "== 警告:全局截屏快捷键登记失败(下次启动 lyyime-xim 会自动重试) ==" >&2
+    fi
+else
+    echo "== 跳过全局截屏快捷键登记(无图形会话;启动时自动登记) =="
+fi
+
 # 主启动器(应用菜单/桌面;重复点击=唤起已运行实例的设置窗)
 install -D -m 0644 /dev/stdin "$PREFIX/share/applications/lyyime-xim.desktop" <<DESKTOP
 [Desktop Entry]

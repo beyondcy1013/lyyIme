@@ -624,7 +624,7 @@ fn ffi_造词_热键方向键与notice效果流() {
 
 use lyyime_core::ffi::{
     lyyime_action_command, lyyime_add_quick_action, lyyime_clear_quick_actions,
-    lyyime_select_candidate, lyyime_set_quick_actions_enabled,
+    lyyime_select_candidate, lyyime_set_learning, lyyime_set_pinyin_only, lyyime_set_quick_actions_enabled,
 };
 
 /// 经 lyyime_select_candidate 取点选效果流 JSON(缓冲足够大)。
@@ -1119,4 +1119,30 @@ fn ffi_重试纪律_点选前缀候选_失败不落状态() {
     let json = eng.key(LKEY_SPACE, 0);
     assert!(json.contains("{\"t\":\"commit\",\"s\":\"屏\"}"), "{json}");
     assert!(!json.contains("\"s\":\"截"), "{json}");
+}
+
+#[test]
+fn ffi_纯拼音开关_null与候选过滤() {
+    assert_eq!(unsafe { lyyime_set_pinyin_only(std::ptr::null_mut(), 1) }, 0);
+    let mut eng = FfiEngine::new(&fixtures());
+    assert_eq!(unsafe { lyyime_set_pinyin_only(eng.0, 1) }, 1);
+    eng.key_char('a');
+    let json = eng.key_char('a');
+    assert!(
+        json.contains("\"n\":0"),
+        "纯拼音下五笔码 aa 应无候选:{json}"
+    );
+    assert_eq!(unsafe { lyyime_set_pinyin_only(eng.0, 0) }, 0);
+    unsafe { lyyime_reset(eng.0) };
+    eng.key_char('a');
+    let json = eng.key_char('a');
+    assert!(json.contains("\"n\":1") || json.contains("\"n\":2"), "混输下 aa 应有候选:{json}");
+}
+
+#[test]
+fn ffi_学习开关_null与往返() {
+    assert_eq!(unsafe { lyyime_set_learning(std::ptr::null_mut(), 1) }, 0);
+    let mut eng = FfiEngine::new(&fixtures());
+    assert_eq!(unsafe { lyyime_set_learning(eng.0, 0) }, 0);
+    assert_eq!(unsafe { lyyime_set_learning(eng.0, 1) }, 1);
 }

@@ -776,6 +776,55 @@ int main(void)
               strcmp(c15.coin_hotkey, "ctrl+alt+period") == 0,
           "别名写法同样判保留并让位");
 
+    CHECK(c.pinyin_only == 0, "pinyin_only 默认 0(五笔/拼音混输)");
+    fp = fopen(path, "w");
+    fprintf(fp,
+            "pinyin_only = true\n"
+            "page_size = 6\n"
+            "# 方案行旁注释\n");
+    fclose(fp);
+    LyyConfig sc1;
+    CHECK(lyy_config_load(path, &sc1) == 0 && sc1.pinyin_only == 1 &&
+              sc1.page_size == 6,
+          "pinyin_only = true 解析(其余键不受影响)");
+    fp = fopen(path, "w");
+    fprintf(fp, "pinyin_only = false\n");
+    fclose(fp);
+    CHECK(lyy_config_load(path, &sc1) == 0 && sc1.pinyin_only == 0,
+          "pinyin_only = false 读取生效");
+    sc1.pinyin_only = 1;
+    sc1.page_size = 5;
+    CHECK(lyy_config_save(path, &sc1) == 0, "方案切换保存成功");
+    body = read_all(path);
+    CHECK(body && strstr(body, "pinyin_only = true") &&
+              strstr(body, "page_size = 5"),
+          "方案翻转写回 true,其余键在位更新");
+    g_free(body);
+    LyyConfig sc2;
+    CHECK(lyy_config_load(path, &sc2) == 0 && sc2.pinyin_only == 1 &&
+              sc2.page_size == 5,
+          "方案键保存后回读一致");
+    fp = fopen(path, "w");
+    fprintf(fp,
+            "weird_line_keep = 1\n"
+            "[ai]\n"
+            "model = \"m9\"\n");
+    fclose(fp);
+    LyyConfig sc3;
+    CHECK(lyy_config_load(path, &sc3) == 0 && sc3.pinyin_only == 0,
+          "旧配置缺 pinyin_only 回退混输");
+    CHECK(lyy_config_save(path, &sc3) == 0, "缺键文件保存补齐");
+    body = read_all(path);
+    char *ppo = body ? strstr(body, "pinyin_only = false") : NULL;
+    char *pai2 = body ? strstr(body, "[ai]") : NULL;
+    CHECK(ppo && pai2 && ppo < pai2 &&
+              strstr(body, "weird_line_keep = 1"),
+          "补齐 pinyin_only 落在 [ai] 段头之前,未知行保留");
+    g_free(body);
+    LyyConfig sc4;
+    CHECK(lyy_config_load(path, &sc4) == 0 && sc4.pinyin_only == 0 &&
+              strcmp(sc4.ai_model, "m9") == 0,
+          "补齐后回读:方案=混输,[ai] 段不丢");
     printf("== 结果:%s(失败 %d 项)==\n", g_failed ? "有失败" : "全部通过",
            g_failed);
 

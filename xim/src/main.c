@@ -21,11 +21,42 @@
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/mman.h>
+#include <sys/resource.h>
+#endif
 #include <xcb/xcb.h>
 #include <xcb/xcb_aux.h>
 
 #include "common.h"
 
+/* 对输入法进程实施内存锁定，防止在高 I/O 和内存压力下被换出到 Swap 造成按键卡顿 */
+static void lock_process_memory(LyyLog *log)
+{
+#ifdef __linux__
+    struct rlimit rlim = {
+        .rlim_cur = RLIM_INFINITY,
+        .rlim_max = RLIM_INFINITY,
+    };
+    (void)setrlimit(RLIMIT_MEMLOCK, &rlim);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
+        lyy_log(log, "mlockall 内存锁定成功：已防止进程换出到 Swap");
+    } else {
+        lyy_log(log, "WARN mlockall 内存锁定未生效(errno=%d): 输入法在极高内存压力下可能被置换到 Swap", errno);
+    }
+#else
+    (void)log;
+#endif
+}
+
+static void candwin_general_append(GtkMenuShell *shell, void *user_data)
+{
+    lyy_general_menu_append((App *)user_data, shell);
+}
+static void candwin_settings_show(void *user_data)
+{
+    lyy_settings_show(&((App *)user_data)->settings);
+}
 static void usage(FILE *out)
 {
     fprintf(out,
@@ -36,6 +67,11 @@ static void usage(FILE *out)
             "               显示设置窗口并切到第 N 页(0 基;供菜单触发等\n"
             "               内置路径直达子页)\n"
             "  --mainwin    显示主窗口(门面:输入设置/直输模式/工具箱)\n"
+            "  --sync-shot-hotkey\n"
+            "               按当前 config.toml 的 shot_hotkey 登记 XFCE\n"
+            "               全局截屏快捷键(安装/修复用;不启动输入法)\n"
+            "  --remove-shot-hotkey\n"
+            "               移除已登记的全局截屏快捷键(卸载用)\n"
             "  --version    显示版本\n"
             "  --help       显示本帮助\n\n"
             "环境变量:\n"
@@ -160,11 +196,62 @@ static void resolve_dict_dir(char *out, size_t cap, const char *user_data_dir)
     snprintf(out, cap, "%s/lyyime", user_data_dir);
 }
 
+/* --sync-shot-hotkey / --remove-shot-hotkey:安装期全局截屏快捷键登记与
+ * 移除(合同 §13)。在 pidfile/单实例/日志之前处理:绝不向已运行实例发
+ * 信号、不启动输入法引擎。成功打印到 stdout,失败 stderr + 非零退出。 */
+static int cli_shot_hotkey(App *app, int do_sync)
+{
+    if (!do_sync) {
+        /* 移除只动自有绑定,不需要读配置 */
+        GError *err = NULL;
+        if (lyy_global_shot_remove(&err)) {
+            printf("已移除全局截屏快捷键绑定。\n");
+            return 0;
+        }
+        fprintf(stderr, "移除全局截屏快捷键失败:%s\n",
+                err ? err->message : "未知错误");
+        g_clear_error(&err);
+        return 1;
+    }
+
+    /* sync:读配置(含热键冲突自愈)→ GTK/X11 环境 → 事务化登记 */
+    LyyConfig c;
+    if (lyy_config_load(app->config_path, &c) != 0)
+        fprintf(stderr, "警告:配置读取失败,使用默认值:%s\n",
+                app->config_path);
+    {
+        char note[512];
+        if (lyy_config_resolve_hotkey_conflicts(&c, note,
+                                                sizeof(note)) != 0)
+            fprintf(stderr, "%s\n", note);
+    }
+    if (!gtk_init_check(NULL, NULL)) {
+        fprintf(stderr,
+                "错误:无法连接 X 显示(GTK 初始化失败),未登记全局快捷键\n");
+        return 1;
+    }
+    GError *err = NULL;
+    LyyGlobalHotkeyChange *change =
+        lyy_global_shot_apply(c.shot_hotkey, &err);
+    if (!change) {
+        fprintf(stderr, "登记全局截屏快捷键失败:%s\n",
+                err ? err->message : "未知错误");
+        g_clear_error(&err);
+        return 1;
+    }
+    lyy_global_shot_commit(change);
+    printf("全局截屏快捷键已登记:%s → /usr/local/bin/lyyime-shot\n",
+           c.shot_hotkey);
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     App *app = lyy_app();
     app->settings_page = -1; /* -1 = 未指定子页 */
     lyy_ai_init(&app->ai); /* /AI 触发会话资源(任何路径退出统一 clear) */
+    int shot_cli = 0;      /* 0=常规启动 1=--sync-shot-hotkey 2=--remove */
+    int shot_cli_dup = 0;  /* sync/remove 同时出现=参数冲突 */
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -201,7 +288,31 @@ int main(int argc, char *argv[])
             app->mainwin_requested = 2; /* 启动即弹主窗口(或唤起已有实例) */
             continue;
         }
+        if (!strcmp(argv[i], "--sync-shot-hotkey")) {
+            if (shot_cli)
+                shot_cli_dup = 1;
+            shot_cli = 1;
+            continue;
+        }
+        if (!strcmp(argv[i], "--remove-shot-hotkey")) {
+            if (shot_cli)
+                shot_cli_dup = 1;
+            shot_cli = 2;
+            continue;
+        }
         fprintf(stderr, "未知参数:%s(见 --help)\n", argv[i]);
+        return 2;
+    }
+    /* 全局快捷键登记/移除是独立维护命令:互斥且不与窗口唤起混用 */
+    if (shot_cli_dup) {
+        fprintf(stderr,
+                "--sync-shot-hotkey 与 --remove-shot-hotkey 互斥\n");
+        return 2;
+    }
+    if (shot_cli && (app->settings_requested || app->mainwin_requested)) {
+        fprintf(stderr,
+                "--%s 不能与 --settings/--mainwin 同时使用\n",
+                shot_cli == 1 ? "sync-shot-hotkey" : "remove-shot-hotkey");
         return 2;
     }
 
@@ -231,6 +342,11 @@ int main(int argc, char *argv[])
     snprintf(app->settings_page_req, sizeof(app->settings_page_req),
              "%s/lyyime/settings-page.req", data_dir);
     g_mkdir_with_parents(app->data_dir, 0755);
+
+    /* 全局截屏快捷键维护命令:配置路径就绪后、日志/pidfile/单实例之前
+     * 处理——装/卸操作绝不向已运行实例发信号、不拉起输入法引擎 */
+    if (shot_cli)
+        return cli_shot_hotkey(app, shot_cli == 1);
 
     /* 日志先行(排障红线) */
     char log_path[1024];
@@ -269,6 +385,7 @@ int main(int argc, char *argv[])
         return 0;
     }
     write_pidfile(pidfile);
+    lock_process_memory(&app->log);
 
     /* 配置(共享 config.toml,保留未知行与注释) */
     if (lyy_config_load(app->config_path, &app->config) != 0)
@@ -285,6 +402,23 @@ int main(int argc, char *argv[])
 
     /* GTK 初始化(候选窗/托盘/设置窗依赖) */
     gtk_init(&argc, &argv);
+
+    /* 全局截屏快捷键(合同 §13):经 XFCE xfconf 登记/校正桌面级绑定,
+     * 对所有输入法与无输入法环境生效;失败仅告警,不阻断打字服务 */
+    {
+        GError *gh_err = NULL;
+        LyyGlobalHotkeyChange *ghc =
+            lyy_global_shot_apply(app->config.shot_hotkey, &gh_err);
+        if (ghc) {
+            lyy_global_shot_commit(ghc);
+            lyy_log(&app->log, "全局截屏快捷键已登记:%s",
+                    app->config.shot_hotkey);
+        } else {
+            lyy_log(&app->log, "WARN 全局截屏快捷键登记失败:%s",
+                    gh_err ? gh_err->message : "未知错误");
+            g_clear_error(&gh_err);
+        }
+    }
 
     /* core FFI:失败不退出,进入降级直通并给出修复指引 */
     if (lyy_core_ffi_load(&app->core) != 0) {
@@ -341,6 +475,11 @@ int main(int argc, char *argv[])
         app->candwin.click_user_data = app;
         lyy_candwin_set_op_fns(&app->candwin, lyy_candwin_op_state,
                                lyy_candwin_op, app);
+        lyy_candwin_set_general_fn(&app->candwin, candwin_general_append,
+                                   app);
+        /* 表头齿轮左键 → 本进程设置窗口(不另起 --settings 进程) */
+        lyy_candwin_set_settings_fn(&app->candwin, candwin_settings_show,
+                                    app);
         /* §15 自定义查询(菜单第 4 项):启动注入;设置保存后 settings.c
          * 再调一次即时生效 */
         lyy_candwin_set_query(&app->candwin, app->config.custom_query_label,

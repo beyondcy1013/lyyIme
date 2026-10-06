@@ -409,6 +409,26 @@ impl Engine {
         self.cfg.cn_punct
     }
 
+    pub fn set_pinyin_only(&mut self, on: bool) -> bool {
+        if self.cfg.pinyin_only == on {
+            return false;
+        }
+        self.cfg.pinyin_only = on;
+        self.clear_buf();
+        true
+    }
+    pub fn set_learning(&mut self, on: bool) {
+        if self.cfg.learning != on {
+            self.cfg.learning = on;
+            self.learner.set_enabled(on);
+        }
+    }
+    pub fn set_quick_actions_enabled(&mut self, on: bool) {
+        self.cfg.quick_actions_enabled = on;
+    }
+    pub fn set_mixed_en(&mut self, on: bool) {
+        self.cfg.mixed_en = on;
+    }
     /// 词库是否加载到了数据(任一通道非空)。
     pub fn is_loaded(&self) -> bool {
         !self.dict.is_empty()
@@ -914,7 +934,10 @@ impl Engine {
         // 首选是拼音/英文/功能键或缓冲恰是功能键触发词前缀时不顶屏,
         // 继续渐进组词——"niha"+'o' 续拼 nihao、"hell"+'o' 续拼 hello
         // 与长触发词都不被劫持。
-        if self.cfg.commit_on_extra_after_four && p.buf.chars().count() == 4 {
+        if !self.cfg.pinyin_only
+            && self.cfg.commit_on_extra_after_four
+            && p.buf.chars().count() == 4
+        {
             let trigger_prefix = self.cfg.quick_actions_enabled
                 && self
                     .cfg
@@ -952,7 +975,8 @@ impl Engine {
         // 拼音(如前缀候选被屏蔽后只剩拼写);只要语法上还能续拼就必须收下
         // 该键,交给后续输入或边界键原样处理;只有当前音节表不支持的后缀
         // (如最小夹具无 q 起头音节时的 `jieq`)才走吞键保护。
-        if self.cn_hit
+        if !self.cfg.pinyin_only
+            && self.cn_hit
             && p.cands.is_empty()
             && !pinyin::can_continue(&p.buf, &self.dict.syllables, &self.dict.syllable_prefixes)
         {
@@ -982,7 +1006,8 @@ impl Engine {
         // 首选是拼音/英文时不触发前者:"niha" 是 nihao 的中间态、四键不该
         // 劫持拼音长码,"hell" 不该四键上屏英文前缀词。缓冲是快速功能键
         // 触发词(或其前缀)时同样不上屏——功能候选须经用户确认(§14)。
-        if p.buf.chars().count() == 4
+        if !self.cfg.pinyin_only
+            && p.buf.chars().count() == 4
             && !p.cands.is_empty()
             && p.cands[0].consumed == 0
             && !matches!(p.cands[0].kind, CandKind::Action(_))
@@ -1311,6 +1336,9 @@ impl Engine {
         if !self.cfg.phrase_hint || p.recent.len() < 2 {
             return None;
         }
+        if self.cfg.pinyin_only {
+            return None;
+        }
         let n = p.recent.len();
         for len in (2..=n.min(PHRASE_HINT_MAX)).rev() {
             let word: String = p.recent[n - len..].iter().collect();
@@ -1398,13 +1426,15 @@ impl Engine {
             return;
         }
         if !buf.is_empty() {
-            cn_hits += self.wubi_candidates(&buf, &mut pool);
+            if !self.cfg.pinyin_only {
+                cn_hits += self.wubi_candidates(&buf, &mut pool);
+            }
             cn_hits += self.pinyin_candidates(&buf, &mut pool);
             // 英文通道(修订 §5.C):
             // - 无中文命中 → 前缀候选(不限名次)进 english_no_cn 层;
             // - 有中文命中 → 仅当缓冲本身是 mixed_auto_commit_top_n 内的完整英文词,
             //   以 english_with_cn 层加入单个候选。
-            if self.cfg.mixed_en {
+            if self.cfg.mixed_en && !self.cfg.pinyin_only {
                 if cn_hits == 0 {
                     self.english_candidates(&buf, &mut pool);
                 } else {
@@ -1852,6 +1882,9 @@ impl Engine {
     /// (拼音打字也能看到五笔编码,便于学习反查);词不在五笔表时保留
     /// 原通道注释(拼音)兜底。
     fn wubi_comment(&self, word: &str, fallback: String) -> String {
+        if self.cfg.pinyin_only {
+            return fallback;
+        }
         match self.dict.wubi_rev.get(word) {
             Some(code) => code.clone(),
             None => fallback,

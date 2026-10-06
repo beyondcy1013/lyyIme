@@ -109,10 +109,10 @@ pub fn map_keyval(keyval: u32) -> (LKey, u32) {
     if keyval == KSYM_ESCAPE {
         return (LKey::Esc, 0);
     }
-    if keyval == KSYM_PAGE_UP {
+    if keyval == KSYM_PAGE_UP || keyval == '-' as u32 {
         return (LKey::PageUp, 0);
     }
-    if keyval == KSYM_PAGE_DOWN {
+    if keyval == KSYM_PAGE_DOWN || keyval == '=' as u32 {
         return (LKey::PageDown, 0);
     }
     // 其余可打印 ASCII 符号(标点、-=、空格之外的)一律按标点送 core
@@ -159,6 +159,14 @@ mod tests {
         assert_eq!(map_keyval(KSYM_ESCAPE), (LKey::Esc, 0));
         assert_eq!(map_keyval(KSYM_PAGE_UP), (LKey::PageUp, 0));
         assert_eq!(map_keyval(KSYM_PAGE_DOWN), (LKey::PageDown, 0));
+    }
+
+    #[test]
+    fn paging_symbols_map_to_page_keys() {
+        assert_eq!(map_keyval('-' as u32), (LKey::PageUp, 0));
+        assert_eq!(map_keyval('=' as u32), (LKey::PageDown, 0));
+        assert_eq!(map_keyval('_' as u32), (LKey::Punct('_'), '_' as u32));
+        assert_eq!(map_keyval('+' as u32), (LKey::Punct('+'), '+' as u32));
     }
 
     #[test]

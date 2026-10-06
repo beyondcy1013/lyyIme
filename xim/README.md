@@ -106,6 +106,9 @@ xim/
     到期路径同时清掉本事件 `state` 的陈旧 LockMask。中→英/组合回退/焦点
     切换不动锁。解锁走专用短命 Xlib 连接 `XkbLockModifiers`(mask-only,
     失败仅记日志);ibus 端同合同,由 logic 回调宿主执行。
+    单击确认的 Shift release 已被服务端消费,不再回放给客户端(切换后
+    客户端处于非转发态,replay 只会成为多余的合成事件);无 pending/
+    防护标记的未知 release 仍原样转发一次。
 
 ## 验证
 

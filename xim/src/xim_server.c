@@ -732,7 +732,9 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
         if (!is_press) {
             /* 单击确认主路径:本服务端已请求转发 KeyRelease,按下挂起后
              * release 必然随后到达,即视为一次完整单击 → 切英文。
-             * (280ms 时间窗仅为不转发 release 的客户端兜底,见 timeout。) */
+             * (280ms 时间窗仅为不转发 release 的客户端兜底,见 timeout。)
+             * 已消费的单击 release 不回放:客户端已切非转发态,replay
+             * 只是多余的合成事件。 */
             if (st->shift_pending) {
                 if (app->shift_timer_id) {
                     g_source_remove(app->shift_timer_id);
@@ -740,16 +742,17 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
                 }
                 st->shift_pending = 0;
                 app->shift_pending = 0;
-                xcb_im_preedit_end(app->xim.im, app->xim.focused_ic);
-                xcb_flush(app->xim.conn);
                 lyy_xim_set_trigger(app, 0);
                 lyy_log(&app->log,
                         "Shift 单击(release 确认)→ 英文直通(trigger off)");
-            } else if (st->combo_guard) {
+                return;
+            }
+            if (st->combo_guard) {
                 /* release 到达即确认单击:关防护窗并解锁(press 不解锁,
-                 * 窗内 Shift+字母回退不能动锁) */
+                 * 窗内 Shift+字母回退不能动锁);该 release 已消费,不回放 */
                 st->combo_guard = 0;
                 caps_lock_off(app);
+                return;
             }
             xcb_im_forward_event(xs->im, ic, ev);
             return;

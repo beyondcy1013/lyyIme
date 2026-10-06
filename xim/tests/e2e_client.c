@@ -78,9 +78,10 @@ static void trace_event(GdkEvent *event, gpointer data)
     (void)data;
     if (event->type == GDK_KEY_PRESS || event->type == GDK_KEY_RELEASE)
         fprintf(stderr,
-                "CLIENT_KEY type=%d keyval=%u window=%p focus=%d\n",
+                "CLIENT_KEY type=%d keyval=%u window=%p focus=%d state=0x%x hw=%u\n",
                 event->type, event->key.keyval, (void *)event->key.window,
-                gtk_widget_has_focus(g_entry));
+                gtk_widget_has_focus(g_entry), event->key.state,
+                event->key.hardware_keycode);
     else if (event->type == GDK_FOCUS_CHANGE)
         fprintf(stderr, "CLIENT_FOCUS in=%d window=%p\n",
                 event->focus_change.in,

@@ -77,7 +77,7 @@ STUB_LIB="$XIM_DIR/build/tests/liblyyime_core_stub.so"
 # 打印 locked_mods & LockMask(2=锁存/0=未锁)
 CAPS_PY="$WORK/caps_state.py"
 cat > "$CAPS_PY" <<'PY'
-import ctypes, sys
+import ctypes, sys, time
 lib = ctypes.CDLL("libX11.so.6")
 class XkbStateRec(ctypes.Structure):
     _fields_ = [
@@ -94,7 +94,43 @@ lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
 lib.XkbGetState.restype = ctypes.c_int
 lib.XkbGetState.argtypes = [ctypes.c_void_p, ctypes.c_uint,
                           ctypes.POINTER(XkbStateRec)]
+lib.XKeysymToKeycode.restype = ctypes.c_ubyte
+lib.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
 lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+# 原生单键事件:--shift <Shift_L|Shift_R|a> <click|down|up>
+# XKeysymToKeycode→XTestFakeKeyEvent 直发 press/release;不像 xdotool
+# key 那样为凑修饰位补发其它修饰键 —— 保证 Caps 锁存下"干净 Shift
+# 单击/按住"合同。不改任何修饰映射,不做 Xkb 状态查询。
+if sys.argv[1:2] == ["--shift"]:
+    KEYS = {"Shift_L": 0xFFE1, "Shift_R": 0xFFE2, "a": 0x61}
+    if len(sys.argv) != 4 or sys.argv[2] not in KEYS \
+            or sys.argv[3] not in ("click", "down", "up"):
+        sys.exit(2)
+    tst = ctypes.CDLL("libXtst.so.6")
+    tst.XTestFakeKeyEvent.restype = ctypes.c_int
+    tst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                    ctypes.c_int, ctypes.c_ulong]
+    dpy = lib.XOpenDisplay(None)
+    if not dpy:
+        sys.exit(2)
+    kc = lib.XKeysymToKeycode(dpy, KEYS[sys.argv[2]])
+    if kc == 0:
+        lib.XCloseDisplay(dpy)
+        sys.exit(2)
+    act, ok = sys.argv[3], 1
+    if act != "up":
+        ok &= tst.XTestFakeKeyEvent(dpy, kc, 1, 0)
+        lib.XSync(dpy, 0)
+        if act == "click":
+            time.sleep(0.012)
+    if act != "down":
+        ok &= tst.XTestFakeKeyEvent(dpy, kc, 0, 0)
+    lib.XSync(dpy, 0)
+    lib.XCloseDisplay(dpy)
+    sys.exit(0 if ok else 2)
+
 dpy = lib.XOpenDisplay(None)
 if not dpy:
     sys.exit(2)
@@ -107,6 +143,9 @@ print(st.locked_mods & 2)
 PY
 
 caps_mask() { python3 "$CAPS_PY" 2>/dev/null || echo "ERR"; }
+# 原生单键事件(场景 H 前提):xdotool key 会为凑修饰位补发其它修饰键
+# (实测 Shift_R 先带出 Shift_L 按下),破坏干净单击;这里直发 XTest。
+key_event() { python3 "$CAPS_PY" --shift "$1" "${2:-click}"; }
 wait_caps_mask() {
     local want="$1" i
     for ((i = 0; i < 60; i++)); do
@@ -153,6 +192,18 @@ wait_log() {
     fail "等待日志 [$pat] 超时"
 }
 
+# 按出现次数等待日志(防同串陈旧行误配)
+wait_log_count() {
+    local pat="$1" want="$2" timeout="${3:-10}" i n
+    for ((i = 0; i < timeout * 20; i++)); do
+        n="$(grep -c "$pat" "$XIM_LOG" 2>/dev/null || true)"
+        [[ ${n:-0} -ge $want ]] && return 0
+        sleep 0.05
+    done
+    echo "---- xim.log ----"; cat "$XIM_LOG" 2>/dev/null || true
+    fail "等待日志 [$pat] 次数≥$want 超时"
+}
+
 echo "== [1/13] 构建 =="
 make -C "$XIM_DIR" all test >/dev/null
 [[ -f "$STUB_LIB" ]] || fail "桩库未生成:$STUB_LIB"
@@ -177,7 +228,9 @@ wait_log "XIM server ready"
 echo "[e2e] XIM server 就绪(pid=$XIM_PID)"
 
 echo "== [4/13] 启动 GTK Entry 客户端 =="
-"$XIM_DIR/build/tests/e2e_client" "$BUFFER" 120 >"$CLIENT_LOG" 2>"$WORK/client.stderr" &
+CLIENT_ENV=()
+[[ -n "${LYYIME_CLIENT_PRELOAD:-}" ]] && CLIENT_ENV=(env "LD_PRELOAD=$LYYIME_CLIENT_PRELOAD")
+"${CLIENT_ENV[@]}" "$XIM_DIR/build/tests/e2e_client" "$BUFFER" 120 >"$CLIENT_LOG" 2>"$WORK/client.stderr" &
 CLIENT_PID=$!
 wait_log "XIM client 已连接"
 sleep 0.8
@@ -270,21 +323,37 @@ echo "== [11/13] H:CapsLock 联动解锁(英文→中文 Shift 单击确认) =="
 # F 结束时的缓冲基线(固定 fixture 串)
 BASE2="你号abc候选1拟好候选1ABn候选1"
 
+# H0:无锁直连 toggle 回归 —— 中→英 Shift_L 后紧接着英→中 Shift_R(中间无
+#    文本):单击 release 已被服务端消费不回放,回归验证第二次按下不被残留
+#    事件干扰;锁存位始终为 0、缓冲不变
+xdotool key Escape; sleep 0.3
+OFF_N="$(grep -c '英文直通(trigger off)' "$XIM_LOG" 2>/dev/null || true)"
+TRIG_N="$(grep -c 'trigger on(Shift 按下' "$XIM_LOG" 2>/dev/null || true)"
+key_event Shift_L
+wait_log_count '英文直通(trigger off)' "$((${OFF_N:-0} + 1))"
+key_event Shift_R
+wait_log_count 'trigger on(Shift 按下' "$((${TRIG_N:-0} + 1))"
+[[ "$(caps_mask)" == "0" ]] || fail "无锁 toggle 后锁存位非 0($(caps_mask))"
+wait_buffer "$BASE2" 2
+echo "PASS H0:无锁 Shift_L/R 直连 toggle 正常,锁存位保持 0"
+
 # H1:中文态开 CapsLock → Shift_L 单击转英文:锁存必须保持(该方向不动锁)
 xdotool key Escape; sleep 0.3 # 清掉任何残留组合,保证起点干净
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 后锁存位非 2($(caps_mask))"
-xdotool key Shift_L
+key_event Shift_L
 sleep 0.8 # 负向断言前留足释放确认+潜在错误解锁落地时间
 [[ "$(caps_mask)" == "2" ]] || fail "中→英 单击误清 CapsLock"
 echo "PASS H1:中→英 Shift 单击不清 CapsLock(锁存保持)"
 
 # H2:英文态锁存 → Shift_R 单击回中文:release 确认 → 系统锁解除,
-#    解锁后立即可打 fixture 中文
-xdotool key Shift_R
-wait_log "trigger on"
+#    解锁后立即可打 fixture 中文(日志按次数等,防同串陈旧行误配)
+TRIG_N="$(grep -c 'trigger on(Shift 按下' "$XIM_LOG" 2>/dev/null || true)"
+UNLK_N="$(grep -c '已解除系统 CapsLock' "$XIM_LOG" 2>/dev/null || true)"
+key_event Shift_R
+wait_log_count 'trigger on(Shift 按下' "$((${TRIG_N:-0} + 1))"
 wait_caps_mask 0
-wait_log "已解除系统 CapsLock"
+wait_log_count '已解除系统 CapsLock' "$((${UNLK_N:-0} + 1))"
 xdotool type --delay 90 "zh"
 sleep 0.3
 xdotool key space
@@ -294,11 +363,10 @@ echo "PASS H2:Shift_R 英→中确认解除 CapsLock,解锁后立即组词上屏
 # H3:Shift_L 变体同合同:锁存态中→英(保持)→ 英→中(解除)
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 重开后锁存位非 2"
-xdotool key Shift_L
+key_event Shift_L
 sleep 0.8
 [[ "$(caps_mask)" == "2" ]] || fail "Shift_L 中→英 误清 CapsLock"
-xdotool key Shift_L
-wait_log "已解除系统 CapsLock" 5
+key_event Shift_L
 wait_caps_mask 0
 echo "PASS H3:Shift_L 英→中同样确认解除 CapsLock"
 
@@ -306,15 +374,15 @@ echo "PASS H3:Shift_L 英→中同样确认解除 CapsLock"
 #    字母按 Caps+Shift 语义直发小写 'a' 进缓冲;收尾关锁还原现场
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 第三次开后锁存位非 2"
-xdotool key Shift_L
+key_event Shift_L
 sleep 0.8
 [[ "$(caps_mask)" == "2" ]] || fail "H4 前置中→英 误清 CapsLock"
-xdotool keydown Shift_L
+key_event Shift_L down
 sleep 0.2
-xdotool key a
+key_event a
 sleep 0.3
 wait_log "Shift 组合键防护:回退英文" 5
-xdotool keyup Shift_L
+key_event Shift_L up
 sleep 0.3
 [[ "$(caps_mask)" == "2" ]] || fail "Shift+字母 组合回退误清 CapsLock"
 wait_buffer "${BASE2}候选1a" 8
@@ -335,7 +403,7 @@ fi
 
 # 全量模式:H4 结束于英文态 → Shift 单击回中文供 G 使用;H 已上屏
 # 「候选1」与回退转发的 'a',G 的缓冲基线相应追加
-xdotool key Shift_L; sleep 0.6
+key_event Shift_L; sleep 0.6
 BASE="${BASE2}候选1a"
 
 echo "== [12/13] G:候选右键菜单(§15):悬停冻结+菜单三项(桩确定性) =="

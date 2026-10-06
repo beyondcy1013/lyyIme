@@ -194,7 +194,7 @@ PY
 # 打印 locked_mods & LockMask(2=锁存/0=未锁)
 CAPS_PY="$WORK/caps_state.py"
 cat > "$CAPS_PY" <<'PY'
-import ctypes, sys
+import ctypes, sys, time
 lib = ctypes.CDLL("libX11.so.6")
 class XkbStateRec(ctypes.Structure):
     _fields_ = [
@@ -211,7 +211,43 @@ lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
 lib.XkbGetState.restype = ctypes.c_int
 lib.XkbGetState.argtypes = [ctypes.c_void_p, ctypes.c_uint,
                           ctypes.POINTER(XkbStateRec)]
+lib.XKeysymToKeycode.restype = ctypes.c_ubyte
+lib.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
 lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+# 原生单键事件:--shift <Shift_L|Shift_R|a> <click|down|up>
+# XKeysymToKeycode→XTestFakeKeyEvent 直发 press/release;不像 xdotool
+# key 那样为凑修饰位补发其它修饰键 —— 保证 Caps 锁存下"干净 Shift
+# 单击/按住"合同。不改任何修饰映射,不做 Xkb 状态查询。
+if sys.argv[1:2] == ["--shift"]:
+    KEYS = {"Shift_L": 0xFFE1, "Shift_R": 0xFFE2, "a": 0x61}
+    if len(sys.argv) != 4 or sys.argv[2] not in KEYS \
+            or sys.argv[3] not in ("click", "down", "up"):
+        sys.exit(2)
+    tst = ctypes.CDLL("libXtst.so.6")
+    tst.XTestFakeKeyEvent.restype = ctypes.c_int
+    tst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                    ctypes.c_int, ctypes.c_ulong]
+    dpy = lib.XOpenDisplay(None)
+    if not dpy:
+        sys.exit(2)
+    kc = lib.XKeysymToKeycode(dpy, KEYS[sys.argv[2]])
+    if kc == 0:
+        lib.XCloseDisplay(dpy)
+        sys.exit(2)
+    act, ok = sys.argv[3], 1
+    if act != "up":
+        ok &= tst.XTestFakeKeyEvent(dpy, kc, 1, 0)
+        lib.XSync(dpy, 0)
+        if act == "click":
+            time.sleep(0.012)
+    if act != "down":
+        ok &= tst.XTestFakeKeyEvent(dpy, kc, 0, 0)
+    lib.XSync(dpy, 0)
+    lib.XCloseDisplay(dpy)
+    sys.exit(0 if ok else 2)
+
 dpy = lib.XOpenDisplay(None)
 if not dpy:
     sys.exit(2)
@@ -224,6 +260,9 @@ print(st.locked_mods & 2)
 PY
 
 caps_mask() { python3 "$CAPS_PY" 2>/dev/null || echo "ERR"; }
+# 原生单键事件(T12b 前提):xdotool key 会为凑修饰位补发其它修饰键
+# (实测 Shift_R 先带出 Shift_L 按下),破坏干净单击;这里直发 XTest。
+key_event() { python3 "$CAPS_PY" --shift "$1" "${2:-click}"; }
 wait_caps_mask() {
     local want="$1" i
     for ((i = 0; i < 60; i++)); do
@@ -261,6 +300,18 @@ wait_log() {
     done
     tail -40 "$IBUS_LOG" 2>/dev/null || true
     fail "等待日志 [$pat] 超时"
+}
+
+# 按出现次数等待日志(ibus.log 跨运行追加,防同串陈旧行误配)
+wait_log_count() {
+    local pat="$1" want="$2" timeout="${3:-10}" i n
+    for ((i = 0; i < timeout * 20; i++)); do
+        n="$(grep -c "$pat" "$IBUS_LOG" 2>/dev/null || true)"
+        [[ ${n:-0} -ge $want ]] && return 0
+        sleep 0.05
+    done
+    tail -40 "$IBUS_LOG" 2>/dev/null || true
+    fail "等待日志 [$pat] 次数≥$want 超时"
 }
 wait_buf() {
     local want="$1" timeout="${2:-10}" i
@@ -718,14 +769,15 @@ echo "PASS T12:菜单态失焦取消无提交,重聚焦连续输入正常"
 
 echo "== [T12b] CapsLock 联动:英文→中文 Shift 单击确认解锁 =="
 B0="$(buf_text)"
+UNLK_N="$(grep -c 'CapsLock 已解除' "$IBUS_LOG" 2>/dev/null || true)"
 xdotool key Caps_Lock; sleep 0.5
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 后锁存位非 2($(caps_mask))"
 # 中→英:锁存必须保持(该方向从不动锁)
-xdotool key Shift_L; sleep 0.8
+key_event Shift_L; sleep 0.8
 [[ "$(caps_mask)" == "2" ]] || fail "中→英 单击误清 CapsLock"
 # 英→中(Shift_R 变体):release 确认 → 宿主经 XkbLockModifiers 解锁
-xdotool key Shift_R; sleep 0.6
-wait_log 'CapsLock 已解除'
+key_event Shift_R; sleep 0.6
+wait_log_count 'CapsLock 已解除' "$((${UNLK_N:-0} + 1))"
 wait_caps_mask 0
 # 解锁后立即打 fixture 中文:nihao+space 精确追加 你好
 xdotool type --delay 90 "nihao"; sleep 0.8
@@ -734,24 +786,24 @@ wait_appended "$B0" "你好"
 # Shift_L 变体同合同:锁存态中→英(保持)→ 英→中(解除)
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 重开后锁存位非 2"
-xdotool key Shift_L; sleep 0.8
+key_event Shift_L; sleep 0.8
 [[ "$(caps_mask)" == "2" ]] || fail "Shift_L 中→英 误清 CapsLock"
-xdotool key Shift_L; sleep 0.6
+key_event Shift_L; sleep 0.6
 wait_caps_mask 0
 # 组合键负向:英文态锁存 → Shift+字母 与 Ctrl+Shift 均不切换不解锁
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 第三次开后锁存位非 2"
-xdotool key Shift_L; sleep 0.8   # 中→英(锁保持)
+key_event Shift_L; sleep 0.8   # 中→英(锁保持)
 [[ "$(caps_mask)" == "2" ]] || fail "组合前置中→英 误清 CapsLock"
-xdotool keydown Shift_L; sleep 0.2
-xdotool key a; sleep 0.3         # Shift+字母:取消单击,字母直通
-xdotool keyup Shift_L; sleep 0.4
+key_event Shift_L down; sleep 0.2
+key_event a; sleep 0.3         # Shift+字母:取消单击,字母直通(原生按键不改修饰)
+key_event Shift_L up; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Shift+字母 组合误清 CapsLock"
 xdotool key ctrl+shift; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Ctrl+Shift 组合误清 CapsLock"
 xdotool key Caps_Lock; sleep 0.4 # 收尾关锁并回中文态,还原后续用例现场
 wait_caps_mask 0
-xdotool key Shift_L; sleep 0.6   # 无锁态英→中(不触发解锁)
+key_event Shift_L; sleep 0.6   # 无锁态英→中(不触发解锁)
 echo "PASS T12b:Shift 单击英→中确认解除 CapsLock(两 Shift 变体),组合/中→英不动锁"
 
 echo "== [T13] 销毁:客户端退出 → 候选窗释放 =="

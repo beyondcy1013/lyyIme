@@ -167,6 +167,7 @@ cleanup() {
     xdotool windowfocus "$OLD_FOCUS" 2>/dev/null || true
 }
 trap cleanup EXIT
+trap 'rc=$?; echo "ERR:rc=$rc line=$LINENO work=${WORK:-?} probe_wid=${WID:-?} focus=$(timeout 1 xdotool getwindowfocus 2>/dev/null || echo "?")" >&2; exit "$rc"' ERR
 
 MARK="$(wc -l < "$IBUS_LOG")"
 XMARK="$(wc -l < "$XIM_LOG")"

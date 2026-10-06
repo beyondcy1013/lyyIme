@@ -23,7 +23,7 @@
 - **三形态互为备份** — ibus 引擎 / XIM 外挂 / 悬浮窗输入共用同一 Rust 核心与词库,框架异常时换形态继续打
 - **日常打字全本地** — 正常输入零网络调用;AI 助手与在线词库下载均为独立可选功能,不开不影响打字
 - **可调可管** — 候选右键固定/删除/反查、5 套内置皮肤、标点/学习/混输开关即时生效
-- **键盘行为考究** — Shift 单击切中英不误伤组合键;英文态锁存 CapsLock 时单击确认回中文联动解除系统大写锁(已实现,隔离 Xvfb GUI 验证通过后方部署)
+- **键盘行为考究** — Shift 单击切中英不误伤组合键;英文态锁存 CapsLock 时单击确认回中文联动解除系统大写锁
 - **工具箱内建** — 截屏助手(XFCE 桌面级热键)/ 造词 / 打字统计 / 输入法环境一键修复
 
 ## 这是什么
@@ -56,7 +56,7 @@ lyyIme 是一个为 Linux 打造的**五笔86 与拼音混输**输入法,支持�
 - **IBus 自持 GTK 候选菜单** — 候选条右键即置顶/删除/反查/通用操作,不依赖 ibus 面板菜单
 - **纯拼音模式** — `pinyin_only` 一开五笔候选整体退场,只走全拼/简拼
 - **`Ctrl+.` 标点即时切换** — 中文态临时切中英文标点,不改默认配置
-- **Shift 单击 CapsLock 联动** — 英文态锁存大写锁时,单击确认回中文联动解除系统锁;组合键与反向切换不动锁(已实现,GUI 验证后方部署)
+- **Shift 单击 CapsLock 联动** — 英文态锁存大写锁时,单击确认回中文联动解除系统锁;组合键与反向切换不动锁
 - **截屏热键 XFCE 全局化** — `Ctrl+Alt+A` 登记为桌面级绑定,换输入法/停用 lyyIme 仍有效;与系统快捷键冲突时提示且不覆盖
 
 ### 输入核心:拼音五笔真正混输
@@ -172,7 +172,7 @@ lyyime-doctor fix --all         # 一键修复(环境变量/总线/引擎注册/
 |---|---|
 | Rust 单测(core/ibus/dicttool/doctor/float/shot) | `scripts/test.sh` |
 | xim C 单测(effects_json/config/快捷键让位/功能键) | `make -C xim test` |
-| XIM 全链路 E2E,聚焦 CapsLock 套件(隔离 Xvfb) | `tests/e2e/xim_e2e.sh --caps-only --keep` |
+| XIM Shift/CapsLock 输入回归(隔离 Xvfb) | `tests/e2e/xim_e2e.sh --caps-only --keep` |
 | IBus 候选窗/菜单 E2E(隔离 Xvfb) | `tests/e2e/ibus_candwin_e2e.sh --keep` |
 | 候选菜单真核心 E2E(隔离 Xvfb) | `tests/e2e/candidate_menu_e2e.sh --keep` |
 | 真机使用 | openEuler 24.03 + XFCE + X11 日常使用中 |
@@ -181,7 +181,7 @@ lyyime-doctor fix --all         # 一键修复(环境变量/总线/引擎注册/
 
 **lyyIme** is a mixed **Wubi-86 + Pinyin** input method for Linux, developed and used daily on **openEuler 24.03 + XFCE + X11** (other distros/desktops unverified; no native Wayland support promised). Sogou-like experience: Wubi, full pinyin, abbreviated pinyin and English share one letter buffer — no scheme switching, candidates merged and ranked intelligently; an optional `pinyin_only` mode hides Wubi candidates entirely. Ships in **three interchangeable shapes** sharing one Rust core and dictionary: a standard **IBus engine**, a **standalone XIM server** (`lyyime-xim`, needs X11 plus GTK3/XIM-compatible apps — a fallback when your IM framework breaks), and a **floating-window IME** (`lyyime-float`, needs the target app to accept synthetic keys/clipboard) — if one shape is unavailable, switch to another.
 
-Highlights: Wubi↔Pinyin mixed typing with reverse Wubi-code hints · optional `pinyin_only` pure-pinyin mode · unique-4-key auto-commit & 4-key top-commit · **GB2312-tiered character ranking** (common-first) · **post-commit word prediction** (local, offline) · **ALL-CAPS input** with candidates for UPPER / Capitalized / lower / **Chinese translation** (`WHO` → 世界卫生组织) · candidate **right-click menu** (pin top / delete phrase / CN↔EN lookup), including self-owned GTK menus on the IBus frontend · **candidate-window skins** (5 built-in themes, WYSIWYG gallery, follows dark/light) · Chinese/English mixing with auto English pass-through · single-Shift CN/EN toggle plus CapsLock auto-unlock on confirmed EN→CN switch (implemented, deployed only after isolated-Xvfb GUI validation) · `Ctrl+.` instant punctuation toggle · word-coining (auto Wubi-86 phrase encoding) · dynamic date/time words · typing statistics (chars/day, active-time WPM) · floating-window **caret-following "built-in-like" mode** with optional **no-focus-stealing** and **undo/redo that reverts committed text in the target app** · built-in **AI assistant** (`/AI` prompt → any OpenAI-compatible endpoint you configure, answer committed in place) · configurable quick actions in the candidate bar (`peizhi`/`bangzhu`/`jietu` or your own shell commands) · region screenshot tool with an **XFCE desktop-level hotkey binding** (conflicts are reported, never overwritten) · **lyyime-doctor**: 10-point diagnose-and-repair for broken Linux Chinese input environments. Core engine in pure Rust (C-ABI FFI), candidate UI in GTK3. Rust + C unit tests plus Xvfb end-to-end suites — see docs/TESTING.md for coverage and commands.
+Highlights: Wubi↔Pinyin mixed typing with reverse Wubi-code hints · optional `pinyin_only` pure-pinyin mode · unique-4-key auto-commit & 4-key top-commit · **GB2312-tiered character ranking** (common-first) · **post-commit word prediction** (local, offline) · **ALL-CAPS input** with candidates for UPPER / Capitalized / lower / **Chinese translation** (`WHO` → 世界卫生组织) · candidate **right-click menu** (pin top / delete phrase / CN↔EN lookup), including self-owned GTK menus on the IBus frontend · **candidate-window skins** (5 built-in themes, WYSIWYG gallery, follows dark/light) · Chinese/English mixing with auto English pass-through · single-Shift CN/EN toggle plus CapsLock auto-unlock on confirmed EN→CN switch · `Ctrl+.` instant punctuation toggle · word-coining (auto Wubi-86 phrase encoding) · dynamic date/time words · typing statistics (chars/day, active-time WPM) · floating-window **caret-following "built-in-like" mode** with optional **no-focus-stealing** and **undo/redo that reverts committed text in the target app** · built-in **AI assistant** (`/AI` prompt → any OpenAI-compatible endpoint you configure, answer committed in place) · configurable quick actions in the candidate bar (`peizhi`/`bangzhu`/`jietu` or your own shell commands) · region screenshot tool with an **XFCE desktop-level hotkey binding** (conflicts are reported, never overwritten) · **lyyime-doctor**: 10-point diagnose-and-repair for broken Linux Chinese input environments. Core engine in pure Rust (C-ABI FFI), candidate UI in GTK3. Rust + C unit tests plus Xvfb end-to-end suites — see docs/TESTING.md for coverage and commands.
 
 ```bash
 # assumes openEuler paths (/usr/local, /data/cargo-target), matching

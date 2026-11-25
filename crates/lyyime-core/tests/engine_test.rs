@@ -43,9 +43,18 @@ fn 单文件缺失_只降级英文通道() {
     }
     let mut eng = Engine::new(&td.path).unwrap();
     assert!(eng.is_loaded(), "其余通道仍在");
-    // "thex" 全程无中文命中(英文通道缺失时也就没有任何候选)。
+    // "thex" 全程无中文命中;英文通道缺失时不得冒英文词候选。
+    // 注意:四码后字母推进成死胡同时走死码保护(ARCHITECTURE.md §6),
+    // 既有中文候选原样保留、后续字母吞掉,所以这里断言"没有英文候选"
+    // 与"回车直通原字母",不能用"候选条为空"代表英文通道降级。
     type_str(&mut eng, "thex");
-    assert!(page_texts(&eng).is_empty(), "英文通道应被降级");
+    let cands = eng.flush_page();
+    assert!(
+        cands
+            .iter()
+            .all(|c| c.kind != CandKind::English && c.text != "thex" && c.text != "the"),
+        "英文通道应被降级"
+    );
     let mut eng2 = Engine::new(&td.path).unwrap();
     type_str(&mut eng2, "a");
     assert_eq!(page_texts(&eng2).first().map(String::as_str), Some("工"));

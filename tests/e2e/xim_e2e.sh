@@ -255,6 +255,7 @@ echo "== [6/13] B:Shift 单击 → 英文直通 =="
 FWD_BEFORE="$(grep 'forward keysym' "$XIM_LOG" | grep -vc 'LKey=9' || true)"
 xdotool key Shift_L
 wait_log "Shift 单击(release 确认)" 2 || wait_log "Shift 单击(时间窗确认)"
+wait_log "state-toast: 英文" 5 # 状态提示:切英文在指针旁弹出
 xdotool type --delay 90 "abc"
 sleep 0.6
 FWD_AFTER="$(grep 'forward keysym' "$XIM_LOG" | grep -vc 'LKey=9' || true)"
@@ -267,6 +268,7 @@ echo "PASS B:英文直通(shift 切换后 forward 记录 $FWD_BEFORE→$FWD_AFTE
 echo "== [7/13] C:Shift 再单击 → 中文态空格顶屏 =="
 xdotool key Shift_L
 wait_log "trigger on"
+wait_log "state-toast: 中文" 5 # 状态提示:回中文在指针旁弹出
 sleep 0.5
 xdotool type --delay 90 "zh"
 sleep 0.3
@@ -297,12 +299,14 @@ echo "PASS D:造词热键/方向键选字/存词提示/继续输入 全链路"
 
 echo "== [9/13] E:CapsLock 大写态字母直通(无 Shift 大写;Shift+字母 小写) =="
 xdotool key Caps_Lock; sleep 0.5
+wait_log "state-toast: 大写已开启" 8 # XKB StateNotify → 指针旁提示
 xdotool type --delay 90 "ab"; sleep 0.5
 wait_buffer "你号abc候选1拟好候选1AB" 8
 xdotool type --delay 90 "N"; sleep 0.5 # xdotool 发 Shift+n:大写态下输出小写
 wait_buffer "你号abc候选1拟好候选1ABn" 8
 wait_log "CapsLock 大写态字母直通" 8
 xdotool key Caps_Lock; sleep 0.5 # 关大写态,组词应恢复
+wait_log "state-toast: 大写已关闭" 8
 xdotool type --delay 90 "zh"; sleep 0.3
 xdotool key space
 wait_buffer "你号abc候选1拟好候选1ABn候选1" 8
@@ -354,6 +358,7 @@ key_event Shift_R
 wait_log_count 'trigger on(Shift 按下' "$((${TRIG_N:-0} + 1))"
 wait_caps_mask 0
 wait_log_count '已解除系统 CapsLock' "$((${UNLK_N:-0} + 1))"
+wait_log "state-toast: 中文(已关闭大写)" 5 # 合并提示:回中文同时清大写
 xdotool type --delay 90 "zh"
 sleep 0.3
 xdotool key space
@@ -452,8 +457,12 @@ right_click_row_menu_item() {
         ry=$((Y + 38 + (H - 38) * (2 * row + 1) / 10))
         xdotool mousemove $((X + 40)) "$ry"; sleep 0.2
         xdotool click 3; sleep 0.5
+        echo "[dbg] row=$row attempt=$i 点击点=($((X + 40)),$ry) 实际指针=$(xdotool getmouselocation --shell | tr '\n' ' ')"
         g="$(menu_geom)"
         [[ -n "$g" ]] && break
+        xwininfo -root -children | grep '"lyyime' | while read -r w _; do
+            echo "[dbg]   $w $(xwininfo -id "$w" -stats | awk '/Map State/{ms=$3$4} /Absolute upper-left X/{x=$4} /Absolute upper-left Y/{y=$4} /Width/{wd=$2} /Height/{h=$2} END{print wd"x"h"+"x"+"y, ms}')"
+        done
     done
     [[ -n "$g" ]] || fail "右键第 $row 行未弹出菜单(尝试 $i 次)"
     read -r X Y W H <<<"$g"

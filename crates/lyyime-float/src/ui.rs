@@ -74,6 +74,12 @@ pub struct App {
     pub(crate) ptr_hint: Cell<bool>,
     /// 内置输入法(Mode A)状态前缀缓存(每秒轮询刷新, 变化才重绘状态行)
     pub(crate) engine_prefix: RefCell<String>,
+    /// CapsLock 锁定态跟踪(状态提示):Entry 按键事件比对 LOCK_MASK 位,
+    /// 翻转即在状态行限时提示"大写已开启/已关闭";None=尚未观测
+    pub(crate) caps_state: Cell<Option<bool>>,
+    /// 状态行限时提示:到期时间戳(epoch ms)+代次(到期回调据此判过期)
+    pub(crate) hint_until: Cell<u64>,
+    pub(crate) hint_gen: Cell<u32>,
     /// §15 候选右键菜单状态:与 core 引擎同一份数据文件
     /// (~/.local/share/lyyime/{pinned,blocked}.tsv),跨模式即时一致;
     /// zh_en 懒加载(LYYIME_DATA_DIR/zh_en.tsv,缺失时反查项给提示)。
@@ -117,6 +123,9 @@ pub fn create() -> Result<Rc<App>, anyhow::Error> {
         caret: inline::CaretTracker::spawn(),
         ptr_hint: Cell::new(false),
         engine_prefix: RefCell::new(String::new()),
+        caps_state: Cell::new(None),
+        hint_until: Cell::new(0),
+        hint_gen: Cell::new(0),
         pins: {
             let mut t = PinTable::new();
             t.load(&config::data_dir().join("pinned.tsv"));
@@ -287,6 +296,12 @@ fn wire(app: &Rc<App>) {
         let app3 = app.clone();
         app.entry
             .connect_key_press_event(move |_, ev| on_entry_key(&app3, ev));
+        // CapsLock press 不带新锁位,release 才携带 → 两侧都跟踪
+        let app4 = app.clone();
+        app.entry.connect_key_release_event(move |_, ev| {
+            caps_track(&app4, ev.state());
+            glib::Propagation::Proceed
+        });
     }
     undo::observe_entry(&app.undo, &app.entry);
     v.pack_start(&app.entry, false, false, 0);
@@ -587,6 +602,10 @@ fn engine_prefix() -> String {
 }
 
 fn update_status(app: &Rc<App>) {
+    // 限时提示(大写开/关等状态变化)显示期间,常态状态行让位
+    if now_ms() < app.hint_until.get() {
+        return;
+    }
     let t: String = app.last_target.borrow().1.chars().take(30).collect();
     let (dict, keep) = {
         let c = app.cfg.borrow();
@@ -628,9 +647,44 @@ fn note_activity(app: &Rc<App>) {
     }
 }
 
+/// 状态行限时提示(2026-10-07 状态变化提示):盖住统计区 1.6s 后还原;
+/// 与停顿统计互斥 —— 提示优先,提示期内 update_status/poll_stats 都让位。
+fn status_hint(app: &Rc<App>, text: &str) {
+    app.stats_shown.set(false);
+    app.hint_until.set(now_ms() + 1600);
+    let gen = app.hint_gen.get().wrapping_add(1);
+    app.hint_gen.set(gen);
+    app.status.set_text(text);
+    let app2 = app.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(1600), move || {
+        if app2.hint_gen.get() == gen {
+            app2.hint_until.set(0);
+            update_status(&app2);
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// CapsLock 锁定态跟踪:Entry 收到的按键事件比对 LOCK_MASK 翻转即提示。
+/// 悬浮窗自带焦点(Entry 收全部按键),无需 XKB 通知;press/release 都调用,
+/// 捕获锁位在两个方向上的翻转(CapsLock press 不带新锁位,release 才带)。
+fn caps_track(app: &Rc<App>, st: gdk::ModifierType) {
+    let locked = st.contains(gdk::ModifierType::LOCK_MASK);
+    if let Some(prev) = app.caps_state.get() {
+        if prev != locked {
+            status_hint(app, if locked { "大写已开启" } else { "大写已关闭" });
+        }
+    }
+    app.caps_state.set(Some(locked));
+}
+
 /// 停顿检测(每秒): 输入停顿超过设定秒数且今日有输入时, 状态行改显
 /// 「今日已输入 N 字 · 约 M 字/分」; 重新输入由 note_activity 立即还原。
 fn poll_stats(app: &Rc<App>) {
+    // 状态提示显示期间整体让位(含内置输入法前缀刷新)
+    if now_ms() < app.hint_until.get() {
+        return;
+    }
     // 内置输入法状态联动: 前缀变化才重绘(统计提示显示期间让位)
     let prefix = engine_prefix();
     if app.engine_prefix.borrow().as_str() != prefix {
@@ -1175,6 +1229,7 @@ fn release_kb_while<T>(app: &Rc<App>, f: impl FnOnce() -> T) -> T {
 fn on_entry_key(app: &Rc<App>, ev: &gdk::EventKey) -> glib::Propagation {
     let kv = *ev.keyval(); // Key 解引用为 u32 keysym
     let st = ev.state();
+    caps_track(app, st); // 大写状态翻转 → 状态行限时提示
     // 撤销/重做(Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z; GTK3 Entry 无内建 undo):
     // 有本地历史 → 撤销框内编辑; 空缓冲且无可撤销(刚上屏/刚清空)→ 直通目标
     // 窗口撤销/重做刚上屏的文本(与空缓冲退格直通同一合同)。
@@ -1832,6 +1887,9 @@ fn create_app_for_smoke() -> Result<Rc<App>, String> {
         caret: inline::CaretTracker::spawn(),
         ptr_hint: Cell::new(false),
         engine_prefix: RefCell::new(String::new()),
+        caps_state: Cell::new(None),
+        hint_until: Cell::new(0),
+        hint_gen: Cell::new(0),
         // 冒烟路径: 指向不存在目录 → 空表,不读写真实用户数据
         pins: {
             let mut t = PinTable::new();

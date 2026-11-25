@@ -39,6 +39,12 @@ typedef struct XimServer {
        开菜单时暂存 IC,供菜单 activate 的效果流回投 */
     xcb_im_input_context_t *cand_op_ic;
     guint xcb_source_id;
+    /* 大写锁定态监视(2026-10-07 状态提示):独立 Xlib Display 订 XKB
+       StateNotify —— 英文直通态按键不经本端,只能靠 XKB 通知感知全局
+       CapsLock 翻转;事件到达即在指针旁弹"大写已开启/已关闭" */
+    void *caps_dpy;       /* Display* 不透明存储(头文件不引 Xlib) */
+    guint caps_source_id; /* GLib fd 源;0=未装/监视不可用 */
+    int caps_state;       /* -1=未知 / 0=未锁 / 1=锁定 */
 } XimServer;
 
 /* 连接 X、创建 server window 并 xcb_im_open_im;失败返回 -1(已写日志) */
@@ -60,6 +66,10 @@ void lyy_app_reload_hotkey(App *app);
 
 /* 辅助区临时提示(notice 效果:造词结果等),约 4 秒后自动清除 */
 void lyy_show_notice(App *app, const char *text);
+
+/* 状态变化提示(中英切换/大写开合/输入方案/启停):同 notice 通道,
+ * 另写 "state-toast: <text>" 日志便于 E2E 断言;候选窗未建时只记日志 */
+void lyy_state_toast(App *app, const char *text);
 
 void lyy_compose_clear_ui(App *app);
 /* 快速功能键执行(合同 §14):按 core 配置第 index 条 command 执行

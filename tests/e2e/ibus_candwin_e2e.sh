@@ -47,7 +47,8 @@ cleanup() {
     if [[ $KEEP -eq 1 ]]; then
         echo "[candwin-e2e] 现场保留:$WORK"
     else
-        rm -rf "$WORK"
+        # xdg/cache 下可能挂上 gvfs/doc 等 FUSE 子树,删不掉不该算测试失败
+        rm -rf "$WORK" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -70,6 +71,7 @@ export LYYIME_ENGINE_STATE_FILE="$WORK/engine-state.json"
 CFG_PATH="$XDG_CONFIG_HOME/lyyime/config.toml"
 mkdir -p "$XDG_CONFIG_HOME/lyyime"
 cat > "$CFG_PATH" <<'CFG'
+skin = "bamboo"
 commit_after_four = false
 commit_first_at_four = false
 commit_unique_four = false
@@ -260,6 +262,16 @@ print(st.locked_mods & 2)
 PY
 
 caps_mask() { python3 "$CAPS_PY" 2>/dev/null || echo "ERR"; }
+
+# 状态变化光标提示断言(= 引擎候选窗 aux label;提示约 4s 自消,限时轮询)
+wait_toast() {
+    local text="$1"
+    for _ in $(seq 1 40); do
+        atspi_find "$text" "label" >/dev/null && return 0
+        sleep 0.1
+    done
+    fail "状态提示未出现:$text"
+}
 # 原生单键事件(T12b 前提):xdotool key 会为凑修饰位补发其它修饰键
 # (实测 Shift_R 先带出 Shift_L 按下),破坏干净单击;这里直发 XTest。
 key_event() { python3 "$CAPS_PY" --shift "$1" "${2:-click}"; }
@@ -482,12 +494,84 @@ ENGINE_PID="$(pgrep -f "$ENGINE_HOME/ibus-engine-lyyime" | head -1 || true)"
 sleep 0.6
 refocus_client
 
-echo "== [T1] nihao → 自有候选窗可见,原生 lookup 缺席 =="
-xdotool type --delay 90 "nihao"; sleep 0.8
+TRACE="$ART/origin-trace.txt"
+note_origin() { echo "$1 X=$2 Y=$3" >> "$TRACE"; }
+
+echo "== [T1] 同组合原点锚定:逐键 nihao 不漂移,Esc 隐藏,移窗后新组合重锚 =="
+xdotool type --delay 90 "n"; sleep 0.5
 wait_candwin
+OX="$X"; OY="$Y"; note_origin "n(首键锚定)" "$X" "$Y"
+for ch in i h a o; do
+    xdotool type --delay 90 "$ch"; sleep 0.4
+    wait_candwin
+    note_origin "+$ch" "$X" "$Y"
+    [[ "$X" == "$OX" && "$Y" == "$OY" ]] \
+        || fail "组合内候选窗漂移:敲 $ch 后原点 $X,$Y ≠ 首键锚点 $OX,$OY"
+done
 other_or_window >/dev/null && { shot "native-lookup"; fail "原生 ibus lookup 与自有候选窗并存"; }
+AXY="$(atspi_find "nihao" "label" contains)" || fail "AT-SPI 定位编码行失败"
+WXY="$(atspi_find "你好" "label")" || fail "AT-SPI 定位候选行失败"
+read -r AX AY AW AH <<<"$AXY"
+read -r WX WY WW WH <<<"$WXY"
+(( AY + AH / 2 <= WY - WH / 2 )) || fail "编码与候选未分为上下两行"
+# 预编辑行(AT-SPI 报中心坐标)相对弹窗原点的安全内距:左右 ≥12,上 ≥6
+(( AX - AW / 2 >= X + 12 )) || fail "编码行左内距不足:左边 $((AX - AW / 2)) < 窗左+12 $((X + 12))"
+(( AY - AH / 2 >= Y + 6 )) || fail "编码行上内距不足:上边 $((AY - AH / 2)) < 窗顶+6 $((Y + 6))"
+(( AX + (AW + 1) / 2 <= X + WIDTH - 12 )) \
+    || fail "编码行右内距不足:右边 $((AX + (AW + 1) / 2)) > 窗右-12 $((X + WIDTH - 12))"
+note_origin "T1:编码行内距 left=$((AX - AW / 2 - X)) top=$((AY - AH / 2 - Y)) right=$((X + WIDTH - AX - (AW + 1) / 2))" "$X" "$Y"
 shot "t1-candwin"
-echo "PASS T1:lyyime-candwin 可见(宽=$WIDTH 高=$HEIGHT),原生 lookup 缺席"
+B0="$(buf_text)"
+xdotool key BackSpace; sleep 0.4
+wait_candwin
+note_origin "BackSpace→niha" "$X" "$Y"
+[[ "$X" == "$OX" && "$Y" == "$OY" ]] || fail "BackSpace 后原点漂移 $X,$Y ≠ $OX,$OY"
+xdotool type --delay 90 "o"; sleep 0.4
+wait_candwin
+note_origin "重敲o→nihao" "$X" "$Y"
+[[ "$X" == "$OX" && "$Y" == "$OY" ]] || fail "重敲 o 后原点漂移 $X,$Y ≠ $OX,$OY"
+[[ "$(buf_text)" == "$B0" ]] || fail "退格/重敲期间产生上屏"
+xdotool key Escape; sleep 0.4
+wait_no_candwin
+CWID_T1="$(xdotool search --name '^lyyime-e2e-client$' | head -1 || true)"
+[[ -n "$CWID_T1" ]] || fail "T1 未找到客户端窗口"
+CINFO="$(xwininfo -id "$CWID_T1")"
+CX="$(awk '/Absolute upper-left X/{print $NF}' <<<"$CINFO")"
+CY="$(awk '/Absolute upper-left Y/{print $NF}' <<<"$CINFO")"
+CW="$(awk '/Width:/{print $NF}' <<<"$CINFO")"
+CH="$(awk '/Height:/{print $NF}' <<<"$CINFO")"
+[[ -n "$CX" && -n "$CY" && -n "$CW" && -n "$CH" ]] || fail "T1 客户端窗口几何读取失败"
+xdotool windowmove "$CWID_T1" "$((CX + 120))" "$CY"
+# 纯 windowmove 下 GtkEntry 不重算光标(widget 内坐标不变,immodule 去重)。
+# 借第二客户端夺取再交还焦点:focus_in 时 immodule 以移动后的窗口原点
+# 重报 SetCursorLocation,下一组合锚点应落在 +120 的新光标处。
+DBUS_SESSION_BUS_ADDRESS="$SESS_BUS" "$CLIENT_BIN" "$WORK/buffer-t1b.txt" 8 >>"$WORK/client.log" 2>&1 &
+CLIENT2_PID=$!
+sleep 1.2
+kill "$CLIENT2_PID" 2>/dev/null || true; wait "$CLIENT2_PID" 2>/dev/null || true; CLIENT2_PID=""
+sleep 0.4
+xdotool windowfocus "$CWID_T1"; sleep 0.6
+{
+  echo "client-moved-to: $(xwininfo -id "$CWID_T1" | awk '/Absolute upper-left X/{x=$NF}/Absolute upper-left Y/{y=$NF}END{print x","y}')"
+  xdotool getmouselocation --shell 2>/dev/null | tr '\n' ' '; echo
+} >> "$TRACE"
+xdotool type --delay 90 "n"; sleep 0.5
+wait_candwin
+note_origin "移窗+120后n" "$X" "$Y"
+[[ "$X" == "$((OX + 120))" && "$Y" == "$OY" ]] \
+    || fail "移窗 +120 后新组合原点应重锚 $((OX + 120)),$OY 实测 $X,$Y"
+NX="$X"; NY="$Y"
+xdotool type --delay 90 "ihao"; sleep 0.6
+wait_candwin
+note_origin "移窗后nihao" "$X" "$Y"
+[[ "$X" == "$NX" && "$Y" == "$NY" ]] || fail "移窗后同组合原点漂移 $X,$Y ≠ $NX,$NY"
+xdotool windowmove "$CWID_T1" "$CX" "$CY"
+sleep 0.4
+wait_candwin
+note_origin "组合中窗口移回" "$X" "$Y"
+[[ "$X" == "$NX" && "$Y" == "$NY" ]] \
+    || fail "组合中移动客户端窗(光标更新)原点应不变,实测 $X,$Y ≠ $NX,$NY"
+echo "PASS T1:同组合原点锚定(逐键/退格重敲/组合中移窗),Esc 隐藏,移窗后新组合重锚 +120"
 
 echo "== [T2] 词行右键 → 纯词菜单(AT-SPI 存在+缺失,SHOWING 过滤) =="
 atspi_rclick "你好" "label" || fail "AT-SPI 定位候选词 你好 失败"
@@ -680,16 +764,23 @@ xdotool key space; sleep 0.5
 wait_appended "$B1" "你好"
 echo "PASS T8:固定首位落盘 pinned.tsv,组合流连续精确追加 你好"
 
-echo "== [T9] ‹ › 翻页箭头(accessible 名命中) =="
+echo "== [T9] ‹ › 翻页箭头(accessible 名命中),翻页原点保持 =="
 xdotool type --delay 90 "yi"; sleep 0.8
 wait_candwin
+PX="$X"; PY="$Y"; note_origin "T9:yi第1页" "$X" "$Y"
 atspi_click "候选下一页" "push button" || fail "AT-SPI 定位 候选下一页 失败"
 sleep 0.6
 wait_log '候选窗面板翻页:下一页 → 第 2/'
+wait_candwin
+note_origin "T9:第2页" "$X" "$Y"
+[[ "$X" == "$PX" && "$Y" == "$PY" ]] || fail "翻下一页后原点漂移 $X,$Y ≠ $PX,$PY"
 atspi_click "候选上一页" "push button" || fail "AT-SPI 定位 候选上一页 失败"
 sleep 0.6
 wait_log '候选窗面板翻页:上一页 → 第 1/'
-echo "PASS T9:候选条 ‹ › 按钮翻页"
+wait_candwin
+note_origin "T9:回第1页" "$X" "$Y"
+[[ "$X" == "$PX" && "$Y" == "$PY" ]] || fail "回上一页后原点漂移 $X,$Y ≠ $PX,$PY"
+echo "PASS T9:候选条 ‹ › 按钮翻页,原点锚定不变"
 
 echo "== [T10] 通用菜单切回混输 → 数字 0 越界不上屏 + 数字 2 精确追加 稻 =="
 xdotool key Escape; sleep 0.3
@@ -772,13 +863,16 @@ B0="$(buf_text)"
 UNLK_N="$(grep -c 'CapsLock 已解除' "$IBUS_LOG" 2>/dev/null || true)"
 xdotool key Caps_Lock; sleep 0.5
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 后锁存位非 2($(caps_mask))"
+wait_toast "大写已开启" # 状态提示:大写开启(光标附近 aux)
 # 中→英:锁存必须保持(该方向从不动锁)
 key_event Shift_L; sleep 0.8
 [[ "$(caps_mask)" == "2" ]] || fail "中→英 单击误清 CapsLock"
+wait_toast "英文" # 状态提示:Shift 单击切英文
 # 英→中(Shift_R 变体):release 确认 → 宿主经 XkbLockModifiers 解锁
 key_event Shift_R; sleep 0.6
 wait_log_count 'CapsLock 已解除' "$((${UNLK_N:-0} + 1))"
 wait_caps_mask 0
+wait_toast "中文(已关闭大写)" # 状态提示:合并文案(回中文+清大写)
 # 解锁后立即打 fixture 中文:nihao+space 精确追加 你好
 xdotool type --delay 90 "nihao"; sleep 0.8
 xdotool key space; sleep 0.5
@@ -786,10 +880,12 @@ wait_appended "$B0" "你好"
 # Shift_L 变体同合同:锁存态中→英(保持)→ 英→中(解除)
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 重开后锁存位非 2"
+wait_toast "大写已开启"
 key_event Shift_L; sleep 0.8
 [[ "$(caps_mask)" == "2" ]] || fail "Shift_L 中→英 误清 CapsLock"
 key_event Shift_L; sleep 0.6
 wait_caps_mask 0
+wait_toast "中文(已关闭大写)"
 # 组合键负向:英文态锁存 → Shift+字母 与 Ctrl+Shift 均不切换不解锁
 xdotool key Caps_Lock; sleep 0.4
 [[ "$(caps_mask)" == "2" ]] || fail "Caps_Lock 第三次开后锁存位非 2"

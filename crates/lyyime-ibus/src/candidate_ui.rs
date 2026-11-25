@@ -257,6 +257,8 @@ struct GtkUi {
     cur_owner: Option<String>,
     cur_gen: u64,
     cursor: Option<(String, i32, i32, i32, i32)>,
+    // 当前可见组合锚定的左上角(首次钳制结果);跨 Show/Cursor 帧不变
+    origin: Option<(i32, i32)>,
     menu: Option<MenuCtx>,
     pending_trigger: Option<gtk::gdk::EventButton>,
     compose: String,
@@ -321,15 +323,24 @@ impl GtkUi {
         );
         win.style_context().add_class("lyy-frame");
 
-        let outer = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        outer.style_context().add_class("lyy-rows");
+        // Keep the input code above the horizontal candidate strip.
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 2);
         win.add(&outer);
 
         let aux = gtk::Label::new(None);
         aux.style_context().add_class("lyy-preedit");
         aux.set_xalign(0.0);
         aux.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        // 预编辑行与圆角弹窗边框保持安全内距(主题 padding 不可靠)
+        aux.set_margin_start(12);
+        aux.set_margin_end(12);
+        aux.set_margin_top(6);
+        aux.set_margin_bottom(2);
         outer.pack_start(&aux, false, false, 0);
+
+        let candidates = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        candidates.style_context().add_class("lyy-rows");
+        outer.pack_start(&candidates, false, false, 0);
 
         let mut cells = Vec::with_capacity(MAX_ROWS);
         for i in 0..MAX_ROWS {
@@ -349,7 +360,7 @@ impl GtkUi {
             bx.pack_start(&word, false, false, 0);
             bx.pack_start(&comment, false, false, 0);
             bx.hide();
-            outer.pack_start(&bx, false, false, 0);
+            candidates.pack_start(&bx, false, false, 0);
             cells.push(CellUi {
                 bx,
                 num,
@@ -364,7 +375,7 @@ impl GtkUi {
         if let Some(acc) = zone.accessible() {
             acc.set_name("候选系统区");
         }
-        outer.pack_start(&zone, true, true, 0);
+        candidates.pack_start(&zone, true, true, 0);
 
         let prev = gtk::Button::with_label("‹");
         prev.set_relief(gtk::ReliefStyle::None);
@@ -372,17 +383,17 @@ impl GtkUi {
         if let Some(acc) = prev.accessible() {
             acc.set_name("候选上一页");
         }
-        outer.pack_start(&prev, false, false, 0);
+        candidates.pack_start(&prev, false, false, 0);
         let next = gtk::Button::with_label("›");
         next.set_relief(gtk::ReliefStyle::None);
         next.set_can_focus(false);
         if let Some(acc) = next.accessible() {
             acc.set_name("候选下一页");
         }
-        outer.pack_start(&next, false, false, 0);
+        candidates.pack_start(&next, false, false, 0);
         let page = gtk::Label::new(None);
         page.style_context().add_class("lyy-page");
-        outer.pack_start(&page, false, false, 0);
+        candidates.pack_start(&page, false, false, 0);
         let gear = gtk::Button::new();
         gear.set_relief(gtk::ReliefStyle::None);
         gear.set_can_focus(false);
@@ -394,7 +405,7 @@ impl GtkUi {
         if let Some(acc) = gear.accessible() {
             acc.set_name("打开设置");
         }
-        outer.pack_start(&gear, false, false, 0);
+        candidates.pack_start(&gear, false, false, 0);
 
         let (skin, font_size) = crate::ui_style();
         let mut ui = GtkUi {
@@ -410,6 +421,7 @@ impl GtkUi {
             cur_owner: None,
             cur_gen: 0,
             cursor: None,
+            origin: None,
             menu: None,
             pending_trigger: None,
             compose: String::new(),
@@ -604,6 +616,12 @@ impl GtkUi {
                 if self.cur_owner.as_deref() == Some(owner.as_str()) && gen <= self.cur_gen {
                     return;
                 }
+                // 换 owner 或纯通知态起新组合(compose 空→非空):重新锚定原点
+                if self.cur_owner.as_deref() != Some(owner.as_str())
+                    || (self.compose.is_empty() && !aux.is_empty())
+                {
+                    self.origin = None;
+                }
                 self.cur_owner = Some(owner);
                 self.cur_gen = gen;
                 self.close_menu();
@@ -627,6 +645,7 @@ impl GtkUi {
                     return;
                 }
                 self.cur_owner = None;
+                self.origin = None;
                 self.close_menu();
                 self.pending_trigger = None;
                 self.win.hide();
@@ -693,6 +712,7 @@ impl GtkUi {
                         && self.pending_trigger.is_none()
                     {
                         self.cur_owner = None;
+                        self.origin = None;
                         self.notice.clear();
                         self.aux.set_text("");
                         self.win.hide();
@@ -710,6 +730,9 @@ impl GtkUi {
                     return;
                 }
                 self.notice = text;
+                if self.cur_owner.as_deref() != Some(owner.as_str()) {
+                    self.origin = None;
+                }
                 self.cur_owner = Some(owner);
                 self.cur_gen = gen;
                 self.compose.clear();
@@ -867,6 +890,12 @@ impl GtkUi {
     }
 
     fn reposition(&mut self) {
+        // 同一可见组合锚定首次钳制后的原点;重复 Show、光标更新、翻页、
+        // 内容宽度变化均回写原坐标,避免跟随行内预编辑光标右移/重居中
+        if let Some((x, y)) = self.origin {
+            self.win.move_(x, y);
+            return;
+        }
         let caret = match &self.cursor {
             Some((o, cx, cy, w, h)) if Some(o) == self.cur_owner.as_ref() => {
                 Some((*cx, *cy, *w, *h))
@@ -902,10 +931,12 @@ impl GtkUi {
                 }
                 y = y.clamp(wa.y(), (wa.y() + wa.height() - nat.height).max(wa.y()));
                 x = x.clamp(wa.x(), wa.x() + wa.width().max(nat.width) - nat.width);
+                self.origin = Some((x, y));
                 self.win.move_(x, y);
                 return;
             }
         }
+        self.origin = Some((bx, by));
         self.win.move_(bx, by);
     }
 }

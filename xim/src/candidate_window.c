@@ -357,7 +357,12 @@ static gboolean on_win_pressed(GtkWidget *win, GdkEventButton *ev,
             }
         }
     }
+    /* 行命中:行是 halign=START 的无窗 GtkBox,行间有 frame spacing=2px
+     * 的死区——严格矩形命中间隙点击会落到 idx<0 弹出通用菜单,体验突兀。
+     * 相邻行以矩形中缝平分归属,消掉死区;x 以最宽行右缘为界 */
     int idx = -1;
+    int rid[LYY_MAX_ROWS], rys[LYY_MAX_ROWS], rhs[LYY_MAX_ROWS];
+    int row_left = 0, row_right = 0, nr = 0;
     for (int i = 0; i < cw->row_count; i++) {
         int rx = 0, ry = 0;
         if (!gtk_widget_translate_coordinates(cw->rows[i], win, 0, 0, &rx,
@@ -365,9 +370,22 @@ static gboolean on_win_pressed(GtkWidget *win, GdkEventButton *ev,
             continue;
         GtkAllocation a;
         gtk_widget_get_allocation(cw->rows[i], &a);
-        if (ev->x >= rx && ev->x < rx + a.width && ev->y >= ry &&
-            ev->y < ry + a.height) {
-            idx = i;
+        rid[nr] = i;
+        rys[nr] = ry;
+        rhs[nr] = a.height;
+        if (nr == 0 || rx < row_left)
+            row_left = rx;
+        if (rx + a.width > row_right)
+            row_right = rx + a.width;
+        nr++;
+    }
+    for (int i = 0; i < nr; i++) {
+        int top = i == 0 ? rys[i] : (rys[i - 1] + rhs[i - 1] + rys[i]) / 2;
+        int bot = i == nr - 1 ? rys[i] + rhs[i]
+                              : (rys[i] + rhs[i] + rys[i + 1]) / 2;
+        if (ev->x >= row_left && ev->x < row_right && ev->y >= top &&
+            ev->y < bot) {
+            idx = rid[i];
             break;
         }
     }

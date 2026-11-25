@@ -281,3 +281,34 @@ XIM(The X Input Method Protocol)是框架无关中文输入的 30 年正统路�
   + dbus-run-session 独立总线 + 临时 HOME/XDG_* + 真 xfsettingsd,
   xdotool 按键实弹拉起/取消覆盖窗;另含别名占用、xfwm4 占用、总线
   缺失、`--remove-shot-hotkey` 只摘自有绑定等用例。
+
+## 9. 状态变化光标提示(2026-10-07,需求:输入状态变化在光标附近即时反馈)
+
+- **需求**:中英切换、CapsLock 开/关、回中文连带清大写、输入方案
+  (纯拼音↔五笔/拼音混输)切换时,在光标附近弹短暂中文提示;
+  对齐 ibus-libpinyin/fcitx 的 toast 惯例。
+- **统一通道**:复用既有 notice 辅助区/候选条通道,不新建弹窗:
+  - Mode A:`Host::on_notice` → 自建候选窗 aux 标签(贴 caret,4s
+    `schedule_notice_clear` 自消;IBus 原生面板兜底走
+    `UpdateAuxiliaryText`)。
+  - Mode B:`lyy_state_toast` → `lyy_show_notice`(候选窗 preedit 行,
+    贴指针,4s `notice_timeout` 自消,且留 `state-toast: <text>`
+    日志供 E2E 断言)。
+  - Mode C:悬浮窗无"光标附近"外窗可用 → 状态行限时提示(1.6s
+    `status_hint`,与停顿统计互斥,到期还原)。
+- **触发点**:Mode A/B 的中英提示挂在模式切换的唯一出口
+  (`switch_mode`/`lyy_xim_set_trigger`+`TRIGGER_NOTIFY`/`SET_IC_FOCUS`),
+  core `Effect::ModeChanged`(空缓冲回车切英文)经 dispatch 同步提示;
+  输入方案变化在 `set_pinyin_only`/设置保存生效时提示。
+- **CapsLock 感知**(关键分歧):Mode A 逐按键事件比对 MASK_LOCK 位
+  (press 带旧锁位/release 带新锁位,天然适配 ibus 时序);Mode B 在
+  英文直通态按键根本不经本端,只能靠 XKB StateNotify —— 常驻独立
+  Xlib Display 订 `XkbStateNotify`(与一次性解锁连接分离),GLib fd
+  源并入主循环;
+  Mode C 直接比对 Entry 事件的 `LOCK_MASK`。
+- **抑制窗**:英→中 Shift 单击请求 `XkbLockModifiers` 异步解锁后,
+  落地前残留的 LockMask 事件不再补"大写已开启"误报 —— Mode A 用
+  `caps_suppress_until`(800ms 记账不提示),Mode B 直接用事件锁位
+  决定是否发"中文(已关闭大写)"合并提示。
+- **文案**:英文 / 中文 / 中文(已关闭大写)/ 大写已开启 /
+  大写已关闭 / 已切换:纯拼音 / 已切换:五笔/拼音混输 / 输入法已停用。

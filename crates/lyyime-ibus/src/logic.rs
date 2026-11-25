@@ -131,6 +131,14 @@ pub struct EngineLogic {
     /// Ctrl+. 标点切换:press 已吞 → 配对 release 一并吞掉并清锁存;
     /// 兼作按住连发的去抖(按住不放只翻转一次)。会话级,不写盘。
     punct_key_down: bool,
+    /// CapsLock 锁定态跟踪(状态提示):逐事件比对 MASK_LOCK 位,
+    /// 翻转即提示"大写已开启/已关闭";None=尚未观测(首次只记录不提示)。
+    /// 不依赖 Caps_Lock 键事件本身 —— press 携带翻转前状态、release/下个
+    /// 事件携带翻转后状态,天然适配 ibus 不同事件时序。
+    caps_state: Option<bool>,
+    /// 请求宿主异步解锁 CapsLock 后的短抑制窗:窗口内锁位翻转只记账
+    /// 不提示 —— 防止解锁落地前残留 LockMask 事件误报"大写已开启"。
+    caps_suppress_until: Option<std::time::Instant>,
     pub ui_gen: u64,
     pub ui_focused: bool,
     pub ui_enabled: bool,
@@ -174,6 +182,8 @@ impl EngineLogic {
             mt_eat_release: None,
             ai_pred_saved: None,
             punct_key_down: false,
+            caps_state: None,
+            caps_suppress_until: None,
             ui_gen: 0,
             ui_focused: false,
             ui_enabled: false,
@@ -295,6 +305,12 @@ impl EngineLogic {
             self.mt_clear_hint(host);
             host.on_preedit(None);
             host.on_candidates(&[], 0, 0, "");
+            // 输入方案切换的状态提示(光标附近;与托盘/设置菜单走同一通道)
+            host.on_notice(if on {
+                "已切换:纯拼音"
+            } else {
+                "已切换:五笔/拼音混输"
+            });
         }
         changed
     }
@@ -332,6 +348,7 @@ impl EngineLogic {
             // 密码框全放行(借鉴 ibus-table 的防护)
             return false;
         }
+        self.track_caps(host, state);
         if state & MASK_RELEASE != 0 {
             return self.on_release(host, keyval, state);
         }
@@ -542,9 +559,16 @@ impl EngineLogic {
             if pending == Some(keyval) {
                 // 按下后无其它键 → 判定单击:切换中英(合同 §6)
                 self.switch_mode(host);
-                // 英→中确认且事件 state 仍带 LockMask:通知宿主解锁
+                // 英→中确认且事件 state 仍带 LockMask:通知宿主解锁,
+                // 合并提示"中文(已关闭大写)"盖过 switch_mode 刚贴的"中文"
                 if self.mode == 0 && state & MASK_LOCK != 0 {
                     host.on_caps_lock_off();
+                    host.on_notice("中文(已关闭大写)");
+                    // 宿主异步清锁:短抑制窗内锁位翻转只记账不提示,
+                    // 防解锁落地前残留 LockMask 事件误报"大写已开启"
+                    self.caps_suppress_until = Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(800),
+                    );
                 }
                 return true;
             }
@@ -797,6 +821,8 @@ impl EngineLogic {
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
+                    // 状态提示:模式变化贴光标(如空缓冲回车切英文)
+                    host.on_notice(if self.mode == 1 { "英文" } else { "中文" });
                 }
             }
         }
@@ -897,6 +923,8 @@ impl EngineLogic {
                 Effect::ModeChanged(m) => {
                     self.mode = m as u8;
                     host.on_mode_changed(self.mode);
+                    // 状态提示:模式变化贴光标(如空缓冲回车切英文)
+                    host.on_notice(if self.mode == 1 { "英文" } else { "中文" });
                     // 模式切换=菜单触发硬边界:尾串/待执行/命中提示全清
                     self.menu_trigger.reset();
                     self.mt_clear_hint(host);
@@ -941,6 +969,27 @@ impl EngineLogic {
             self.mode = e.toggle_mode() as u8;
         }
         host.on_mode_changed(self.mode);
+        // 状态提示:中英切换在光标附近给出即时反馈(辅助区/候选条通道)
+        host.on_notice(if self.mode == 1 { "英文" } else { "中文" });
+    }
+
+    /// CapsLock 锁定态跟踪:按键事件携带的 MASK_LOCK 位翻转时,在光标
+    /// 附近弹"大写已开启/已关闭"提示(覆盖英文直通态——彼时字母仍
+    /// 经本函数直通)。首次观测只记录基线,不把开机已有锁定误报为变化。
+    fn track_caps(&mut self, host: &mut dyn Host, state: u32) {
+        let locked = state & MASK_LOCK != 0;
+        if let Some(prev) = self.caps_state {
+            if prev != locked
+                && !self
+                    .caps_suppress_until
+                    .is_some_and(|until| std::time::Instant::now() < until)
+            {
+                // notice 覆盖辅助区 → 菜单提示所有权解除(与 dispatch 同语义)
+                self.menu_hint_shown = false;
+                host.on_notice(if locked { "大写已开启" } else { "大写已关闭" });
+            }
+        }
+        self.caps_state = Some(locked);
     }
 
     pub fn reset_session(&mut self, host: &mut dyn Host) {
@@ -1770,6 +1819,111 @@ mod tests {
         l.process_key_event(&mut h, SHIFT_L, MASK_CTRL | MASK_LOCK | MASK_RELEASE);
         assert_eq!(l.mode, 1, "Ctrl+Shift 不应切换模式");
         assert!(!h.events.borrow().iter().any(|e| e == "caps-off"));
+    }
+
+    // ---- 状态变化光标提示(2026-10-07 需求:模式/大写/输入方案切换) ----
+
+    #[test]
+    fn mode_switch_shows_cursor_notice() {
+        // switch_mode(Shift 单击/托盘菜单共用)尾发中英提示
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:英文"));
+        l.switch_mode(&mut h);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:中文"));
+    }
+
+    #[test]
+    fn shift_single_click_toasts_each_switch() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, SHIFT_L, 0);
+        l.process_key_event(&mut h, SHIFT_L, MASK_RELEASE);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:英文"));
+        l.process_key_event(&mut h, SHIFT_L, 0);
+        l.process_key_event(&mut h, SHIFT_L, MASK_RELEASE);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:中文"));
+    }
+
+    #[test]
+    fn capslock_transitions_show_toast_once() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        // 首个事件只建立基线,不把既有锁态误报为"开启"
+        l.process_key_event(&mut h, 'a' as u32, 0);
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("notice:大写")));
+        // 进入大写态:恰好一条"大写已开启",持续大写态按键不重复
+        l.process_key_event(&mut h, 0x41, MASK_LOCK);
+        l.process_key_event(&mut h, 0x42, MASK_LOCK);
+        assert_eq!(
+            h.events
+                .borrow()
+                .iter()
+                .filter(|e| *e == "notice:大写已开启")
+                .count(),
+            1
+        );
+        // 锁解除:"大写已关闭"
+        l.process_key_event(&mut h, 'a' as u32, 0);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:大写已关闭"));
+    }
+
+    #[test]
+    fn capslock_toast_works_in_english_passthrough() {
+        // 英文直通态字母不经组词,但 CapsLock 变化仍应提示
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h); // → 英文
+        h.events.borrow_mut().clear();
+        l.process_key_event(&mut h, 'a' as u32, 0); // 先建立未锁基线
+        l.process_key_event(&mut h, 'a' as u32, MASK_LOCK);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:大写已开启"));
+    }
+
+    #[test]
+    fn capslock_first_observation_locked_no_toast() {
+        // 引擎启动时系统已锁大写:首个事件建立基线,不提示
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.process_key_event(&mut h, 'a' as u32, MASK_LOCK);
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("notice:大写")));
+    }
+
+    #[test]
+    fn shift_click_unlock_shows_combined_toast_without_dup() {
+        // 英文态锁存 → Shift 单击回中文:合并提示"中文(已关闭大写)",
+        // 且抑制窗内残留 LockMask 事件不再补"大写已开启/关闭"
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        l.switch_mode(&mut h); // → 英文
+        h.events.borrow_mut().clear();
+        l.process_key_event(&mut h, SHIFT_L, MASK_LOCK);
+        l.process_key_event(&mut h, SHIFT_L, MASK_LOCK | MASK_RELEASE);
+        assert!(h.events.borrow().iter().any(|e| e == "notice:中文(已关闭大写)"));
+        assert!(h.events.borrow().iter().any(|e| e == "caps-off"));
+        // 解锁落地前的残留锁位事件:静默记账,不重复提示
+        l.process_key_event(&mut h, 'a' as u32, MASK_LOCK);
+        l.process_key_event(&mut h, 'a' as u32, 0);
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("notice:大写")));
+    }
+
+    #[test]
+    fn pinyin_only_toggle_shows_scheme_notice() {
+        let (_d, mut l) = logic_with_ai(None);
+        let mut h = Mock::default();
+        assert!(l.set_pinyin_only(&mut h, true));
+        assert!(h.events.borrow().iter().any(|e| e == "notice:已切换:纯拼音"));
+        assert!(l.set_pinyin_only(&mut h, false));
+        assert!(h
+            .events
+            .borrow()
+            .iter()
+            .any(|e| e == "notice:已切换:五笔/拼音混输"));
+        // 重复同值不重复提示
+        h.events.borrow_mut().clear();
+        assert!(!l.set_pinyin_only(&mut h, false));
+        assert!(!h.events.borrow().iter().any(|e| e.starts_with("notice:")));
     }
 
     #[test]

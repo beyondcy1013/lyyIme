@@ -132,6 +132,17 @@ void lyy_show_notice(App *app, const char *text)
     app->notice_timer_id = g_timeout_add_seconds(4, notice_timeout, app);
 }
 
+/* 状态变化提示(2026-10-07:中英切换/大写开合/输入方案切换):复用
+ * notice 候选条通道贴指针展示 4s 自消;state-toast 独立日志前缀便于
+ * E2E 断言与排查 */
+void lyy_state_toast(App *app, const char *text)
+{
+    lyy_log(&app->log, "state-toast: %s", text);
+    if (!app->candwin.win)
+        return; /* 启动竞态:候选窗未建只记日志,绝不崩 */
+    lyy_show_notice(app, text);
+}
+
 /* ---- hint 词组效率提示(合同 §6):与 notice 同候选条通道,但**不带定时**
  * ——保留到下一次输入产生新效果流时由后续 preedit/cands/清除效果替换或隐藏。*/
 static void show_hint(App *app, const char *text)
@@ -751,7 +762,10 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
                 /* release 到达即确认单击:关防护窗并解锁(press 不解锁,
                  * 窗内 Shift+字母回退不能动锁);该 release 已消费,不回放 */
                 st->combo_guard = 0;
-                caps_lock_off(app);
+                int had_lock = (ev->state & XCB_MOD_MASK_LOCK) != 0;
+                if (caps_lock_off(app) && had_lock)
+                    /* 合并提示:切中文同时清了大写(盖过 trigger on 的"中文") */
+                    lyy_state_toast(app, "中文(已关闭大写)");
                 return;
             }
             xcb_im_forward_event(xs->im, ic, ev);
@@ -783,8 +797,12 @@ static void handle_key_event(App *app, xcb_im_input_context_t *ic,
             st->combo_guard = 0;
             /* 不转发 release 的客户端兜底:到期即确认单击并解锁;
              * 成功后清掉本事件 state 的陈旧 LockMask,避免 Caps 直通误判 */
-            if (caps_lock_off(app))
+            int had_lock = (ev->state & XCB_MOD_MASK_LOCK) != 0;
+            if (caps_lock_off(app)) {
                 ev->state = (uint16_t)(ev->state & ~XCB_MOD_MASK_LOCK);
+                if (had_lock)
+                    lyy_state_toast(app, "中文(已关闭大写)");
+            }
         } else if (is_press && (ev->state & XCB_MOD_MASK_SHIFT)) {
             st->combo_guard = 0;
             lyy_xim_set_trigger(app, 0);
@@ -1043,8 +1061,10 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
             if (!resume_menu) {
                 /* 新焦点:进入中文态(trigger on)并复位 core 缓冲(§6 reset) */
                 app->core.lyyime_reset(app->engine);
-                if (app->core.lyyime_mode(app->engine) != 0)
+                if (app->core.lyyime_mode(app->engine) != 0) {
                     app->core.lyyime_toggle_mode(app->engine);
+                    lyy_state_toast(app, "中文");
+                }
                 xcb_im_preedit_start(im, ic);
                 lyy_log(&app->log, "输入上下文获得焦点 → trigger on(中文态)");
             }
@@ -1084,8 +1104,10 @@ static void im_callback(xcb_im_t *im, xcb_im_client_t *client,
         if (nf->flag == 0) {
             /* on:off(英文)态收到 Shift 按下 → 中文态 + 组合键防护窗 */
             if (lyy_core_ready(app)) {
-                if (app->core.lyyime_mode(app->engine) != 0)
+                if (app->core.lyyime_mode(app->engine) != 0) {
                     app->core.lyyime_toggle_mode(app->engine);
+                    lyy_state_toast(app, "中文");
+                }
                 xcb_im_preedit_start(im, ic);
                 if (st) {
                     st->combo_guard = 1;
@@ -1142,6 +1164,87 @@ static gboolean on_xcb_ready(gint fd, GIOCondition cond, gpointer data)
     return (cond & (G_IO_ERR | G_IO_HUP)) ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
 }
 
+/* ---- CapsLock 锁定态监视(XKB StateNotify;2026-10-07 状态提示) ---- */
+static int g_caps_xkb_evbase = -1; /* XKB 扩展事件基址(查询失败=-1) */
+
+static gboolean caps_fd_ready(gint fd, GIOCondition cond, gpointer data)
+{
+    App *app = data;
+    Display *d = (Display *)app->xim.caps_dpy;
+    (void)fd;
+    if (!d)
+        return G_SOURCE_REMOVE;
+    if (cond & (G_IO_ERR | G_IO_HUP)) {
+        XCloseDisplay(d);
+        app->xim.caps_dpy = NULL;
+        app->xim.caps_source_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    while (XPending(d) > 0) {
+        XEvent ev;
+        XNextEvent(d, &ev);
+        /* XKB 扩展事件 type=事件基址(具体类别在 xkb_type;
+           实测 ev.xany.type==evbase,xkb_type==XkbStateNotify) */
+        if (g_caps_xkb_evbase < 0 || ev.xany.type != g_caps_xkb_evbase)
+            continue;
+        XkbEvent *kev = (XkbEvent *)&ev;
+        if (kev->any.xkb_type != XkbStateNotify)
+            continue;
+        int locked = (kev->state.locked_mods & LockMask) != 0;
+        /* 首次只建立基线(不把启动前已锁状态误报为"开启");
+           翻转即在指针旁提示 */
+        if (app->xim.caps_state != -1 && app->xim.caps_state != locked)
+            lyy_state_toast(app, locked ? "大写已开启" : "大写已关闭");
+        app->xim.caps_state = locked;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void caps_watch_init(XimServer *xs, App *app)
+{
+    xs->caps_state = -1;
+    Display *d = XOpenDisplay(NULL);
+    if (!d) {
+        lyy_log(&app->log, "WARN 大写状态提示不可用:无法打开 DISPLAY");
+        return;
+    }
+    int opcode = 0, ev_base = 0, err_base = 0, maj = 0, min = 0;
+    if (!XkbQueryExtension(d, &opcode, &ev_base, &err_base, &maj, &min)) {
+        lyy_log(&app->log, "WARN XKB 扩展不可用,大写状态提示停用");
+        XCloseDisplay(d);
+        return;
+    }
+    g_caps_xkb_evbase = ev_base;
+    if (!XkbSelectEvents(d, XkbUseCoreKbd, XkbStateNotifyMask,
+                         XkbStateNotifyMask)) {
+        lyy_log(&app->log, "WARN XkbSelectEvents 失败,大写状态提示停用");
+        XCloseDisplay(d);
+        return;
+    }
+    XkbStateRec rec;
+    if (XkbGetState(d, XkbUseCoreKbd, &rec) == Success)
+        xs->caps_state = (rec.locked_mods & LockMask) != 0;
+    XSync(d, False);
+    xs->caps_dpy = d;
+    xs->caps_source_id =
+        g_unix_fd_add(ConnectionNumber(d), G_IO_IN | G_IO_ERR | G_IO_HUP,
+                      caps_fd_ready, app);
+    lyy_log(&app->log, "CapsLock 监视已启动(XKB StateNotify,初态=%d)",
+            xs->caps_state);
+}
+
+static void caps_watch_shutdown(XimServer *xs)
+{
+    if (xs->caps_source_id) {
+        g_source_remove(xs->caps_source_id);
+        xs->caps_source_id = 0;
+    }
+    if (xs->caps_dpy) {
+        XCloseDisplay((Display *)xs->caps_dpy);
+        xs->caps_dpy = NULL;
+    }
+}
+
 int lyy_xim_init(XimServer *xs, App *app)
 {
     memset(xs, 0, sizeof(*xs));
@@ -1185,11 +1288,13 @@ int lyy_xim_init(XimServer *xs, App *app)
     xs->xcb_source_id = g_unix_fd_add(xcb_get_file_descriptor(xs->conn),
                                       G_IO_IN | G_IO_ERR | G_IO_HUP,
                                       on_xcb_ready, app);
+    caps_watch_init(xs, app);
     return 0;
 }
 
 void lyy_xim_shutdown(XimServer *xs)
 {
+    caps_watch_shutdown(xs);
     if (xs->xcb_source_id) {
         g_source_remove(xs->xcb_source_id);
         xs->xcb_source_id = 0;
@@ -1228,6 +1333,8 @@ void lyy_xim_set_trigger(App *app, int to_chinese)
     }
     hide_preedit(app);
     lyy_app_update_mode_ui(app);
+    /* 状态提示:中英切换在指针旁即时反馈(候选条通道) */
+    lyy_state_toast(app, to_chinese ? "中文" : "英文");
 }
 
 /* 托盘"启用/停用":停用后一切按键直通,焦点恢复时不再自动转中文 */
@@ -1247,6 +1354,7 @@ void lyy_xim_set_enabled(App *app, int enabled)
             xcb_im_preedit_end(app->xim.im, app->xim.focused_ic);
         hide_preedit(app);
         lyy_app_update_mode_ui(app);
+        lyy_state_toast(app, "输入法已停用");
         lyy_log(&app->log, "输入法已停用 → 全部按键直通");
     }
 }

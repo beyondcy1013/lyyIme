@@ -10,6 +10,7 @@
 #include "common.h"
 #include "keysym_map.h"
 #include "skin.h"
+#include "xim_server.h" /* lyy_state_toast(状态提示) */
 
 /* ---- 构建控件状态 ←→ 配置 ---- */
 static void ui_from_config(SettingsUi *ui, const LyyConfig *c)
@@ -409,6 +410,9 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
         return;
     }
     lyy_global_shot_commit(change);
+    /* 输入方案(纯拼音↔五笔/拼音混输)变化:保存生效后在指针旁提示 */
+    int pinyin_changed = app->config.pinyin_only != c.pinyin_only;
+    int pinyin_on = c.pinyin_only;
     app->config = c;
     /* 开机自启:落/删 ~/.config/autostart/lyyime-xim.desktop */
     if (lyy_config_apply_autostart(c.autostart) != 0)
@@ -437,6 +441,10 @@ static void on_ok(GtkWidget *widget, gpointer user_data)
             c.menu_trigger_disabled);
     lyy_log(&app->log, "设置已保存:skin=%s", c.skin);
     gtk_widget_hide(ui->window);
+    /* 输入方案切换的状态提示(与 Shift 中英切换同通道,贴指针 4s) */
+    if (pinyin_changed)
+        lyy_state_toast(app, pinyin_on ? "已切换:纯拼音"
+                                       : "已切换:五笔/拼音混输");
 }
 
 static void on_cancel(GtkWidget *widget, gpointer user_data)
